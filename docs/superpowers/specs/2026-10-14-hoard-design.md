@@ -169,6 +169,8 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   under GitHub's download rate limit). `head` (HEAD and the batch query) is one bounded range
   read of the first 4104 bytes and never reads the body.
 - `list` and `delete` are only needed for R2 cleanup; `ghac` does not support them (GitHub evicts).
+- S3 uploads buffer at most one 8 MiB multipart part per request; no artifact is ever held fully
+  in memory.
 - S3/R2 requests are time-bounded (60 s per operation, 15 s per read/write IO step); a timeout is a
   storage error like any other (GET/HEAD miss, PUT counts `put_errors`), so a hung connection never
   stalls the build.
@@ -191,7 +193,9 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
 Rule ID `hoard-<prefix with / replaced by ->` (e.g. `hoard-cache-`), filter = `r2-prefix`,
 `Expiration.Days = max-age-days`, `AbortIncompleteMultipartUpload.DaysAfterInitiation = 1`.
 Other rules are written back with every field the S3 lifecycle model defines; elements unknown
-to `aws-sdk-s3` would be lost on the Put.
+to `aws-sdk-s3` would be lost on the Put. Two prefixes can map to the same rule ID (`a-b/` and `a/b/` both
+give `hoard-a-b-`), so do not use both in one bucket: their servers would keep replacing each
+other's rule.
 
 On `serve` startup with `storage=r2`:
 
