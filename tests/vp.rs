@@ -200,8 +200,11 @@ async fn check_concurrent_saves(b: &VpBackend) {
     );
     let keys = [saved_key(ra.unwrap()), saved_key(rb.unwrap())];
     assert_ne!(keys[0], keys[1]);
-    for key in &keys {
-        assert!(archive_exists(b, key).await, "{key} missing");
+    // On GitHub both stay; on r2/fs the second save may delete the first as replaced.
+    if matches!(b, VpBackend::Github(_)) {
+        for key in &keys {
+            assert!(archive_exists(b, key).await, "{key} missing");
+        }
     }
     let (_ws, dir) = empty_target();
     match vp_restore(b, V, LINUX, &dir).await.unwrap() {
@@ -210,6 +213,27 @@ async fn check_concurrent_saves(b: &VpBackend) {
     }
     let db = std::fs::read(dir.join("db")).unwrap();
     assert!(db == b"job-a" || db == b"job-b");
+}
+
+/// r2/fs: once the pointer names the new archive, the one it named before is deleted.
+async fn check_replaced_archive_is_deleted(b: &VpBackend) {
+    let (_a, a) = cache_with(&[("db", b"old")]);
+    let (_b, bdir) = cache_with(&[("db", b"new")]);
+    let old = saved_key(vp_save(b, V, LINUX, "20-1", &a, BIG).await.unwrap());
+    // Saving the same key again keeps it (it is the new archive too).
+    assert_eq!(
+        saved_key(vp_save(b, V, LINUX, "20-1", &a, BIG).await.unwrap()),
+        old
+    );
+    assert!(archive_exists(b, &old).await);
+    let new = saved_key(vp_save(b, V, LINUX, "21-1", &bdir, BIG).await.unwrap());
+    assert!(archive_exists(b, &new).await);
+    assert!(!archive_exists(b, &old).await, "{old} was not deleted");
+    let (_ws, dir) = empty_target();
+    match vp_restore(b, V, LINUX, &dir).await.unwrap() {
+        RestoreOutcome::Restored { key, .. } => assert_eq!(key, new),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// True when the archive `key` is stored (exact key, no restore-key fallback).
@@ -259,6 +283,10 @@ fs_case!(fs_too_large_skipped, check_too_large_is_skipped);
 fs_case!(fs_empty_skipped, check_empty_is_skipped);
 fs_case!(fs_concurrent_saves, check_concurrent_saves);
 fs_case!(fs_existing_key_is_success, check_existing_key_is_success);
+fs_case!(
+    fs_replaced_archive_deleted,
+    check_replaced_archive_is_deleted
+);
 
 // ---- store-backend specifics ----
 
@@ -313,6 +341,22 @@ async fn pointer_outside_the_os_prefix_is_ignored() {
             "{bad}"
         );
     }
+}
+
+/// A pointer naming something outside the OS prefix is never deleted as "replaced".
+#[tokio::test]
+async fn replaced_pointer_outside_the_prefix_is_not_deleted() {
+    let root = tempfile::tempdir().unwrap();
+    let (b, store) = fs_backend(root.path());
+    let (_s, src) = cache_with(&[("db", b"mac")]);
+    let mac = saved_key(vp_save(&b, V, MAC, "1-1", &src, BIG).await.unwrap());
+    store
+        .op
+        .write("cache/vp/v1/linux-x64/latest", mac.clone())
+        .await
+        .unwrap();
+    vp_save(&b, V, LINUX, "2-1", &src, BIG).await.unwrap();
+    assert!(store.head(&mac).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -379,6 +423,10 @@ s3_case!(s3_restore_replaces, check_restore_replaces_the_directory);
 s3_case!(s3_too_large_skipped, check_too_large_is_skipped);
 s3_case!(s3_concurrent_saves, check_concurrent_saves);
 s3_case!(s3_existing_key_is_success, check_existing_key_is_success);
+s3_case!(
+    s3_replaced_archive_deleted,
+    check_replaced_archive_is_deleted
+);
 
 // ---- GitHub cache (mock Twirp + blob server) ----
 

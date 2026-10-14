@@ -160,7 +160,13 @@ takes the newest archive there:
   whose content is the full archive key. `vp restore` reads the pointer, then the archive; a
   missing pointer, a pointer naming a key outside that prefix, or a missing archive (pruned or
   expired) is `no cache found`. Concurrent saves both succeed; the pointer ends on one of them.
-  The archives live under the prefix, so the lifecycle rule and the size cap (§7) bound them too.
+  Only the archive the pointer names can be restored, so after the archive upload `vp save`
+  reads the pointer, overwrites it, and then deletes the archive it named before (when that is
+  another key under the same prefix); a failed delete is only a logged warning. A concurrent
+  `vp restore` that read the old pointer just before gets `no cache found` (a miss), and two
+  saves racing on the pointer can leave one archive unreferenced until the lifecycle rule or the
+  size cap removes it. The archives live under the prefix, so the lifecycle rule and the size
+  cap (§7) bound them too.
 - Unchanged caches are not saved again: a successful `vp restore` writes a fingerprint of the
   restored directory (SHA-256 over the sorted relative path, size and mtime of its regular
   files; contents are not read) to `<RUNNER_TEMP, else ./.hoard>/hoard-vp-<os>-<arch>.fingerprint`;
@@ -172,7 +178,9 @@ takes the newest archive there:
   subsets, the next run restores only one leg's task cache (the other legs' tasks miss once).
 - github: through the cache service v2 directly (§6.4), not OpenDAL: restore asks
   `GetCacheEntryDownloadURL` with `key` and `restore_keys` both the prefix
-  `hoard/vp/{cache_version}/{os}-{arch}/`; GitHub returns the newest matching entry.
+  `hoard/vp/{cache_version}/{os}-{arch}/`; GitHub returns the newest matching entry. Entries
+  are immutable and cannot be deleted through the runtime API; GitHub evicts unused ones, so
+  here the unchanged-save skip above is what keeps superseded archives from piling up.
 
 The archive is a tar of the directory's contents (relative paths; file bytes, mtimes and unix
 permission bits kept; regular files, directories and symlinks only), zstd level 3 with a frame

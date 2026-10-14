@@ -247,6 +247,20 @@ async fn restore_into(
     Ok(())
 }
 
+/// The archive key a pointer object names, if it is an archive under `pfx` (this OS and cache
+/// version); anything else is ignored with a warning.
+fn pointed_key(pfx: &str, raw: &[u8]) -> Option<String> {
+    let key = String::from_utf8_lossy(raw).trim().to_string();
+    let valid = key
+        .strip_prefix(pfx)
+        .is_some_and(|run| crate::config::valid_segment(run) && run != POINTER);
+    if !valid {
+        warn!(pointer = %key, "ignoring a Vite+ cache pointer outside {pfx}");
+        return None;
+    }
+    Some(key)
+}
+
 /// Restores the newest archive for `os_arch` into `dir`, replacing what is there. No archive
 /// (a new branch, another OS, a pointer to a deleted archive) is `NotFound`.
 pub async fn vp_restore(
@@ -263,15 +277,9 @@ pub async fn vp_restore(
                 Err(e) if e.kind() == ErrorKind::NotFound => return Ok(RestoreOutcome::NotFound),
                 Err(e) => return Err(e.into()),
             };
-            let key = String::from_utf8_lossy(&raw).trim().to_string();
-            // The pointer may only name an archive of this OS and cache version.
-            let valid = key
-                .strip_prefix(&pfx)
-                .is_some_and(|run| crate::config::valid_segment(run) && run != POINTER);
-            if !valid {
-                warn!(pointer = %key, "ignoring a Vite+ cache pointer outside {pfx}");
+            let Some(key) = pointed_key(&pfx, &raw) else {
                 return Ok(RestoreOutcome::NotFound);
-            }
+            };
             match store.get(&key).await? {
                 GetOutcome::Hit(h, body) => {
                     restore_into(dir, exact_len(body, h.size)).await?;
@@ -351,10 +359,21 @@ pub async fn vp_save(
             };
             let body = file_stream(tokio::fs::File::open(&spool.0).await?);
             store.put(&key, &header, body).await?; // an existing key is success
-            store
-                .op
-                .write(&format!("{pfx}{POINTER}"), key.clone())
-                .await?;
+            let pointer = format!("{pfx}{POINTER}");
+            // Read just before the overwrite, so a save that moved the pointer meanwhile is seen.
+            let replaced = match store.op.read(&pointer).await {
+                Ok(raw) => pointed_key(&pfx, &raw.to_vec()),
+                Err(_) => None,
+            };
+            store.op.write(&pointer, key.clone()).await?;
+            // Only the archive the pointer names can be restored: the one it named before is
+            // dead weight under the size cap. A restore that read the old pointer just now
+            // gets `no cache found`.
+            if let Some(old) = replaced.filter(|old| *old != key)
+                && let Err(e) = store.delete(&old).await
+            {
+                warn!(key = %old, error = %e, "cannot delete the replaced Vite+ cache archive");
+            }
             Ok(SaveOutcome::Saved { key, bytes: size })
         }
         VpBackend::Github(g) => {
