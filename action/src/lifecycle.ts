@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import * as actionsCore from "@actions/core";
 import { BinaryDownloadError, ensureBinary } from "./binary.js";
 import { CHECKSUMS } from "./checksums.generated.js";
@@ -191,7 +191,10 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     const workspace = env.GITHUB_WORKSPACE || process.cwd();
     let vp: VpState | undefined;
     if (d.detectTools(workspace).vp) {
-      if (!existsSync(join(workspace, "node_modules"))) {
+      // An absolute VITE_CACHE_PATH (the only kind hoard uses) is outside node_modules, so an
+      // install cannot drop it.
+      const cacheOutside = isAbsolute(env.VITE_CACHE_PATH ?? "");
+      if (!cacheOutside && !existsSync(join(workspace, "node_modules"))) {
         const w =
           "Vite+ found but node_modules is missing: put the hoard step after the dependency install, " +
           "or the install may drop the restored task cache";
@@ -330,6 +333,12 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
       // The summary line says `Upload errors: N` too (§9); this makes it a visible annotation.
       problems = true;
       core.warning(`hoard: ${putErrors} uploads failed; see the hoard log`);
+    }
+
+    const throttled = stats?.throttled ?? 0;
+    if (throttled > 0) {
+      // Rate limiting is the main GitHub-storage failure mode; the summary has the details.
+      core.warning(`GitHub cache throttled ${throttled} uploads; see the summary`);
     }
 
     if (!shut.ok) {

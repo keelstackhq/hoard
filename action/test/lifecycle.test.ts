@@ -427,6 +427,25 @@ describe("main", () => {
     expect(d.runVp).toHaveBeenCalled();
   });
 
+  test("Vite+ with an absolute VITE_CACHE_PATH: no node_modules warning", async () => {
+    const f = fakeCore();
+    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true })) });
+    d.env.GITHUB_WORKSPACE = join(dir, "no-install");
+    d.env.VITE_CACHE_PATH = join(dir, "vite-cache");
+    await runMain(d);
+    expect(f.of("warning")).toEqual([]);
+    expect(d.runVp).toHaveBeenCalled();
+  });
+
+  test("Vite+ with a relative VITE_CACHE_PATH still warns (hoard ignores it)", async () => {
+    const f = fakeCore();
+    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true })) });
+    d.env.GITHUB_WORKSPACE = join(dir, "no-install");
+    d.env.VITE_CACHE_PATH = "cache";
+    await runMain(d);
+    expect(f.of("warning")).toHaveLength(1);
+  });
+
   test("a failed Vite+ restore is a warning; main still succeeds", async () => {
     const f = fakeCore();
     const d = deps(f, {
@@ -610,6 +629,20 @@ describe("post", () => {
     expect(f.of("warning")).toEqual([["hoard: 4 uploads failed; see the hoard log"]]);
     expect(f.of("startGroup")).toEqual([["hoard log"]]);
     expect(f.of("setOutput")).toContainEqual(["misses", "5"]);
+  });
+
+  test("GitHub throttling is a warning pointing at the summary", async () => {
+    const f = fakeCore({}, await state());
+    const stats = { hits: 1, misses: 0, put_errors: 0, time_saved_ms: 0, throttled: 4 };
+    await runPost(deps(f, { shutdownServer: vi.fn(async () => ({ ok: true, stats })) }));
+    expect(f.of("warning")).toContainEqual(["GitHub cache throttled 4 uploads; see the summary"]);
+  });
+
+  test("no throttling: no throttle warning", async () => {
+    const f = fakeCore({}, await state());
+    const stats = { hits: 1, misses: 0, put_errors: 0, time_saved_ms: 0, throttled: 0 };
+    await runPost(deps(f, { shutdownServer: vi.fn(async () => ({ ok: true, stats })) }));
+    expect(f.of("warning").flat().join("\n")).not.toContain("throttled");
   });
 
   test("the shutdown reply's final stats win over the earlier ones", async () => {

@@ -372,11 +372,30 @@ describe("shutdownServer and getStats", () => {
   test("shutdownServer returns the final stats from the reply body", async () => {
     const port = await fakeHoard((_req, res) => {
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ hits: 1, misses: 2, puts: 3, put_errors: 4, time_saved_ms: 5 }));
+      res.end(
+        JSON.stringify({
+          hits: 1,
+          misses: 2,
+          puts: 3,
+          put_errors: 4,
+          time_saved_ms: 5,
+          throttled: 6,
+        }),
+      );
     });
     expect(await shutdownServer(port, "tok")).toEqual({
       ok: true,
-      stats: { hits: 1, misses: 2, put_errors: 4, time_saved_ms: 5 },
+      stats: { hits: 1, misses: 2, put_errors: 4, time_saved_ms: 5, throttled: 6 },
+    });
+  });
+
+  test("stats without throttled (an older hoard) read it as 0", async () => {
+    const port = await fakeHoard((_req, res) => {
+      res.end(JSON.stringify({ hits: 1, misses: 2, put_errors: 0, time_saved_ms: 5 }));
+    });
+    expect(await shutdownServer(port, "tok")).toEqual({
+      ok: true,
+      stats: { hits: 1, misses: 2, put_errors: 0, time_saved_ms: 5, throttled: 0 },
     });
   });
 

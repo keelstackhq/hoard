@@ -80,7 +80,8 @@ summary.
   a missing R2 lifecycle rule with `r2-lifecycle: verify`).
 - **Storage errors never fail the build.** A failed read is a miss and a failed upload is
   skipped. If uploads failed, the action shows a warning (`hoard: N uploads failed`) and the job
-  summary says `Upload errors: N`, so a broken cache does not look like a cold one.
+  summary says `Upload errors: N`, so a broken cache does not look like a cold one. When the
+  GitHub cache answered 429, the action warns `GitHub cache throttled N uploads; see the summary`.
 - **Vite+.** When the root `package.json` (at `GITHUB_WORKSPACE`, the checkout root; a
   repository checked out with `actions/checkout`'s `path:` is not looked at) depends on `vite-plus`, main restores Vite Task's
   cache directory (`node_modules/.vite/task-cache`, or `VITE_CACHE_PATH` when absolute) from the
@@ -91,7 +92,8 @@ summary.
   than `vp-max-size` is not saved (run `vp cache clean`); restore and save problems are warnings
   and never fail the build. With Vite+, put the hoard step after the dependency install (as the
   Vite+ docs do for `actions/cache`): an install can recreate `node_modules` and drop the
-  restored cache. Matrix legs save one archive each; the next run restores the newest one, so
+  restored cache. An absolute `VITE_CACHE_PATH` is used only when it is set at job or workflow
+  level, where the hoard step sees it. Matrix legs save one archive each; the next run restores the newest one, so
   legs that run different tasks share only one leg's task cache.
 
   ```yaml

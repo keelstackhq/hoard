@@ -176,6 +176,8 @@ export interface Stats {
   /** Uploads that failed with a storage error (the build went on; §5). */
   put_errors: number;
   time_saved_ms: number;
+  /** 429 responses from the GitHub cache (§9); 0 when hoard did not report it. */
+  throttled: number;
 }
 
 /** `x` as {@link Stats} when it has the four counters as numbers, else undefined. */
@@ -189,6 +191,7 @@ export function parseStats(x: unknown): Stats | undefined {
     misses: o.misses as number,
     put_errors: o.put_errors as number,
     time_saved_ms: o.time_saved_ms as number,
+    throttled: typeof o.throttled === "number" ? o.throttled : 0,
   };
 }
 

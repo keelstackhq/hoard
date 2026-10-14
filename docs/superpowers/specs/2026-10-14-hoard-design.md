@@ -463,8 +463,10 @@ main:
    checkout root) and `--vp-max-size` (input `vp-max-size`, default `2GB`, validated like the
    binary's sizes so a typo fails the step), at most 120 s; at the limit the action sends
    SIGTERM (hoard cleans up and exits 0) and SIGKILL 5 s later. When `node_modules` is missing
-   at the root, main warns `Vite+ found but node_modules is missing: put the hoard step after
-   the dependency install, or the install may drop the restored task cache` (and still restores). Its line is logged (`hoard vp restore: …`); a
+   at the root and `VITE_CACHE_PATH` is not absolute, main warns `Vite+ found but node_modules
+   is missing: put the hoard step after the dependency install, or the install may drop the
+   restored task cache` (and still restores). hoard sees `VITE_CACHE_PATH` only when it is set
+   at job or workflow level (or on the hoard step), not when it is set on a later `vp run` step. Its line is logged (`hoard vp restore: …`); a
    `warning:` line, a non-zero exit, a timeout or a spawn error becomes a `core.warning` and a
    settings warning (job summary) and never fails the step. The args and the restore line are
    saved as state `vp`. Restore runs in main, so with Vite+ the hoard step belongs after the
@@ -486,7 +488,9 @@ alive but not answering). Set the outputs (`hits`, `misses`, `time-saved-ms`) fr
 the shutdown reply, or from the earlier stats when the reply body is missing or not stats JSON
 (`0` when neither is available); when `put_errors > 0`, warn
 `hoard: N uploads failed; see the hoard log` (a broken storage must not look like a cold cache;
-the final stats include background uploads that failed or were dropped) and print the log. Then append the summary
+the final stats include background uploads that failed or were dropped) and print the log;
+when `throttled > 0`, warn `GitHub cache throttled N uploads; see the summary` (rate limiting is
+the main GitHub-storage failure mode, and otherwise only the summary line shows it). Then append the summary
 file, if any, plus one `> ⚠️ <warning>` line per warning to `$GITHUB_STEP_SUMMARY`, and print the
 log only on a problem or with `RUNNER_DEBUG=1`. A printed log (main or post) is wrapped in
 `::stop-commands::<random>` … `::<random>::`, so no log line can act as a workflow command.
