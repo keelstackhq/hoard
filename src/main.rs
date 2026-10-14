@@ -6,6 +6,7 @@ use hoard::doctor::run_doctor;
 use hoard::r2::prune::run_prune;
 use hoard::redact::redacted;
 use hoard::serve::{env_for, run_serve};
+use hoard::vp::cli::{VpCommand, prepare};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -29,6 +30,9 @@ enum Command {
     Prune(PruneArgs),
     /// Check storage credentials, bucket access and the R2 lifecycle rule.
     Doctor(ServeArgs),
+    /// Restore or save the Vite+ task-cache directory.
+    #[command(subcommand)]
+    Vp(VpCommand),
 }
 
 #[derive(Args)]
@@ -87,6 +91,16 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 .enable_all()
                 .build()?
                 .block_on(run_doctor(&cfg))
+        }
+        Command::Vp(cmd) => {
+            let job = prepare(cmd)?;
+            init_logging();
+            let line = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(job.run())?;
+            println!("{line}");
+            Ok(())
         }
     }
 }

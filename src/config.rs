@@ -83,7 +83,7 @@ fn valid_prefix(p: &str) -> bool {
 
 /// One key segment: `[A-Za-z0-9._-]+`, not `.` or `..`. Used for r2-prefix segments and for
 /// cache-version, which become key path segments (on fs, `..` would leave fs-root).
-fn valid_segment(seg: &str) -> bool {
+pub fn valid_segment(seg: &str) -> bool {
     !seg.is_empty()
         && seg != "."
         && seg != ".."

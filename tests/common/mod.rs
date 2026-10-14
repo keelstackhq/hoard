@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod failing_layer;
+pub mod gha_mock;
 pub mod lifecycle_proxy;
 pub mod store_checks;
 

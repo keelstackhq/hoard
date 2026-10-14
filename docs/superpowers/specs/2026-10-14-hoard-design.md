@@ -79,7 +79,7 @@ One Rust crate (`hoard`, lib + bin) and one small TypeScript action in `action/`
 | `hoard env` | Print `export` lines for a running server (reads the port file and token file). |
 | `hoard prune` | Enforce `max-size` on R2 (or fs) now (ignores the 24 h throttle with `--force`); prints `pruned N of M objects, freed X, Y remain (max Z)` or `skipped: last prune < 24 h ago (use --force)`. With `storage=github` it fails: `prune is only for r2/fs storage; GitHub evicts old cache entries itself`. |
 | `hoard doctor` | Check storage credentials, bucket access and the R2 lifecycle rule; print fixes. The access check writes, reads and deletes `{prefix}_hoard/doctor`, also with `mode=read`. With `storage=github` it only checks that the GitHub Actions cache environment is complete and prints `✓ GitHub cache environment`; it never writes (entries are immutable and count against the quota). |
-| `hoard vp restore` / `vp save` | Restore or save the Vite+ task-cache directory (milestone 3). |
+| `hoard vp restore` / `vp save` | Restore or save the Vite+ task-cache directory (milestone 3; §6.1). Same storage flags as `serve`, plus `--workspace <dir>` (default `.`), `--os-arch` (default this machine in Node-style names: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `windows-x64`), `--run-key` (default `${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}`, else `local-<unix secs>-<random>`) and `--vp-max-size`. `os-arch` and `run-key` are one key segment (`[A-Za-z0-9._-]`, not `.`, `..` or `latest`). Prints one line: `restored <key> (<size>)`, `no cache found`, `saved <key> (<size>)`, ``skipped: the task cache is <size>, larger than vp-max-size (<max>); run `vp cache clean` ``, `skipped: cache directory is empty or missing`, `skipped: mode=off`, `skipped: mode=read (nothing is written)` (save), `skipped: no-reads (the cache is not read)` (restore), or on a storage or disk error `warning: Vite+ cache <save\|restore> failed (<redacted error>); the build continues without it`. All of these exit 0; only setup errors (bad flags, missing GitHub env) exit non-zero. |
 
 ### 4.2 Configuration
 
@@ -105,6 +105,8 @@ secrets as `""`).
 | `r2-lifecycle` | `auto` | `auto` \| `verify` \| `manual`; see §7.1 |
 | `max-age-days` | `7` | R2 lifecycle expiry; 1–36500 |
 | `max-size` | `5GB` | R2 size cap; accepts `KB`, `MB`, `GB`, `TB` (powers of 1000) |
+| `vp-max-size` | `2GB` | `vp save` only: when the regular files of the task-cache directory add up to more, the save is skipped with a hint to run `vp cache clean` (hoard never edits Vite+'s SQLite cache). Same units as `max-size` |
+| `workspace`, `os-arch`, `run-key` | `.`, this machine, run id | `vp restore` / `vp save` only (§4.1) |
 
 R2 endpoint: `https://<account_id>.r2.cloudflarestorage.com` unless `r2-endpoint` overrides it,
 region `auto`, path-style addressing. Only the configured keys are used: credentials and config
@@ -142,6 +144,33 @@ printed storage error is redacted first (the values of the query parameters `sig
 
 `{prefix}{tool}/{cache_version}/{hash}` — e.g. `cache/turbo/v1/9f2c…`. `tool` is `turbo` or `vp`.
 For `github` storage the prefix is `hoard/` (GitHub keys are flat strings; max 512 chars).
+
+Vite+ (milestone 3). Vite+ remote caching is unreleased upstream, so hoard archives Vite Task's
+cache directory: `VITE_CACHE_PATH` when it is absolute, else `node_modules/.vite/task-cache`
+under the workspace root (the default of Vite+ 1.2.0). One archive per run:
+`{prefix}vp/{cache_version}/{os}-{arch}/{run_key}`, e.g. `cache/vp/v1/linux-x64/123456-1`.
+Task-cache paths are OS-specific, so restore only ever looks at the same `{os}-{arch}`, and
+takes the newest archive there:
+
+- r2/fs: `vp save` writes the archive as an HRD1 envelope (if-not-exists; an existing key is
+  success), then overwrites the pointer object `{prefix}vp/{cache_version}/{os}-{arch}/latest`,
+  whose content is the full archive key. `vp restore` reads the pointer, then the archive; a
+  missing pointer, a pointer naming a key outside that prefix, or a missing archive (pruned or
+  expired) is `no cache found`. Concurrent saves both succeed; the pointer ends on one of them.
+  Matrix jobs of one run on the same OS share the run key: the first archive stays. The
+  archives live under the prefix, so the lifecycle rule and the size cap (§7) bound them too.
+- github: through the cache service v2 directly (§6.4), not OpenDAL: restore asks
+  `GetCacheEntryDownloadURL` with `key` and `restore_keys` both the prefix
+  `hoard/vp/{cache_version}/{os}-{arch}/`; GitHub returns the newest matching entry.
+
+The archive is a tar of the directory's contents (relative paths; file bytes, mtimes and unix
+permission bits kept; regular files, directories and symlinks only), zstd level 3 with a frame
+checksum. `vp save` first sums the regular files' sizes against `vp-max-size`, then spools the
+archive to a temp file (its size goes into the envelope) and uploads it from there. `vp
+restore` streams the archive into a new directory next to the target and only then swaps it in
+place of the target, so a failed or partial restore leaves the old directory as it was.
+Extraction rejects absolute paths, `..` components, symlinks or hardlinks whose target leaves
+the directory, and device or fifo entries.
 
 ### 6.2 Envelope format
 
@@ -197,6 +226,17 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   the server is not GHES, else v1) and the endpoint (v2: `ACTIONS_RESULTS_URL`; v1:
   `ACTIONS_CACHE_URL`, else `ACTIONS_RESULTS_URL`).
 - Cache entries are versioned `hoard-{cache_version}`, so different cache versions never collide.
+- Vite+ archives (§6.1) use a small Twirp JSON client (`src/vp/gha_twirp.rs`) instead of OpenDAL:
+  `CreateCacheEntry` → Put Block (32 MiB blocks, base64 block ids of equal length, at most one
+  block in memory) and Put Block List on the signed upload URL (`x-ms-version: 2025-01-05`) →
+  `FinalizeCacheEntryUpload` with the size; restore is `GetCacheEntryDownloadURL` with
+  `restore_keys` and one streaming GET. Their entry version is the SHA-256 (hex) of
+  `hoard-vp-{cache_version}`, so save and restore agree. This client always talks to the v2
+  service at `ACTIONS_RESULTS_URL`, also when `ACTIONS_CACHE_SERVICE_V2` is unset (the v1 service
+  is being retired). The bearer token goes only to the Twirp service, never to blob URLs; no
+  error or log line contains a URL. `CreateCacheEntry` `ok: false` (or HTTP 409) means the key
+  exists: success. A `429` (or a blob `503`) is a storage error like any other: `vp` warns
+  and exits 0.
 - Rate limits: 200 uploads/min, 1,500 downloads/min per repo. On `429`, pause all uploads for
   `Retry-After` seconds (default 60, at most 600; a pause is only ever extended), count `rate_limited`, keep
   serving reads. One warning is logged when the pause starts, not one per skipped upload.

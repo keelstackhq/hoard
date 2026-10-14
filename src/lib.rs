@@ -9,3 +9,4 @@ pub mod serve;
 pub mod server;
 pub mod stats;
 pub mod store;
+pub mod vp;

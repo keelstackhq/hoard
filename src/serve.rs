@@ -25,7 +25,7 @@ use crate::store::{Store, StoreError, build_operator};
 const FS_PREFIX: &str = "cache/";
 
 /// Key prefix used by the GitHub cache backend (spec §6.1).
-const GITHUB_PREFIX: &str = "hoard/";
+pub const GITHUB_PREFIX: &str = "hoard/";
 
 /// Upper bound for the shutdown prune: a slow bucket must not hold the CI job hostage. The
 /// marker is only written on completion, so an interrupted prune runs again next time.
