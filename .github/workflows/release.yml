@@ -1,0 +1,198 @@
+name: release
+
+# Builds hoard for the five targets of spec §10, bakes their SHA-256 checksums into the action,
+# rebuilds action/dist, then commits, tags and publishes the GitHub release.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, X.Y.Z or X.Y.Z-pre (must equal Cargo.toml)"
+        required: true
+        type: string
+      draft:
+        description: "Create the GitHub release as a draft"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate version input
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "branch" ]; then
+            echo "::error::run this workflow from a branch (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); the release commit is pushed back to it"
+            exit 1
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::version '$VERSION' is not semver: use X.Y.Z or X.Y.Z-pre, without a leading v"
+            exit 1
+          fi
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ "$cargo_version" != "$VERSION" ]; then
+            echo "::error::version input '$VERSION' does not match Cargo.toml version '$cargo_version': bump Cargo.toml (and Cargo.lock) on this branch first"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists: pick a new version"
+            exit 1
+          fi
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            zigbuild: true
+            strip: strip
+            smoke: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            zigbuild: true
+            strip: aarch64-linux-gnu-strip
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            strip: strip
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            strip: strip
+            smoke: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            exe: .exe
+            smoke: true
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # aws-lc-sys (rustls' crypto provider) compiles C; on Linux zig cc is the C compiler and
+      # linker for musl. Its pregenerated bindings cover all five targets, so no cmake/bindgen.
+      - if: matrix.zigbuild
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - if: matrix.zigbuild
+        run: cargo install --locked cargo-zigbuild@0.23.4
+      - if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
+      # aws-lc-sys assembles its x86_64 Windows code with NASM; install it rather than use the
+      # crate's prebuilt NASM objects.
+      - if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+      - name: Build
+        run: |
+          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+            cargo zigbuild --locked --release --target "${{ matrix.target }}"
+          else
+            cargo build --locked --release --target "${{ matrix.target }}"
+          fi
+      - name: Strip
+        if: runner.os != 'Windows'
+        run: ${{ matrix.strip }} "target/${{ matrix.target }}/release/hoard"
+      # Only where the runner can execute the binary natively.
+      - name: Smoke test
+        if: matrix.smoke
+        run: '"target/${{ matrix.target }}/release/hoard${{ matrix.exe }}" --help'
+      - name: Package
+        run: |
+          mkdir -p dist-assets
+          tar -czf "dist-assets/hoard-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" "hoard${{ matrix.exe }}"
+          tar -tzf "dist-assets/hoard-${{ matrix.target }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoard-${{ matrix.target }}
+          path: dist-assets/hoard-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hoard-*
+          path: dist-assets
+          merge-multiple: true
+      - name: Bake checksums
+        run: |
+          ls -l dist-assets
+          node scripts/write-checksums.mjs dist-assets "$VERSION"
+          cat action/src/checksums.generated.ts
+      - name: Build action
+        run: pnpm --dir action install --frozen-lockfile && pnpm --dir action build
+      - name: Check action/dist size
+        run: |
+          size=$(du -sb action/dist | cut -f1)
+          echo "action/dist is $size bytes (limit 204800)"
+          if [ "$size" -gt 204800 ]; then
+            echo "::error::action/dist is $size bytes, over the 200 KB limit: trim dependencies or bundle settings in action/"
+            exit 1
+          fi
+      - name: Commit and tag
+        env:
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add action/src/checksums.generated.ts action/dist
+          git commit -m "chore(release): v$VERSION"
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/v$VERSION"
+          # Move the major tag (v1 → this release) so `uses: …@v1` picks it up. Only for stable,
+          # non-draft releases; this is the only tag ever force-pushed.
+          case "$VERSION" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          if [ "$prerelease" = "false" ] && [ "$DRAFT" != "true" ]; then
+            major="v${VERSION%%.*}"
+            git tag -f -a "$major" -m "$major → v$VERSION"
+            git push --force origin "refs/tags/$major"
+          fi
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          flags=()
+          if [ "$DRAFT" = "true" ]; then flags+=(--draft); fi
+          case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "v$VERSION" dist-assets/hoard-*.tar.gz \
+            --verify-tag --title "v$VERSION" --generate-notes "${flags[@]}"
