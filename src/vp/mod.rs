@@ -19,7 +19,7 @@ use futures::{Stream, StreamExt};
 use opendal::ErrorKind;
 use tracing::warn;
 
-pub use archive::{archive_dir, dir_size, extract_archive, extract_stream};
+pub use archive::{Archived, archive_dir, dir_size, extract_archive, extract_stream};
 pub use gha_twirp::{GhaTwirp, vp_version};
 
 use crate::envelope::Header;
@@ -105,7 +105,12 @@ pub enum RestoreOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveOutcome {
     /// `bytes` is the archive size. An archive that already existed under `key` is success.
-    Saved { key: String, bytes: u64 },
+    /// `links_left_out` counts symlinks not archived (absolute or with `..`).
+    Saved {
+        key: String,
+        bytes: u64,
+        links_left_out: usize,
+    },
     /// The directory's files add up to `bytes`, more than `vp-max-size`.
     SkippedTooLarge { bytes: u64 },
     /// The directory is missing or has no files.
@@ -343,7 +348,10 @@ pub async fn vp_save(
     let mut file = tokio::fs::File::create(&spool.0)
         .await
         .with_context(|| format!("cannot create {}", spool.0.display()))?;
-    let size = archive_dir(dir, &mut file)
+    let Archived {
+        bytes: size,
+        links_left_out,
+    } = archive_dir(dir, &mut file)
         .await
         .context("cannot archive the Vite+ cache")?;
     drop(file);
@@ -374,7 +382,11 @@ pub async fn vp_save(
             {
                 warn!(key = %old, error = %e, "cannot delete the replaced Vite+ cache archive");
             }
-            Ok(SaveOutcome::Saved { key, bytes: size })
+            Ok(SaveOutcome::Saved {
+                key,
+                bytes: size,
+                links_left_out,
+            })
         }
         VpBackend::Github(g) => {
             let key = format!(
@@ -386,7 +398,11 @@ pub async fn vp_save(
                 let sent = g.upload_blocks(&url, &spool.0).await?;
                 g.finalize(&key, &version, sent).await?;
             }
-            Ok(SaveOutcome::Saved { key, bytes: size })
+            Ok(SaveOutcome::Saved {
+                key,
+                bytes: size,
+                links_left_out,
+            })
         }
     }
 }

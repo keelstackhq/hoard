@@ -679,6 +679,30 @@ fn binary_save_unchanged_since_restore_is_skipped() {
     assert!(out.starts_with("saved "), "{out}");
 }
 
+/// Symlinks the archive cannot carry (absolute or with `..`) are counted in the save line.
+#[cfg(unix)]
+#[test]
+fn binary_save_line_counts_symlinks_left_out() {
+    let store = tempfile::tempdir().unwrap();
+    let fs_root = store.path().to_str().unwrap().to_string();
+    let (ws, dir) = cache_with(&[("db", b"x")]);
+    std::os::unix::fs::symlink("/etc/hostname", dir.join("abs")).unwrap();
+    std::os::unix::fs::symlink("../db", dir.join("up")).unwrap();
+    std::os::unix::fs::symlink("db", dir.join("ok")).unwrap();
+    let (code, out, err) = run(fs_cmd(ws.path(), "save", &fs_root));
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("saved "), "{out}");
+    assert!(out.trim_end().ends_with("; 2 symlinks left out)"), "{out}");
+
+    std::fs::remove_file(dir.join("up")).unwrap();
+    let (_, out, _) = run(fs_cmd(ws.path(), "save", &fs_root));
+    assert!(out.trim_end().ends_with("; 1 symlink left out)"), "{out}");
+
+    std::fs::remove_file(dir.join("abs")).unwrap();
+    let (_, out, _) = run(fs_cmd(ws.path(), "save", &fs_root));
+    assert!(!out.contains("left out"), "{out}");
+}
+
 /// A restore that finds nothing drops a fingerprint left from earlier, so save uploads.
 #[test]
 fn binary_restore_without_a_cache_drops_an_old_fingerprint() {

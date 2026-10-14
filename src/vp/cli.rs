@@ -176,8 +176,17 @@ impl VpJob {
                 vp_save(&backend, cv, &j.os_arch, &j.run_key, &j.dir, j.max_size)
                     .await
                     .map(|o| match o {
-                        SaveOutcome::Saved { key, bytes } => {
-                            format!("saved {key} ({})", human_bytes(bytes))
+                        SaveOutcome::Saved {
+                            key,
+                            bytes,
+                            links_left_out,
+                        } => {
+                            let links = match links_left_out {
+                                0 => String::new(),
+                                1 => "; 1 symlink left out".into(),
+                                n => format!("; {n} symlinks left out"),
+                            };
+                            format!("saved {key} ({}{links})", human_bytes(bytes))
                         }
                         SaveOutcome::SkippedTooLarge { bytes } => format!(
                             "skipped: the task cache is {}, larger than vp-max-size ({}); run `vp cache clean`",

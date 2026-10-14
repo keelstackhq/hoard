@@ -140,7 +140,18 @@ impl Read for ChanReader {
     }
 }
 
-fn write_archive(dir: &Path, w: impl Write) -> io::Result<()> {
+/// What [`archive_dir`] wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Archived {
+    /// Size of the tar.zst.
+    pub bytes: u64,
+    /// Symlinks not archived because restore would refuse them (absolute or with `..`).
+    pub links_left_out: usize,
+}
+
+/// Writes the archive; returns the number of symlinks left out.
+fn write_archive(dir: &Path, w: impl Write) -> io::Result<usize> {
+    let mut left_out = 0;
     let mut enc = zstd::Encoder::new(w, ZSTD_LEVEL)?;
     enc.include_checksum(true)?;
     let mut tar = tar::Builder::new(enc);
@@ -155,6 +166,7 @@ fn write_archive(dir: &Path, w: impl Write) -> io::Result<()> {
             if std::fs::read_link(&e.full).is_ok_and(|t| is_safe_link_target(&t)) {
                 tar.append_path_with_name(&e.full, &e.rel)?;
             } else {
+                left_out += 1;
                 tracing::warn!(path = %e.rel.display(), "not archiving a symlink that points outside the cache directory");
             }
         } else if t.is_file() {
@@ -163,11 +175,12 @@ fn write_archive(dir: &Path, w: impl Write) -> io::Result<()> {
         // Sockets, fifos and devices are not cache content; leave them out.
     }
     let mut w = tar.into_inner()?.finish()?;
-    w.flush()
+    w.flush()?;
+    Ok(left_out)
 }
 
-/// Writes the tar.zst of `dir`'s contents to `out`; returns the number of bytes written.
-pub async fn archive_dir(dir: &Path, out: impl AsyncWrite) -> io::Result<u64> {
+/// Writes the tar.zst of `dir`'s contents to `out`.
+pub async fn archive_dir(dir: &Path, out: impl AsyncWrite) -> io::Result<Archived> {
     let (tx, mut rx) = mpsc::channel::<Bytes>(DEPTH);
     let dir = dir.to_path_buf();
     let job = tokio::task::spawn_blocking(move || {
@@ -194,9 +207,12 @@ pub async fn archive_dir(dir: &Path, out: impl AsyncWrite) -> io::Result<u64> {
     if let Some(e) = write_err {
         return Err(e);
     }
-    built?;
+    let links_left_out = built?;
     out.flush().await?;
-    Ok(written)
+    Ok(Archived {
+        bytes: written,
+        links_left_out,
+    })
 }
 
 /// True when `p` is a non-empty relative path of plain names (`.` allowed, no `..`, no root
@@ -374,7 +390,7 @@ mod tests {
     async fn archive_bytes(dir: &Path) -> Vec<u8> {
         let mut out = Vec::new();
         let n = archive_dir(dir, &mut out).await.unwrap();
-        assert_eq!(n, out.len() as u64);
+        assert_eq!(n.bytes, out.len() as u64);
         out
     }
 
