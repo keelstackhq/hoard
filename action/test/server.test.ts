@@ -9,8 +9,10 @@ import {
   killServer,
   serveArgs,
   serveEnv,
+  serverFiles,
   shutdownServer,
   startServer,
+  storageArgs,
   waitForHealth,
 } from "../src/server.js";
 import type { R2Settings, Settings } from "../src/settings.js";
@@ -72,6 +74,8 @@ describe("serveArgs", () => {
     );
     expect(a.join(" ")).not.toContain(r2Fixture.secretAccessKey); // secrets go via env, not argv
     expect(a.join(" ")).not.toContain(r2Fixture.accessKeyId);
+    expect(a).not.toContain("--r2-account-id"); // via HOARD_R2_ACCOUNT_ID
+    expect(a.join(" ")).not.toContain(r2Fixture.accountId);
   });
 
   test("full argv for github storage", () => {
@@ -108,9 +112,8 @@ describe("serveArgs", () => {
       "/rt/hoard-step_2.token",
       "--summary-file",
       "/rt/hoard-step_2-summary.md",
-      "--fs-root",
-      "/rt/hoard-step_2-store",
     ]);
+    expect(a[a.indexOf("--fs-root") + 1]).toBe("/rt/hoard-step_2-store");
   });
 
   test("r2 flags: account id or endpoint, prefix and lifecycle", () => {
@@ -123,7 +126,7 @@ describe("serveArgs", () => {
       },
       "/rt",
     );
-    expect(a.slice(a.indexOf("--max-size") + 2)).toEqual([
+    expect(a.slice(a.indexOf("--cache-version") + 2, a.indexOf("--port"))).toEqual([
       "--r2-bucket",
       "b",
       "--r2-prefix",
@@ -137,6 +140,102 @@ describe("serveArgs", () => {
   });
 });
 
+describe("storageArgs", () => {
+  // The argv `serveArgs` produced before the storage flags were factored out (with
+  // --r2-account-id since moved to HOARD_R2_ACCOUNT_ID).
+  const before = [
+    "serve",
+    "--storage",
+    "r2",
+    "--mode",
+    "read",
+    "--no-reads",
+    "--cache-version",
+    "v1",
+    "--port",
+    "0",
+    "--port-file",
+    "/rt/hoard.port",
+    "--token-file",
+    "/rt/hoard.token",
+    "--summary-file",
+    "/rt/hoard-summary.md",
+    "--max-age-days",
+    "7",
+    "--max-size",
+    "5GB",
+    "--r2-bucket",
+    "b",
+    "--r2-prefix",
+    "cache/",
+    "--r2-lifecycle",
+    "auto",
+    "--r2-endpoint",
+    "http://minio:9000",
+  ];
+  const s: Settings = {
+    ...baseSettings,
+    storage: "r2",
+    mode: "read",
+    noReads: true,
+    r2: { ...r2Fixture, endpoint: "http://minio:9000" },
+  };
+
+  /** argv as flag → value (a lone flag maps to ""), so the comparison ignores order. */
+  function flags(argv: string[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (let i = 0; i < argv.length; i++) {
+      const a = argv[i] ?? "";
+      if (!a.startsWith("--")) continue;
+      const next = argv[i + 1] ?? "";
+      out[a] = next.startsWith("--") || next === "" ? "" : next;
+    }
+    return out;
+  }
+
+  test("serveArgs is `serve`, the storage args, then the server's own flags; same flags as before", () => {
+    const argv = serveArgs(s, "/rt");
+    const storage = storageArgs(s, serverFiles("/rt"));
+    expect(argv.slice(0, storage.length + 1)).toEqual(["serve", ...storage]);
+    expect(argv[0]).toBe("serve");
+    expect(argv).toHaveLength(before.length);
+    expect(flags(argv)).toEqual(flags(before));
+  });
+
+  test("the storage args hold storage, mode, cache version and the r2 flags only", () => {
+    expect(storageArgs(s, serverFiles("/rt"))).toEqual([
+      "--storage",
+      "r2",
+      "--mode",
+      "read",
+      "--no-reads",
+      "--cache-version",
+      "v1",
+      "--r2-bucket",
+      "b",
+      "--r2-prefix",
+      "cache/",
+      "--r2-lifecycle",
+      "auto",
+      "--r2-endpoint",
+      "http://minio:9000",
+    ]);
+  });
+
+  test("fs storage: the store root is a storage arg", () => {
+    expect(storageArgs({ ...baseSettings, storage: "fs" }, serverFiles("/rt", "x"))).toEqual([
+      "--storage",
+      "fs",
+      "--mode",
+      "read-write",
+      "--cache-version",
+      "v1",
+      "--fs-root",
+      "/rt/hoard-x-store",
+    ]);
+  });
+});
+
 describe("serveEnv", () => {
   test("carries the R2 keys and drops an inherited HOARD_TOKEN", () => {
     const env = serveEnv(
@@ -146,9 +245,18 @@ describe("serveEnv", () => {
     expect(env).toEqual({
       PATH: "/bin",
       ACTIONS_RESULTS_URL: "https://results",
+      HOARD_R2_ACCOUNT_ID: "acct-123",
       HOARD_R2_ACCESS_KEY_ID: "AKIDSECRETVALUE",
       HOARD_R2_SECRET_ACCESS_KEY: "s3cr3t-value-do-not-print",
     });
+  });
+
+  test("an R2 endpoint without an account id sets no HOARD_R2_ACCOUNT_ID", () => {
+    const env = serveEnv(
+      { ...baseSettings, storage: "r2", r2: { ...r2Fixture, accountId: "", endpoint: "http://m" } },
+      {},
+    );
+    expect(env).not.toHaveProperty("HOARD_R2_ACCOUNT_ID");
   });
 
   test("github storage passes the environment through, without HOARD_TOKEN", () => {
@@ -191,15 +299,27 @@ describe("waitForHealth", () => {
 });
 
 describe("startServer", () => {
-  test("a binary that crashes at start never becomes healthy; its output is in the log", async () => {
+  test("a binary that exits at start fails waitForHealth at once, with its exit code", async () => {
     const script = join(dir, "crash.mjs");
     await writeFile(script, 'console.error("boom: bad config"); process.exit(3);\n');
     const log = join(dir, "hoard.log");
-    await startServer(process.execPath, [script], log, process.env);
-    await expect(waitForHealth(join(dir, "hoard.port"), 300)).rejects.toThrow(
-      "hoard did not start",
+    const child = await startServer(process.execPath, [script], log, process.env);
+    const started = Date.now();
+    await expect(waitForHealth(join(dir, "hoard.port"), 10_000, child.exited)).rejects.toThrow(
+      "hoard exited with code 3 before it was ready",
     );
+    expect(Date.now() - started).toBeLessThan(2_000);
     expect(await readFile(log, "utf8")).toContain("boom: bad config");
+  });
+
+  test("exited resolves with a signal name when the child is killed", async () => {
+    const script = join(dir, "hang.mjs");
+    await writeFile(script, "setInterval(() => {}, 1000);\n");
+    const child = await startServer(process.execPath, [script], join(dir, "h.log"), process.env);
+    killServer(child.pid);
+    await expect(waitForHealth(join(dir, "hoard.port"), 5_000, child.exited)).rejects.toThrow(
+      "hoard exited with signal SIGTERM before it was ready",
+    );
   });
 
   test("passes the given env and args to the child and returns its pid", async () => {
@@ -209,7 +329,7 @@ describe("startServer", () => {
       "console.log(JSON.stringify([process.argv.slice(2), process.env.HOARD_X ?? null]));\n",
     );
     const log = join(dir, "hoard.log");
-    const pid = await startServer(process.execPath, [script, "serve", "--a"], log, {
+    const { pid } = await startServer(process.execPath, [script, "serve", "--a"], log, {
       PATH: process.env.PATH,
       HOARD_X: "y",
     });
@@ -255,9 +375,14 @@ describe("shutdownServer and getStats", () => {
         return res.end();
       }
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ hits: 4, misses: 2, puts: 1, time_saved_ms: 1234 }));
+      res.end(JSON.stringify({ hits: 4, misses: 2, puts: 1, put_errors: 5, time_saved_ms: 1234 }));
     });
-    expect(await getStats(port, "tok")).toMatchObject({ hits: 4, misses: 2, time_saved_ms: 1234 });
+    expect(await getStats(port, "tok")).toMatchObject({
+      hits: 4,
+      misses: 2,
+      put_errors: 5,
+      time_saved_ms: 1234,
+    });
     expect(await getStats(port, "bad")).toBeUndefined();
   });
 

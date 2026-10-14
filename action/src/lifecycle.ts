@@ -4,12 +4,13 @@ import { randomBytes } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as actionsCore from "@actions/core";
-import { ensureBinary } from "./binary.js";
+import { BinaryDownloadError, ensureBinary } from "./binary.js";
 import { CHECKSUMS } from "./checksums.generated.js";
 import { type Target, targetFor } from "./platform.js";
 import {
   getStats,
   killServer,
+  type ServerProcess,
   serveArgs,
   serveEnv,
   serverFiles,
@@ -54,6 +55,15 @@ const INPUTS = [
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** Lines of the server log quoted in main's failure message. */
+const LOG_TAIL_LINES = 20;
+
+/** The last lines of the hoard log (already redacted by hoard), for the failure message. */
+async function logTail(logPath: string): Promise<string> {
+  const log = await readFile(logPath, "utf8").catch(() => "");
+  return log.trimEnd().split(/\r?\n/).slice(-LOG_TAIL_LINES).join("\n");
+}
+
 async function printLog(core: ActionCore, logPath: string): Promise<void> {
   const log = await readFile(logPath, "utf8").catch(() => "(no hoard log)");
   // A log line starting with `::` must not become a workflow command.
@@ -76,8 +86,8 @@ export interface MainDeps {
     args: string[],
     logPath: string,
     env: NodeJS.ProcessEnv,
-  ): Promise<number>;
-  waitForHealth(portFile: string): Promise<number>;
+  ): Promise<ServerProcess>;
+  waitForHealth(portFile: string, exited: Promise<string>): Promise<number>;
   kill(pid: number): void;
 }
 
@@ -90,12 +100,16 @@ export function mainDeps(): MainDeps {
     ensureBinary: (target, version) =>
       ensureBinary(target, version, CHECKSUMS, undefined, process.env),
     startServer,
-    waitForHealth: (portFile) => waitForHealth(portFile),
+    waitForHealth: (portFile, exited) => waitForHealth(portFile, 10_000, exited),
     kill: killServer,
   };
 }
 
-/** main: settings → target → binary → start → health → mask and export the token → state. */
+/**
+ * main: settings → target → binary → start → health → mask and export the token → state.
+ * A binary that cannot be downloaded (after retries) is a warning: the build goes on without
+ * the cache. Every other error fails the step.
+ */
 export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
   const { core, env } = d;
   const runnerTemp = env.RUNNER_TEMP || tmpdir();
@@ -114,18 +128,27 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
       core.warning(`using unverified binary from HOARD_ACTION_BINARY_PATH: ${override}`);
       bin = override;
     } else {
-      bin = await d.ensureBinary(target, settings.version);
+      try {
+        bin = await d.ensureBinary(target, settings.version);
+      } catch (e) {
+        if (!(e instanceof BinaryDownloadError)) throw e;
+        const note = `hoard binary could not be downloaded (${e.message}); continuing without the cache`;
+        core.warning(note);
+        core.saveState("unavailable", note); // post puts it in the job summary
+        return;
+      }
     }
 
     // A port or token file left by an earlier run would look like a ready server.
     await Promise.all([files.port, files.token, files.summary].map((f) => rm(f, { force: true })));
-    pid = await d.startServer(
+    const child = await d.startServer(
       bin,
       serveArgs(settings, runnerTemp, id),
       files.log,
       serveEnv(settings, env),
     );
-    const port = await d.waitForHealth(files.port);
+    pid = child.pid;
+    const port = await d.waitForHealth(files.port, child.exited);
     const token = (await readFile(files.token, "utf8")).trim();
     if (!token) throw new Error(`hoard wrote an empty token file ${files.token}`);
 
@@ -134,6 +157,7 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     core.exportVariable("TURBO_TOKEN", token);
     core.exportVariable("TURBO_TEAM", "hoard");
 
+    core.saveState("bin", bin); // post runs `hoard vp save` with it (milestone 3)
     core.saveState("port", String(port));
     core.saveState("token", token);
     core.saveState("pid", String(pid));
@@ -141,9 +165,15 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     core.saveState("log", files.log);
     core.saveState("warnings", JSON.stringify(settings.warnings));
   } catch (e) {
-    if (pid) d.kill(pid); // spawned but not usable: do not leave it running
-    core.setFailed(message(e));
-    if (pid) await printLog(core, files.log);
+    if (!pid) {
+      core.setFailed(message(e));
+      return;
+    }
+    d.kill(pid); // spawned but not usable: do not leave it running
+    // The binary's own error names the fix; put it in the failure message, not only the log.
+    const tail = await logTail(files.log);
+    core.setFailed(tail ? `${message(e)}\nLast lines of the hoard log:\n${tail}` : message(e));
+    await printLog(core, files.log);
   }
 }
 
@@ -172,6 +202,11 @@ function savedWarnings(raw: string): string[] {
 export async function runPost(d: PostDeps = postDeps()): Promise<void> {
   const { core, env } = d;
   try {
+    const unavailable = core.getState("unavailable");
+    if (unavailable) {
+      await core.summary.addRaw(`> ⚠️ ${unavailable}\n`).write();
+      return;
+    }
     const port = Number(core.getState("port"));
     const token = core.getState("token");
     if (!port || !token) return; // main did not start hoard; nothing to stop
@@ -189,6 +224,12 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
     core.setOutput("hits", String(stats?.hits ?? 0));
     core.setOutput("misses", String(stats?.misses ?? 0));
     core.setOutput("time-saved-ms", String(stats?.time_saved_ms ?? 0));
+    const putErrors = stats?.put_errors ?? 0;
+    if (putErrors > 0) {
+      // The summary line says `Upload errors: N` too (§9); this makes it a visible annotation.
+      problems = true;
+      core.warning(`hoard: ${putErrors} uploads failed; see the hoard log`);
+    }
 
     if (!(await d.shutdownServer(port, token))) {
       warn("hoard server was not running at shutdown; the summary may be incomplete");

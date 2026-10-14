@@ -24,6 +24,65 @@ kept bounded by a lifecycle rule and a size cap):
     r2-bucket: ${{ secrets.R2_BUCKET }}
 ```
 
+The action lives at [keelstackhq/hoard](https://github.com/keelstackhq/hoard) for now; the
+`keelstack/hoard` name above is not final.
+
+Pin a release tag (`@v1` or `@v1.2.3`), not `@main` or a commit: each action release can only
+run the hoard binary of that same release, and code on `main` may need a newer binary than the
+last release has.
+
+## Action inputs
+
+All inputs are optional. Inputs marked (r2) are used only with `storage: r2`.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `storage` | `github` | Where artifacts are stored: `github` (GitHub Actions cache), `r2` (Cloudflare R2) or `fs` (runner disk). |
+| `mode` | empty | `read-write`, `read` or `off`. Empty: from the workflow's cache mode (see below), else `read-write`. |
+| `cache-version` | `v1` | Part of every cache key; change it to start from an empty cache. |
+| `r2-account-id` | — | Cloudflare account ID (r2). Not needed when `r2-endpoint` is set. |
+| `r2-access-key-id` | — | R2 access key ID (r2). Pass it from a secret. |
+| `r2-secret-access-key` | — | R2 secret access key (r2). Pass it from a secret. |
+| `r2-bucket` | — | R2 bucket name (r2). |
+| `r2-prefix` | `cache/` | Key prefix inside the bucket, ending in `/` (r2). |
+| `r2-endpoint` | — | S3 endpoint URL override, e.g. MinIO (r2). Replaces `r2-account-id`. |
+| `r2-lifecycle` | `auto` | `auto` (set the bucket's expiry rule), `verify` (fail if it is missing) or `manual` (r2). |
+| `max-age-days` | `7` | Delete R2 objects this many days after their last write, 1–36500 (r2). |
+| `max-size` | `5GB` | Size cap for the R2 prefix; the oldest objects are pruned above it (r2). |
+| `version` | empty | hoard binary version. Empty: this action's own release, the only one it can verify. |
+
+## Outputs
+
+| Output | Meaning |
+|---|---|
+| `hits` | Number of cache hits. |
+| `misses` | Number of cache misses. |
+| `time-saved-ms` | Sum of the original task durations of all hits, in milliseconds. |
+
+The outputs are set in the action's post step, at the end of the job. Later steps of the same
+job cannot read them. Read them from a later job (through job `outputs`) or look at the job
+summary.
+
+## How the action behaves
+
+- **Fork pull requests.** With `storage: r2` and missing R2 inputs (pull requests from forks get
+  no secrets), the action uses `storage: github` for that run and shows a warning in the log and
+  the job summary. It does not fail the job.
+- **Cache mode.** When `mode` is empty, the workflow's cache mode (`ACTIONS_CACHE_MODE`) sets it:
+  `read` → `read`, `none` → `off`, `write-only` → `read-write` without reads; anything else →
+  `read-write`.
+- **Signed artifacts with R2.** An R2 cache is shared across branches (and laptops). Set
+  `TURBO_REMOTE_CACHE_SIGNATURE_KEY` from a secret and `"remoteCache": { "signature": true }` in
+  `turbo.json`, so turbo signs every artifact it uploads and ignores artifacts it cannot verify.
+- **Setup errors fail the step** with hoard's own message, which says how to fix it (for example
+  a missing R2 lifecycle rule with `r2-lifecycle: verify`).
+- **Storage errors never fail the build.** A failed read is a miss and a failed upload is
+  skipped. If uploads failed, the action shows a warning (`hoard: N uploads failed`) and the job
+  summary says `Upload errors: N`, so a broken cache does not look like a cold one.
+- **Binary download failures never fail the build.** If the hoard binary cannot be downloaded
+  (after 3 retries), the action shows a warning and the job runs without the remote cache. A
+  checksum mismatch still fails the step.
+
 ## Commands
 
 The action runs the `hoard` binary for you. You can also run it yourself, for example on a

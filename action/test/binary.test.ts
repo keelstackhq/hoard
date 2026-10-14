@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import * as tc from "@actions/tool-cache";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ensureBinary, releaseUrl } from "../src/binary.js";
+import { BinaryDownloadError, ensureBinary, releaseUrl } from "../src/binary.js";
 import { TARGETS, type Target } from "../src/platform.js";
 
 const CHECKSUMS_ZERO = Object.fromEntries(TARGETS.map((t) => [t, "0".repeat(64)])) as Record<
@@ -199,5 +199,61 @@ describe("releaseUrl", () => {
       GITHUB_ACTION_REPOSITORY: "me/hoard-fork",
     });
     expect(download.mock.calls[0]?.[0]).toMatch(/^https:\/\/github\.com\/me\/hoard-fork\//);
+  });
+});
+
+describe("download retries", () => {
+  test("a failing download is retried after 1 s, 2 s and 4 s", async () => {
+    const archive = await writeTempTarGz("bin");
+    const good = downloadOf(archive);
+    let calls = 0;
+    const download = vi.fn(async (url: string) => {
+      if (++calls <= 3) throw new Error(`HTTP 502 (${calls})`);
+      return good(url);
+    });
+    const sleeps: number[] = [];
+    const exe = await ensureBinary(
+      LINUX,
+      "2.0.0",
+      { [LINUX]: await sha256(archive) },
+      download,
+      {},
+      async (ms) => void sleeps.push(ms),
+    );
+    expect(basename(exe)).toBe("hoard");
+    expect(download).toHaveBeenCalledTimes(4);
+    expect(sleeps).toEqual([1_000, 2_000, 4_000]);
+  });
+
+  test("a download that keeps failing is a BinaryDownloadError naming the last cause", async () => {
+    const download = vi.fn(async () => {
+      throw new Error("connect ETIMEDOUT");
+    });
+    const sleeps: number[] = [];
+    const err = await ensureBinary(
+      LINUX,
+      "2.0.0",
+      CHECKSUMS_ZERO,
+      download,
+      {},
+      async (ms) => void sleeps.push(ms),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BinaryDownloadError);
+    expect((err as Error).message).toBe("connect ETIMEDOUT");
+    expect(download).toHaveBeenCalledTimes(4);
+    expect(sleeps).toEqual([1_000, 2_000, 4_000]);
+  });
+
+  test("a checksum mismatch is not retried and is not a download error", async () => {
+    const archive = await writeTempTarGz("not the real binary");
+    const download = downloadOf(archive);
+    const sleep = vi.fn(async () => {});
+    const err = await ensureBinary(LINUX, "2.0.1", CHECKSUMS_ZERO, download, {}, sleep).catch(
+      (e: unknown) => e,
+    );
+    expect((err as Error).message).toBe("checksum mismatch for x86_64-unknown-linux-musl");
+    expect(err).not.toBeInstanceOf(BinaryDownloadError);
+    expect(download).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
   });
 });

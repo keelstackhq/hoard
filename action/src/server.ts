@@ -28,11 +28,13 @@ export function serverFiles(runnerTemp: string, id = "") {
   };
 }
 
-/** argv for `hoard serve`. Never contains a secret: the R2 keys go through `serveEnv`. */
-export function serveArgs(s: Settings, runnerTemp: string, id = ""): string[] {
-  const files = serverFiles(runnerTemp, id);
+/**
+ * The storage flags shared by every hoard command that touches the cache (`serve` now, `vp`
+ * later): storage, mode, cache version, the fs root and the R2 flags. Never contains a secret:
+ * the R2 keys and account ID go through `serveEnv`.
+ */
+export function storageArgs(s: Settings, files: ReturnType<typeof serverFiles>): string[] {
   const args = [
-    "serve",
     "--storage",
     s.storage,
     "--mode",
@@ -40,6 +42,23 @@ export function serveArgs(s: Settings, runnerTemp: string, id = ""): string[] {
     ...(s.noReads ? ["--no-reads"] : []),
     "--cache-version",
     s.cacheVersion,
+    // The store stays out of the checkout: untracked files there can change turbo's hashes.
+    ...(s.storage === "fs" ? ["--fs-root", files.fsRoot] : []),
+  ];
+  if (s.r2) {
+    args.push("--r2-bucket", s.r2.bucket, "--r2-prefix", s.r2.prefix);
+    args.push("--r2-lifecycle", s.r2Lifecycle);
+    if (s.r2.endpoint) args.push("--r2-endpoint", s.r2.endpoint);
+  }
+  return args;
+}
+
+/** argv for `hoard serve`: the storage args, then the server's own files and limits. */
+export function serveArgs(s: Settings, runnerTemp: string, id = ""): string[] {
+  const files = serverFiles(runnerTemp, id);
+  return [
+    "serve",
+    ...storageArgs(s, files),
     "--port",
     "0",
     "--port-file",
@@ -48,43 +67,42 @@ export function serveArgs(s: Settings, runnerTemp: string, id = ""): string[] {
     files.token,
     "--summary-file",
     files.summary,
-    // The store stays out of the checkout: untracked files there can change turbo's hashes.
-    ...(s.storage === "fs" ? ["--fs-root", files.fsRoot] : []),
     "--max-age-days",
     String(s.maxAgeDays),
     "--max-size",
     s.maxSize,
   ];
-  if (s.r2) {
-    args.push("--r2-bucket", s.r2.bucket, "--r2-prefix", s.r2.prefix);
-    args.push("--r2-lifecycle", s.r2Lifecycle);
-    if (s.r2.accountId) args.push("--r2-account-id", s.r2.accountId);
-    if (s.r2.endpoint) args.push("--r2-endpoint", s.r2.endpoint);
-  }
-  return args;
 }
 
 /**
  * The child's environment: the full runner env (the GitHub cache storage needs it, §6.4) plus
- * the R2 keys. An inherited HOARD_TOKEN is dropped so nothing outside can choose the token.
+ * the R2 account ID and keys. An inherited HOARD_TOKEN is dropped so nothing outside can choose the token.
  */
 export function serveEnv(s: Settings, baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.HOARD_TOKEN;
   if (s.r2) {
+    if (s.r2.accountId) env.HOARD_R2_ACCOUNT_ID = s.r2.accountId;
     env.HOARD_R2_ACCESS_KEY_ID = s.r2.accessKeyId;
     env.HOARD_R2_SECRET_ACCESS_KEY = s.r2.secretAccessKey;
   }
   return env;
 }
 
-/** Spawns hoard detached with stdout and stderr in `logPath`; resolves with its pid. */
+/** A spawned hoard: its pid, and a promise that resolves (never rejects) once it exits. */
+export interface ServerProcess {
+  pid: number;
+  /** Resolves with `code <n>` or `signal <name>` when the child exits. */
+  exited: Promise<string>;
+}
+
+/** Spawns hoard detached with stdout and stderr in `logPath`. */
 export async function startServer(
   bin: string,
   args: string[],
   logPath: string,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<number> {
+): Promise<ServerProcess> {
   const logFd = openSync(logPath, "w");
   try {
     const child = spawn(bin, args, {
@@ -97,8 +115,14 @@ export async function startServer(
       child.once("spawn", resolve);
       child.once("error", (e) => reject(new Error(`could not start hoard (${bin}): ${e.message}`)));
     });
+    // The listener does not keep main alive: the child is unref'd and its stdio are files.
+    const exited = new Promise<string>((resolve) => {
+      child.once("exit", (code, signal) =>
+        resolve(code === null ? `signal ${signal}` : `code ${code}`),
+      );
+    });
     child.unref();
-    return child.pid ?? 0;
+    return { pid: child.pid ?? 0, exited };
   } finally {
     closeSync(logFd);
   }
@@ -110,11 +134,22 @@ function startTimeoutText(ms: number): string {
 
 /**
  * Polls every 100 ms until hoard has written its port file and answers `/_hoard/health`;
- * resolves with the port.
+ * resolves with the port. Rejects at once if `exited` resolves first (hoard stopped, e.g. on a
+ * setup error), else after `timeoutMs` (a hung server).
  */
-export async function waitForHealth(portFile: string, timeoutMs = 10_000): Promise<number> {
+export async function waitForHealth(
+  portFile: string,
+  timeoutMs = 10_000,
+  exited?: Promise<string>,
+): Promise<number> {
+  let exit: string | undefined;
+  void exited?.then((how) => {
+    exit = how;
+  });
+  const exitedError = () => new Error(`hoard exited with ${exit} before it was ready`);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (exit) throw exitedError();
     const port = Number((await readFile(portFile, "utf8").catch(() => "")).trim());
     if (Number.isInteger(port) && port > 0) {
       const left = deadline - Date.now();
@@ -127,6 +162,7 @@ export async function waitForHealth(portFile: string, timeoutMs = 10_000): Promi
     }
     await sleep(Math.max(0, Math.min(100, deadline - Date.now())));
   }
+  if (exit) throw exitedError();
   throw new Error(`hoard did not start within ${startTimeoutText(timeoutMs)}`);
 }
 
@@ -134,6 +170,8 @@ export async function waitForHealth(portFile: string, timeoutMs = 10_000): Promi
 export interface Stats {
   hits: number;
   misses: number;
+  /** Uploads that failed with a storage error (the build went on; §5). */
+  put_errors: number;
   time_saved_ms: number;
 }
 

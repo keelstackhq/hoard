@@ -1,7 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { BinaryDownloadError } from "../src/binary.js";
 import {
   type ActionCore,
   type MainDeps,
@@ -52,6 +53,9 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+/** A started child that never exits (as far as the test is concerned). */
+const running = (pid: number) => ({ pid, exited: new Promise<never>(() => {}) });
+
 describe("main", () => {
   function deps(f: ReturnType<typeof fakeCore>, over: Partial<MainDeps> = {}): MainDeps {
     return {
@@ -67,7 +71,7 @@ describe("main", () => {
       ensureBinary: vi.fn(async () => "/opt/hoard"),
       startServer: vi.fn(async () => {
         await writeFile(join(dir, "hoard-__keelstack_hoard.token"), "tok123\n");
-        return 4321;
+        return running(4321);
       }),
       waitForHealth: vi.fn(async () => 40404),
       kill: vi.fn(),
@@ -93,7 +97,10 @@ describe("main", () => {
     expect(args).not.toContain("--fs-root"); // github storage
     expect(env).toMatchObject({ PATH: "/bin" });
     expect(env).not.toHaveProperty("HOARD_TOKEN");
-    expect(d.waitForHealth).toHaveBeenCalledWith(join(dir, "hoard-__keelstack_hoard.port"));
+    expect(d.waitForHealth).toHaveBeenCalledWith(
+      join(dir, "hoard-__keelstack_hoard.port"),
+      expect.any(Promise),
+    );
     expect(d.kill).not.toHaveBeenCalled();
 
     const secretAt = f.calls.findIndex((c) => c[0] === "setSecret" && c[1] === "tok123");
@@ -106,6 +113,7 @@ describe("main", () => {
       ["TURBO_TEAM", "hoard"],
     ]);
     expect(Object.fromEntries(f.of("saveState"))).toEqual({
+      bin: "/opt/hoard",
       port: "40404",
       token: "tok123",
       pid: "4321",
@@ -148,25 +156,81 @@ describe("main", () => {
     expect(f.of("setFailed")).toEqual([]);
   });
 
-  test("a binary that crashes at start fails the step and prints the server log", async () => {
-    // Real spawn: node is the "binary"; `node serve …` exits at once (no such module).
+  test("a binary that exits at once fails main fast, with its log tail in the message", async () => {
+    const stub = join(dir, "hoard-stub");
+    await writeFile(stub, '#!/bin/sh\necho "starting" >&2\necho "error: bad config" >&2\nexit 2\n');
+    await chmod(stub, 0o755);
     const f = fakeCore({ storage: "fs" });
     const d = deps(f, {
       startServer,
-      waitForHealth: (portFile) => waitForHealth(portFile, 300),
+      waitForHealth: (p, exited) => waitForHealth(p, 10_000, exited),
     });
-    d.env = { ...process.env, RUNNER_TEMP: dir, HOARD_ACTION_BINARY_PATH: process.execPath };
+    d.env = { ...process.env, RUNNER_TEMP: dir, HOARD_ACTION_BINARY_PATH: stub };
+    const started = Date.now();
     await runMain(d);
 
-    expect(f.of("setFailed")).toEqual([
-      [expect.stringContaining("hoard did not start within 300ms")],
-    ]);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    const failed = f.of("setFailed");
+    expect(failed).toHaveLength(1);
+    const msg = String(failed[0]?.[0]);
+    expect(msg).toMatch(/^hoard exited with code 2 before it was ready\n/);
+    expect(msg).toContain("starting\nerror: bad config");
+    // The full log is still printed, in its group.
     const group = f.calls.findIndex((c) => c[0] === "startGroup" && c[1] === "hoard log");
     expect(group).toBeGreaterThanOrEqual(0);
-    expect(String(f.calls[group + 2]?.[1])).toContain("serve");
+    expect(String(f.calls[group + 2]?.[1])).toContain("error: bad config");
     expect(f.calls[group + 4]).toEqual(["endGroup"]);
     expect(f.of("exportVariable")).toEqual([]);
     expect(f.of("saveState")).toEqual([]);
+  });
+
+  test("the message carries only the last 20 log lines", async () => {
+    const f = fakeCore();
+    const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+    const d = deps(f, {
+      startServer: vi.fn(async (_b: string, _a: string[], log: string) => {
+        await writeFile(log, `${lines.join("\n")}\n`);
+        return running(7);
+      }),
+      waitForHealth: vi.fn(async () => {
+        throw new Error("hoard did not start within 10s");
+      }),
+    });
+    await runMain(d);
+    const msg = String(f.of("setFailed")[0]?.[0]);
+    expect(msg).toBe(
+      `hoard did not start within 10s\nLast lines of the hoard log:\n${lines.slice(10).join("\n")}`,
+    );
+  });
+
+  test("a binary download that keeps failing is a warning: no cache, no TURBO_*, no failure", async () => {
+    const f = fakeCore();
+    const d = deps(f, {
+      ensureBinary: vi.fn(async () => {
+        throw new BinaryDownloadError("connect ETIMEDOUT github.com");
+      }),
+    });
+    await runMain(d);
+    const text =
+      "hoard binary could not be downloaded (connect ETIMEDOUT github.com); continuing without the cache";
+    expect(f.of("setFailed")).toEqual([]);
+    expect(f.of("warning")).toEqual([[text]]);
+    expect(f.of("exportVariable")).toEqual([]);
+    expect(f.of("saveState")).toEqual([["unavailable", text]]);
+    expect(d.startServer).not.toHaveBeenCalled();
+  });
+
+  test("a checksum mismatch still fails the step", async () => {
+    const f = fakeCore();
+    const d = deps(f, {
+      ensureBinary: vi.fn(async () => {
+        throw new Error("checksum mismatch for x86_64-unknown-linux-musl");
+      }),
+    });
+    await runMain(d);
+    expect(f.of("setFailed")).toEqual([["checksum mismatch for x86_64-unknown-linux-musl"]]);
+    expect(f.of("saveState")).toEqual([]);
+    expect(f.of("exportVariable")).toEqual([]);
   });
 
   test("a child that is alive but never healthy is killed before the step fails", async () => {
@@ -208,7 +272,7 @@ describe("main", () => {
         startServer: vi.fn(async (_b: string, args: string[], log: string) => {
           await writeFile(args[args.indexOf("--token-file") + 1] ?? "", "t\n");
           paths.push([...args.filter((a) => a.startsWith(dir)), log]);
-          return 1;
+          return running(1);
         }),
       });
       d.env.GITHUB_ACTION = id;
@@ -227,7 +291,7 @@ describe("main", () => {
         startServer: vi.fn(async (_b: string, args: string[], log: string) => {
           await writeFile(args[args.indexOf("--token-file") + 1] ?? "", "t\n");
           logs.push(log);
-          return 1;
+          return running(1);
         }),
       });
       delete d.env.GITHUB_ACTION;
@@ -242,7 +306,7 @@ describe("main", () => {
     const d = deps(f, {
       startServer: vi.fn(async (_b: string, args: string[]) => {
         await writeFile(args[args.indexOf("--token-file") + 1] ?? "", "t\n");
-        return 1;
+        return running(1);
       }),
     });
     d.env.GITHUB_ACTION = "../../evil step";
@@ -254,7 +318,7 @@ describe("main", () => {
 
   test("a missing token file fails the step", async () => {
     const f = fakeCore();
-    const d = deps(f, { startServer: vi.fn(async () => 1) });
+    const d = deps(f, { startServer: vi.fn(async () => running(1)) });
     await runMain(d);
     expect(f.of("setFailed")).toEqual([[expect.stringContaining("hoard-__keelstack_hoard.token")]]);
     expect(f.of("exportVariable")).toEqual([]);
@@ -283,7 +347,7 @@ describe("post", () => {
     return {
       core: f.core,
       env: {},
-      getStats: vi.fn(async () => ({ hits: 3, misses: 1, time_saved_ms: 900 })),
+      getStats: vi.fn(async () => ({ hits: 3, misses: 1, put_errors: 0, time_saved_ms: 900 })),
       shutdownServer: vi.fn(async () => true),
       kill: vi.fn(),
       ...over,
@@ -397,6 +461,30 @@ describe("post", () => {
     const f = fakeCore({}, s);
     await runPost(deps(f));
     expect(f.calls[0]).toEqual(["setSecret", "tok"]);
+  });
+
+  test("upload errors are a warning and print the log", async () => {
+    const s = await state({ warnings: "[]" });
+    await writeFile(s.summary, summaryText);
+    const f = fakeCore({}, s);
+    const d = deps(f, {
+      getStats: vi.fn(async () => ({ hits: 0, misses: 5, put_errors: 4, time_saved_ms: 0 })),
+    });
+    await runPost(d);
+    expect(f.of("warning")).toEqual([["hoard: 4 uploads failed; see the hoard log"]]);
+    expect(f.of("startGroup")).toEqual([["hoard log"]]);
+    expect(f.of("setOutput")).toContainEqual(["misses", "5"]);
+  });
+
+  test("after a failed binary download post writes one note to the summary", async () => {
+    const note = "hoard binary could not be downloaded (HTTP 502); continuing without the cache";
+    const f = fakeCore({}, { unavailable: note });
+    const d = deps(f);
+    await runPost(d);
+    expect(f.summaries).toEqual([`> ⚠️ ${note}\n`]);
+    expect(d.getStats).not.toHaveBeenCalled();
+    expect(d.shutdownServer).not.toHaveBeenCalled();
+    expect(f.of("warning")).toEqual([]);
   });
 
   test("a refused shutdown kills the saved pid", async () => {

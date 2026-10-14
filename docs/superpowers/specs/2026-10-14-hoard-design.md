@@ -301,12 +301,15 @@ Storage: r2 (my-team-cache/cache/) · Lifecycle: 7 days ✓ · Pruned: 18 object
 `version` (binary version, default = the action's own release; any other value fails, because the
 action can only verify its own release — change `uses:` instead). The action manages `port`,
 `token`, `port-file`, `token-file`, `summary-file` and `fs-root` itself, so they are not inputs.
-Outputs: `hits`, `misses`, `time-saved-ms`. R2 secrets reach the binary through
-`HOARD_R2_*` env vars, never argv.
+Outputs: `hits`, `misses`, `time-saved-ms`, set in the post step (so a later step of the same job
+cannot read them; a later job or the job summary can). The R2 account ID and keys reach the binary
+through `HOARD_R2_*` env vars, never argv. The storage flags (`--storage`, `--mode`, `--no-reads`,
+`--cache-version`, `--fs-root`, `--r2-bucket`, `--r2-prefix`, `--r2-lifecycle`, `--r2-endpoint`)
+come from one helper, so every hoard command the action runs gets the same storage.
 
 main:
-1. Resolve `mode`/`storage` (§8) and the tool (`turbo.json` present → turbo; `vite.config.*` with
-   `vite-plus` in the root `package.json` → vp; both allowed).
+1. Resolve `mode`/`storage` (§8) and (milestone 3) the tool (`turbo.json` present → turbo;
+   `vite.config.*` with `vite-plus` in the root `package.json` → vp; both allowed).
 2. Resolve the target from `process.platform`/`process.arch` (anything else fails with
    `unsupported platform <platform>/<arch>`, before any download). Refuse a target with no
    checksum in `action/src/checksums.generated.ts` (written at release time, bundled into `dist/`)
@@ -318,28 +321,47 @@ main:
    downloaded archive is deleted afterwards. For testing, `HOARD_ACTION_BINARY_PATH` names a
    local hoard binary to use instead (with a warning); it bypasses checksum verification, so only
    the workflow author can set it.
+
+   A failed download is retried 3 times, after 1 s, 2 s and 4 s. If it still fails, the cause is
+   transient (network, a github.com outage), not the user's config, so the cache must not fail
+   the build: main emits the warning
+   `hoard binary could not be downloaded (<cause>); continuing without the cache`, saves it as
+   state (`unavailable`) so post writes it as one `> ⚠️` line to the job summary, exports no
+   `TURBO_*` (turbo then runs without a remote cache) and succeeds. This is not a silent fallback:
+   nothing is cached anywhere else. A checksum mismatch, an unsupported platform, a target with no
+   checksum, an archive without the executable and an invalid input are not transient and still
+   fail the step.
 3. Spawn `hoard serve --port 0` detached (`stdio` to `$RUNNER_TEMP/hoard-<id>.log`, `unref()`)
-   with `--port-file`, `--token-file` and `--summary-file` in `$RUNNER_TEMP`
+   with the storage flags, `--port-file`, `--token-file` and `--summary-file` in `$RUNNER_TEMP`
    (`hoard-<id>.port`, `hoard-<id>.token`, `hoard-<id>-summary.md`, removed first) and, for
    `storage: fs`, `--fs-root $RUNNER_TEMP/hoard-<id>-store` (never inside the checkout, where
    untracked files could change task hashes). `<id>` is the step's `GITHUB_ACTION` with every
    character outside `[A-Za-z0-9_-]` replaced by `_`, else a random id, so two hoard steps in one
    job never share files. Pass the full environment (includes
-   `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`) plus `HOARD_R2_ACCESS_KEY_ID` /
-   `HOARD_R2_SECRET_ACCESS_KEY`, and without any inherited `HOARD_TOKEN`.
-4. Poll every 100 ms, up to 10 s, for the port file and a `200 ok` from `/_hoard/health`; on
-   timeout fail with `hoard did not start within 10s` and print the log. Whenever main fails
-   after the spawn, it first kills the child (SIGTERM, errors ignored) so no server is orphaned.
+   `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`) plus `HOARD_R2_ACCOUNT_ID` (when set),
+   `HOARD_R2_ACCESS_KEY_ID` / `HOARD_R2_SECRET_ACCESS_KEY`, and without any inherited
+   `HOARD_TOKEN`.
+4. Poll every 100 ms, up to 10 s, for the port file and a `200 ok` from `/_hoard/health`, while
+   watching the child. If it exits first (a setup error: bad config, missing GitHub env, missing
+   R2 lifecycle rule), fail at once with `hoard exited with code <n> before it was ready`; on
+   timeout (a hung server) fail with `hoard did not start within 10s`. Whenever main fails after
+   the spawn, it first kills the child (SIGTERM, errors ignored) so no server is orphaned, puts
+   the last 20 lines of the log (already redacted by hoard; they carry its error, which says how
+   to fix it) in the failure message after `Last lines of the hoard log:`, and prints the log.
 5. `core.setSecret(token)`; export `TURBO_API=http://127.0.0.1:<port>`, `TURBO_TOKEN`,
-   `TURBO_TEAM=hoard`; save port, token, pid, summary and log paths and the settings warnings as
-   step state. Each settings warning (e.g. the R2 → github fallback, §8) is also a `core.warning`.
+   `TURBO_TEAM=hoard`; save the binary path (for `hoard vp save` in post, milestone 3), port,
+   token, pid, summary and log paths and the settings warnings as step state. Each settings
+   warning (e.g. the R2 → github fallback, §8) is also a `core.warning`.
 
-post (never fails the job; problems are warnings): if main saved no state, do nothing. Mask the
-saved token again with `core.setSecret` before any output (post is a separate process). Read
-`GET /_hoard/stats` and set the outputs (`hits`, `misses`, `time-saved-ms`; `0` when unreachable),
-`POST /_hoard/shutdown` (hoard answers after writing the summary file; unreachable → warning
-`hoard server was not running at shutdown; the summary may be incomplete`, and the saved pid is
-killed in case the server is alive but not answering), append the summary
+post (never fails the job; problems are warnings): if main saved `unavailable` (the binary
+download failed), write that one line to `$GITHUB_STEP_SUMMARY` and stop. If main saved no other
+state, do nothing. Mask the saved token again with `core.setSecret` before any output (post is a
+separate process). Read `GET /_hoard/stats` and set the outputs (`hits`, `misses`,
+`time-saved-ms`; `0` when unreachable); when `put_errors > 0`, warn
+`hoard: N uploads failed; see the hoard log` (a broken storage must not look like a cold cache)
+and print the log. Then `POST /_hoard/shutdown` (hoard answers after writing the summary file;
+unreachable → warning `hoard server was not running at shutdown; the summary may be incomplete`,
+and the saved pid is killed in case the server is alive but not answering), append the summary
 file, if any, plus one `> ⚠️ <warning>` line per warning to `$GITHUB_STEP_SUMMARY`, and print the
 log only on a problem or with `RUNNER_DEBUG=1`. A printed log (main or post) is wrapped in
 `::stop-commands::<random>` … `::<random>::`, so no log line can act as a workflow command.

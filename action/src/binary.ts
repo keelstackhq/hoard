@@ -5,6 +5,7 @@ import { createReadStream } from "node:fs";
 import { access, chmod, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import * as tc from "@actions/tool-cache";
 import type { Target } from "./platform.js";
 
@@ -18,6 +19,36 @@ export function releaseUrl(target: Target, version: string, env: NodeJS.ProcessE
   const fromEnv = env.GITHUB_ACTION_REPOSITORY ?? "";
   const repo = isRepo(fromEnv) ? fromEnv : DEFAULT_REPO;
   return `https://github.com/${repo}/releases/download/v${version}/hoard-${target}.tar.gz`;
+}
+
+/**
+ * The release archive could not be downloaded, even after retries. Transient (network, a
+ * github.com outage), so main goes on without the cache instead of failing the build (§10).
+ * A checksum mismatch or a missing checksum is never this error.
+ */
+export class BinaryDownloadError extends Error {
+  override name = "BinaryDownloadError";
+}
+
+/** Waits before the 2nd, 3rd and 4th download attempt. */
+const RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+
+async function downloadWithRetry(
+  url: string,
+  download: (url: string) => Promise<string>,
+  sleep: (ms: number) => Promise<unknown>,
+): Promise<string> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await download(url);
+    } catch (e) {
+      const wait = RETRY_DELAYS_MS[attempt];
+      if (wait === undefined) {
+        throw new BinaryDownloadError(e instanceof Error ? e.message : String(e), { cause: e });
+      }
+      await sleep(wait);
+    }
+  }
 }
 
 async function sha256(file: string): Promise<string> {
@@ -37,6 +68,7 @@ export async function ensureBinary(
   checksums: Partial<Record<Target, string>>,
   download: (url: string) => Promise<string> = (url) => tc.downloadTool(url),
   env: NodeJS.ProcessEnv = process.env,
+  sleep: (ms: number) => Promise<unknown> = (ms) => delay(ms),
 ): Promise<string> {
   const expected = checksums[target];
   if (!expected) {
@@ -51,7 +83,7 @@ export async function ensureBinary(
     if (cached) return join(cached, exeName);
   }
 
-  const archive = await download(releaseUrl(target, version, env));
+  const archive = await downloadWithRetry(releaseUrl(target, version, env), download, sleep);
   try {
     if ((await sha256(archive)) !== expected.toLowerCase()) {
       throw new Error(`checksum mismatch for ${target}`);
