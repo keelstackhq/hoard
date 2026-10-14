@@ -1,3 +1,4 @@
+import { exitWhenDone } from "./exit.js";
 import { runPost } from "./lifecycle.js";
 
-await runPost();
+await exitWhenDone(runPost);

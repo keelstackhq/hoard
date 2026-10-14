@@ -368,6 +368,10 @@ and the saved pid is killed in case the server is alive but not answering), appe
 file, if any, plus one `> ⚠️ <warning>` line per warning to `$GITHUB_STEP_SUMMARY`, and print the
 log only on a problem or with `RUNNER_DEBUG=1`. A printed log (main or post) is wrapped in
 `::stop-commands::<random>` … `::<random>::`, so no log line can act as a workflow command.
+main and post end their process explicitly when done (after flushing stdout/stderr, with the
+exit code `setFailed` set), so a download abandoned at the 90 s cap (`tc.downloadTool` cannot be
+aborted) or a tool-cache retry timer cannot keep the step running. The detached, unref'd hoard
+child is not affected.
 
 Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`,
 `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.

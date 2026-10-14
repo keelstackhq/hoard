@@ -1,3 +1,4 @@
+import { exitWhenDone } from "./exit.js";
 import { runMain } from "./lifecycle.js";
 
-await runMain();
+await exitWhenDone(runMain);
