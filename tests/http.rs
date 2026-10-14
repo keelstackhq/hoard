@@ -8,7 +8,7 @@ use bytes::Bytes;
 use common::failing_layer::FailingWrites;
 use common::{
     TestServer, fs_config, layered_fs_store, spawn_no_reads_server, spawn_test_server,
-    spawn_test_server_with, wait_for_file,
+    spawn_test_server_with, spawn_write_behind_server, wait_for_file,
 };
 use hoard::config::Mode;
 use hoard::key::artifact_key;
@@ -496,9 +496,24 @@ fn chunks(seed: u64, total: usize, chunk: usize) -> impl Iterator<Item = Bytes> 
 #[tokio::test]
 #[ignore]
 async fn large_artifact_streams() {
+    large_artifact_round_trip(spawn_test_server(Mode::ReadWrite).await).await;
+}
+
+/// The same 150 MB round trip through the write-behind queue (spooled to disk, then
+/// streamed from the spool file to the store).
+#[tokio::test]
+#[ignore]
+async fn large_artifact_streams_write_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let store =
+        hoard::store::Store::new(hoard::store::build_operator(&fs_config(dir.path())).unwrap());
+    let t = spawn_write_behind_server(store, hoard::writebehind::SPOOL_CAP, dir).await;
+    large_artifact_round_trip(t).await;
+}
+
+async fn large_artifact_round_trip(t: TestServer) {
     use sha2::{Digest, Sha256};
     const TOTAL: usize = 150 * 1024 * 1024;
-    let t = spawn_test_server(Mode::ReadWrite).await;
     let seed: u64 = rand::random();
     let mut sent = Sha256::new();
     for c in chunks(seed, TOTAL, 1 << 20) {
@@ -512,6 +527,10 @@ async fn large_artifact_streams() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+    if let Some(wb) = &t.write_behind {
+        let report = wb.drain(Duration::from_secs(120)).await;
+        assert_eq!((report.uploaded, report.dropped), (1, 0));
+    }
     let s = t.stats.snapshot();
     assert_eq!((s.puts, s.put_errors, s.bytes_up), (1, 0, TOTAL as u64));
 

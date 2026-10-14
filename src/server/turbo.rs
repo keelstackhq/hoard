@@ -23,6 +23,7 @@ use crate::envelope::{Header, MAX_HEADER_LEN, PREFIX_LEN, encode_header};
 use crate::key::validate_hash;
 use crate::redact::redacted;
 use crate::store::{GetOutcome, PutOutcome, StoreError};
+use crate::writebehind::Enqueued;
 
 const DURATION: &str = "x-artifact-duration";
 const TAG: &str = "x-artifact-tag";
@@ -233,8 +234,26 @@ pub async fn put_artifact(
         inc(&s.stats.put_errors, 1);
         return put_ok();
     }
-    let stream = ExactLength::new(body.into_data_stream().map_err(std::io::Error::other), size);
-    match s.store.put(&s.turbo_key(&hash), &header, stream).await {
+    let key = s.turbo_key(&hash);
+    let mut stream = ExactLength::new(body.into_data_stream().map_err(std::io::Error::other), size);
+    // Write-behind: answer once the body is spooled; a worker uploads it later. A full spool
+    // or a closed (draining) queue hands the body back for the synchronous upload below.
+    if let Some(wb) = &s.write_behind {
+        match wb.enqueue(key.clone(), header.clone(), stream).await {
+            Ok(Enqueued::Spooled) => return put_ok(),
+            Ok(Enqueued::Duplicate) => {
+                inc(&s.stats.put_skipped_existing, 1);
+                return put_ok();
+            }
+            Ok(Enqueued::Declined(back)) => stream = back,
+            Err(e) => {
+                warn!(%hash, error = %e, "PUT: cannot spool the artifact for upload, not cached");
+                inc(&s.stats.put_errors, 1);
+                return put_ok();
+            }
+        }
+    }
+    match s.store.put(&key, &header, stream).await {
         Ok(PutOutcome::Created) => {
             inc(&s.stats.puts, 1);
             inc(&s.stats.bytes_up, size);

@@ -20,6 +20,15 @@ pub enum Mode {
     Off,
 }
 
+/// `write-behind`: answer PUTs once the body is spooled to disk and upload in the background.
+/// `auto` is on for `storage=github` (slow, rate-limited uploads) and off for `r2`/`fs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum WriteBehindMode {
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum LifecycleMode {
     Auto,
@@ -163,6 +172,9 @@ pub struct ServeArgs {
     /// R2 size cap: KB, MB, GB or TB (powers of 1000).
     #[arg(long, env = "HOARD_MAX_SIZE", default_value = "5GB")]
     pub max_size: String,
+    /// Upload PUTs in the background after spooling them to disk (auto: on for github).
+    #[arg(long, env = "HOARD_WRITE_BEHIND", value_enum, default_value = "auto")]
+    pub write_behind: WriteBehindMode,
 }
 
 fn redact<T>(v: &Option<T>) -> Option<&'static str> {
@@ -190,6 +202,7 @@ impl fmt::Debug for ServeArgs {
             .field("r2_lifecycle", &self.r2_lifecycle)
             .field("max_age_days", &self.max_age_days)
             .field("max_size", &self.max_size)
+            .field("write_behind", &self.write_behind)
             .finish()
     }
 }
@@ -267,6 +280,8 @@ pub struct Config {
     pub r2_lifecycle: LifecycleMode,
     pub max_age_days: u32,
     pub max_size: u64,
+    /// PUTs are spooled and uploaded in the background (`write-behind`, `auto` resolved).
+    pub write_behind: bool,
 }
 
 impl fmt::Debug for Config {
@@ -286,6 +301,7 @@ impl fmt::Debug for Config {
             .field("r2_lifecycle", &self.r2_lifecycle)
             .field("max_age_days", &self.max_age_days)
             .field("max_size", &self.max_size)
+            .field("write_behind", &self.write_behind)
             .finish()
     }
 }
@@ -363,6 +379,11 @@ impl TryFrom<ServeArgs> for Config {
             r2_lifecycle: a.r2_lifecycle,
             max_age_days: a.max_age_days,
             max_size,
+            write_behind: match a.write_behind {
+                WriteBehindMode::Auto => a.storage == Storage::Github,
+                WriteBehindMode::On => true,
+                WriteBehindMode::Off => false,
+            },
         })
     }
 }
@@ -668,6 +689,31 @@ mod tests {
         };
         assert!(!parse(&["serve", "--storage", "fs"]));
         assert!(parse(&["serve", "--storage", "fs", "--no-reads"]));
+    }
+    #[test]
+    fn write_behind_auto_is_on_only_for_github() {
+        let parse = |args: &[&str]| {
+            Config::try_from(ServeArgs::parse_from(args.iter().copied()))
+                .unwrap()
+                .write_behind
+        };
+        assert!(parse(&["serve", "--storage", "github"]));
+        assert!(!parse(&["serve", "--storage", "fs"]));
+        assert!(parse(&["serve", "--storage", "fs", "--write-behind", "on"]));
+        assert!(!parse(&[
+            "serve",
+            "--storage",
+            "github",
+            "--write-behind",
+            "off"
+        ]));
+        assert!(parse(&[
+            "serve",
+            "--storage",
+            "github",
+            "--write-behind",
+            "auto"
+        ]));
     }
     #[test]
     fn defaults() {

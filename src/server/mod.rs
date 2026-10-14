@@ -1,7 +1,7 @@
 //! axum router: Turborepo `/v8` API behind bearer auth, plus `/_hoard/*` routes.
 
 mod auth;
-mod body;
+pub(crate) mod body;
 mod turbo;
 
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use crate::config::Mode;
 use crate::ratelimit::RateGate;
 use crate::stats::{Stats, StatsSnapshot};
 use crate::store::Store;
+use crate::writebehind::WriteBehind;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,6 +28,8 @@ pub struct AppState {
     pub rate_gate: Arc<RateGate>,
     pub prefix: String,
     pub cache_version: String,
+    /// Set when PUTs are spooled and uploaded in the background (`write-behind`).
+    pub write_behind: Option<Arc<WriteBehind>>,
     /// `POST /_hoard/shutdown` sends a reply channel here and answers once the shutdown work
     /// (prune, summary) has replied, or the receiver is gone.
     pub shutdown: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,

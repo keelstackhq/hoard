@@ -33,6 +33,14 @@ impl RateGate {
         }
     }
 
+    /// How long uploads stay paused after `now` (zero when the gate is open).
+    pub fn remaining_pause(&self, now: Instant) -> Duration {
+        match *self.lock() {
+            Some(until) => until.saturating_duration_since(now),
+            None => Duration::ZERO,
+        }
+    }
+
     /// The backend rate-limited an upload at `now`: pause uploads for `retry_after` (default
     /// [`DEFAULT_PAUSE`], at most [`MAX_PAUSE`]). A pause is only ever extended, never
     /// shortened. Logs one warning
@@ -96,6 +104,22 @@ mod tests {
         g.on_rate_limited(t0, Some(Duration::from_secs(1)));
         assert!(!g.allow_upload(t0 + Duration::from_secs(29)));
         assert!(g.allow_upload(t0 + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn remaining_pause_counts_down_to_zero() {
+        let g = RateGate::default();
+        let t0 = Instant::now();
+        assert_eq!(g.remaining_pause(t0), Duration::ZERO);
+        g.on_rate_limited(t0, Some(Duration::from_secs(5)));
+        assert_eq!(
+            g.remaining_pause(t0 + Duration::from_secs(2)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            g.remaining_pause(t0 + Duration::from_secs(9)),
+            Duration::ZERO
+        );
     }
 
     #[test]

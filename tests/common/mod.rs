@@ -73,6 +73,7 @@ pub fn fs_config(root: impl AsRef<std::path::Path>) -> Config {
         r2_lifecycle: LifecycleMode::Auto,
         max_age_days: 7,
         max_size: 1 << 30,
+        write_behind: false,
     }
 }
 
@@ -82,6 +83,7 @@ use hoard::ratelimit::RateGate;
 use hoard::server::{AppState, router};
 use hoard::stats::Stats;
 use hoard::store::{Store, build_operator};
+use hoard::writebehind::WriteBehind;
 
 /// A running server on `127.0.0.1:<random>` backed by an fs store in a tempdir.
 pub struct TestServer {
@@ -89,6 +91,9 @@ pub struct TestServer {
     pub token: String,
     pub stats: Arc<Stats>,
     pub store: Arc<Store>,
+    pub rate_gate: Arc<RateGate>,
+    /// The write-behind queue, when the server has one.
+    pub write_behind: Option<Arc<WriteBehind>>,
     /// Receives a reply channel when `POST /_hoard/shutdown` is called; the handler answers
     /// once the reply is sent (or dropped).
     pub shutdown: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>,
@@ -133,22 +138,70 @@ pub async fn spawn_test_server_opts(
     no_reads: bool,
     dir: tempfile::TempDir,
 ) -> TestServer {
-    let store = Arc::new(store);
-    let stats = Arc::new(Stats::default());
+    let parts = ServerParts::new(Arc::new(store));
+    spawn_server(parts, mode, no_reads, dir).await
+}
+
+/// A read-write server over `store` whose PUTs go through a write-behind queue (spool dir
+/// `<dir>/spool`, concurrency 8, spool cap `cap`). `TestServer::write_behind` drains it.
+pub async fn spawn_write_behind_server(
+    store: Store,
+    cap: u64,
+    dir: tempfile::TempDir,
+) -> TestServer {
+    let mut parts = ServerParts::new(Arc::new(store));
+    let wb = WriteBehind::new(
+        parts.store.clone(),
+        parts.stats.clone(),
+        parts.rate_gate.clone(),
+        dir.path().join("spool"),
+        8,
+    )
+    .with_spool_cap(cap);
+    parts.write_behind = Some(Arc::new(wb));
+    spawn_server(parts, Mode::ReadWrite, false, dir).await
+}
+
+/// The shared pieces of a test server's state.
+struct ServerParts {
+    store: Arc<Store>,
+    stats: Arc<Stats>,
+    rate_gate: Arc<RateGate>,
+    write_behind: Option<Arc<WriteBehind>>,
+}
+
+impl ServerParts {
+    fn new(store: Arc<Store>) -> Self {
+        Self {
+            store,
+            stats: Arc::default(),
+            rate_gate: Arc::default(),
+            write_behind: None,
+        }
+    }
+}
+
+async fn spawn_server(
+    parts: ServerParts,
+    mode: Mode,
+    no_reads: bool,
+    dir: tempfile::TempDir,
+) -> TestServer {
     let token: String = rand::random::<[u8; 16]>()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let state = AppState {
-        store: store.clone(),
-        stats: stats.clone(),
+        store: parts.store.clone(),
+        stats: parts.stats.clone(),
         token: token.clone(),
         mode,
         no_reads,
-        rate_gate: Arc::new(RateGate::default()),
+        rate_gate: parts.rate_gate.clone(),
         prefix: "cache/".into(),
         cache_version: "v1".into(),
+        write_behind: parts.write_behind.clone(),
         shutdown: tx,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -159,8 +212,10 @@ pub async fn spawn_test_server_opts(
     TestServer {
         base_url: format!("http://{addr}"),
         token,
-        stats,
-        store,
+        stats: parts.stats,
+        store: parts.store,
+        rate_gate: parts.rate_gate,
+        write_behind: parts.write_behind,
         shutdown: rx,
         addr,
         _dir: dir,

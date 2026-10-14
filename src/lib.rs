@@ -10,3 +10,4 @@ pub mod server;
 pub mod stats;
 pub mod store;
 pub mod vp;
+pub mod writebehind;

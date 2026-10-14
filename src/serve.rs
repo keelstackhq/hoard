@@ -20,6 +20,7 @@ use crate::redact::redacted;
 use crate::server::{AppState, router};
 use crate::stats::{Stats, human_bytes, render_summary};
 use crate::store::{Store, StoreError, build_operator};
+use crate::writebehind::{CONCURRENCY, DRAIN_TIMEOUT, WriteBehind, default_spool_dir};
 
 /// Key prefix used by the fs backend.
 const FS_PREFIX: &str = "cache/";
@@ -194,6 +195,8 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let port = listener.local_addr()?.port();
 
     let stats = Arc::new(Stats::default());
+    let rate_gate = Arc::new(RateGate::default());
+    let write_behind = start_write_behind(&cfg, &store, &stats, &rate_gate);
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<oneshot::Sender<()>>(8);
     let state = AppState {
         store,
@@ -201,9 +204,10 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         token: token.clone(),
         mode: cfg.mode,
         no_reads: cfg.no_reads,
-        rate_gate: Arc::new(RateGate::default()),
+        rate_gate,
         prefix: prefix.clone(),
         cache_version: cfg.cache_version.clone(),
+        write_behind: write_behind.clone(),
         shutdown: shutdown_tx,
     };
 
@@ -238,6 +242,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let cache = ShutdownCache {
         store: &store_for_shutdown,
         prefix: &prefix,
+        write_behind: write_behind.as_deref(),
     };
     shutdown_work(&cfg, cache, &stats, &storage_line, startup_lines).await;
     remove_if_present(&cfg.port_file);
@@ -251,6 +256,37 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let _ = stop_tx.send(());
     server.await.context("server task failed")??;
     Ok(())
+}
+
+/// The write-behind queue when `write-behind` is on and the server writes (`read-write`): a
+/// fresh spool dir under `RUNNER_TEMP` (else `./.hoard`). If the dir cannot be created, PUTs
+/// upload synchronously (a warning; the cache never fails the build).
+fn start_write_behind(
+    cfg: &Config,
+    store: &Arc<Store>,
+    stats: &Arc<Stats>,
+    gate: &Arc<RateGate>,
+) -> Option<Arc<WriteBehind>> {
+    if !cfg.write_behind || cfg.mode != Mode::ReadWrite {
+        return None;
+    }
+    let dir = default_spool_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!(
+            path = %dir.display(),
+            error = %e,
+            "cannot create the write-behind spool dir; uploading PUTs synchronously"
+        );
+        return None;
+    }
+    info!(path = %dir.display(), "write-behind on: PUTs are spooled and uploaded in the background");
+    Some(Arc::new(WriteBehind::new(
+        store.clone(),
+        stats.clone(),
+        gate.clone(),
+        dir,
+        CONCURRENCY,
+    )))
 }
 
 /// Startup step for `storage=r2` (spec §7.1): ensure or verify the lifecycle rule, and return
@@ -314,11 +350,13 @@ async fn lifecycle_startup_within(cfg: &Config, bound: Duration) -> anyhow::Resu
     }
 }
 
-/// The store the server used and its key prefix, for the shutdown hooks.
+/// The store the server used, its key prefix and its write-behind queue (if any), for the
+/// shutdown hooks.
 #[derive(Clone, Copy)]
 struct ShutdownCache<'a> {
     store: &'a Store,
     prefix: &'a str,
+    write_behind: Option<&'a WriteBehind>,
 }
 
 /// Shutdown hook for `storage=r2`, `mode=read-write` (spec §7.2): enforce `max-size`, bounded
@@ -394,10 +432,10 @@ fn short_reason(e: &StoreError) -> String {
     }
 }
 
-/// Work done once on shutdown: hooks contribute extra summary lines (after the startup
-/// lines), then the summary is written. Contract: this never fails. Hooks and the summary
-/// report problems as warnings or summary lines, so shutdown always exits 0 (the cache must
-/// never fail the build).
+/// Work done once on shutdown: the write-behind queue is drained (at most [`DRAIN_TIMEOUT`]),
+/// then hooks contribute extra summary lines (after the startup lines), then the summary is
+/// written. Contract: this never fails. Hooks and the summary report problems as warnings or
+/// summary lines, so shutdown always exits 0 (the cache must never fail the build).
 async fn shutdown_work(
     cfg: &Config,
     cache: ShutdownCache<'_>,
@@ -405,7 +443,37 @@ async fn shutdown_work(
     storage_line: &str,
     startup_lines: Vec<String>,
 ) {
+    shutdown_work_within(
+        cfg,
+        cache,
+        stats,
+        storage_line,
+        startup_lines,
+        DRAIN_TIMEOUT,
+    )
+    .await;
+}
+
+/// [`shutdown_work`] with the drain bound as a parameter (tests).
+async fn shutdown_work_within(
+    cfg: &Config,
+    cache: ShutdownCache<'_>,
+    stats: &Stats,
+    storage_line: &str,
+    startup_lines: Vec<String>,
+    drain_timeout: Duration,
+) {
     let mut extra_lines = startup_lines;
+    // Before the prune, so it sees the uploads, and before the summary, so it counts them.
+    if let Some(wb) = cache.write_behind {
+        let report = wb.drain(drain_timeout).await;
+        if report.dropped > 0 {
+            extra_lines.push(format!(
+                "Upload queue: {} dropped at shutdown",
+                report.dropped
+            ));
+        }
+    }
     extra_lines.extend(prune_on_shutdown(cfg, cache).await);
     let snapshot = stats.snapshot();
     // Without this a broken storage (every upload failing) would look like a cold cache.
@@ -464,6 +532,7 @@ mod tests {
         let cache = ShutdownCache {
             store: &store,
             prefix: "cache/",
+            write_behind: None,
         };
         let start = std::time::Instant::now();
         let lines = prune_on_shutdown_within(&cfg, cache, Duration::from_millis(200)).await;
@@ -530,6 +599,7 @@ mod tests {
         let cache = ShutdownCache {
             store: &store,
             prefix: "cache/",
+            write_behind: None,
         };
         let stats = Stats::default();
         shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
@@ -559,6 +629,7 @@ mod tests {
         let cache = ShutdownCache {
             store: &store,
             prefix: "cache/",
+            write_behind: None,
         };
         let stats = Stats::default();
         stats
@@ -573,6 +644,78 @@ mod tests {
             md.ends_with("Storage: github · Upload errors: 4 · Rate limited: 2 uploads skipped\n"),
             "{md}"
         );
+    }
+
+    /// A drain that times out drops the queue: put_errors, a summary line, and the spool dir
+    /// is gone. The S3 endpoint accepts connections and never answers (a hung upload).
+    #[tokio::test]
+    async fn summary_reports_uploads_dropped_at_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = black_hole().await;
+        let mut cfg = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-endpoint",
+            &endpoint,
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+            "--mode",
+            "read",
+        ]))
+        .unwrap();
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Arc::new(Store::new(build_operator(&cfg).unwrap()));
+        let stats = Arc::new(Stats::default());
+        let spool = dir.path().join("spool");
+        let wb = WriteBehind::new(
+            store.clone(),
+            stats.clone(),
+            Arc::new(RateGate::default()),
+            spool.clone(),
+            8,
+        );
+        let header = crate::envelope::Header {
+            v: 1,
+            duration_ms: None,
+            tag: None,
+            size: 3,
+        };
+        let body = futures::stream::iter([Ok(bytes::Bytes::from_static(b"abc"))]);
+        wb.enqueue("cache/turbo/v1/ab".into(), header, body)
+            .await
+            .unwrap();
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+            write_behind: Some(&wb),
+        };
+        let start = std::time::Instant::now();
+        shutdown_work_within(
+            &cfg,
+            cache,
+            &stats,
+            "Storage: r2",
+            vec![],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.ends_with("Storage: r2 · Upload queue: 1 dropped at shutdown · Upload errors: 1\n"),
+            "{md}"
+        );
+        assert!(!spool.exists());
     }
 
     #[test]
@@ -598,6 +741,7 @@ mod tests {
         let cache = ShutdownCache {
             store: &store,
             prefix: "cache/",
+            write_behind: None,
         };
         assert!(prune_on_shutdown(&cfg, cache).await.is_empty());
         cfg.storage = Storage::R2;

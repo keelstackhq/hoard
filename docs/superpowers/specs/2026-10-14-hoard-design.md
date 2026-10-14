@@ -107,6 +107,7 @@ secrets as `""`).
 | `max-size` | `5GB` | R2 size cap; accepts `KB`, `MB`, `GB`, `TB` (powers of 1000) |
 | `vp-max-size` | `2GB` | `vp save` only: when the regular files of the task-cache directory add up to more, the save is skipped with a hint to run `vp cache clean` (hoard never edits Vite+'s SQLite cache). Same units as `max-size` |
 | `workspace`, `os-arch`, `run-key` | `.`, this machine, run id | `vp restore` / `vp save` only (§4.1) |
+| `write-behind` | `auto` | `auto` \| `on` \| `off`; `auto` = on for `storage=github`, off for `r2`/`fs`. PUTs are answered once spooled to disk and uploaded in the background (§5) |
 
 R2 endpoint: `https://<account_id>.r2.cloudflarestorage.com` unless `r2-endpoint` overrides it,
 region `auto`, path-style addressing. Only the configured keys are used: credentials and config
@@ -123,6 +124,7 @@ Bound to `127.0.0.1` only. Every route except `/_hoard/health` requires
 | `HEAD /v8/artifacts/{hash}` | `200` + `Content-Length` and `x-artifact-duration`/`x-artifact-tag` headers if present, else `404`. Must not download the body. Counts misses only (the following GET counts the hit). With `no-reads`: always `404`, counted as a miss, store not read. |
 | `GET /v8/artifacts/{hash}` | `200` streaming body (`application/octet-stream`, `Content-Length`, artifact headers) or `404`. With `no-reads`: always `404`, counted as a miss, store not read. |
 | `PUT /v8/artifacts/{hash}` | Stream body to the store; `200 {"urls":[]}`. Existing key → also `200`. `mode=read`/`off` → `403` with `{"error":{"code":"read_only","message":"hoard is in read-only mode"}}` (code `off`, message `hoard is off (mode=off)` for `off`), the error shape Turborepo prints. The code is never `forbidden` or `remote_caching_*`: Turborepo answers those by disabling the remote cache for the whole run, reads included. Needs `Content-Length` (becomes the envelope `size`); missing, a body of a different length, or a header over 4096 bytes → not stored, `200`, counted as `put_errors`. A backend rate limit → `200`, counted as `rate_limited`, and uploads pause (§6.4): while paused, a PUT (after the auth, hash and mode checks) is answered `200` and counted as `rate_limited` without touching the store or reading the body. |
+| `PUT` with `write-behind` on (`mode=read-write` only) | After the same checks (auth, hash, mode, rate-limit pause, `Content-Length`, header size), the body is streamed to a spool file in `<RUNNER_TEMP or ./.hoard>/hoard-spool-<random>` (created at startup, removed on shutdown) and length-checked; then `200`. A spool error (disk full, a short or long body) → no file kept, `200`, counted as `put_errors`. A hash already queued or uploading is not spooled again: `200`, counted as `put_skipped_existing`. A body that would push the spool past 2 GB, or a PUT that arrives after the shutdown drain started, is uploaded synchronously as without write-behind (one warning the first time the spool is full). Up to 8 background uploads run at once, each an if-not-exists write of the complete envelope streamed from the spool file (the spool file is deleted after the attempt); they count `puts`/`bytes_up` (on upload, not on enqueue), `put_skipped_existing` or `put_errors`. They obey the rate-limit pause: a queued upload waits while uploads are paused, and a `429` counts `rate_limited`, pauses uploads and retries the item once the pause ends. A GET/HEAD of a hash that is still queued is a miss (Turborepo has the artifact locally). Shutdown (`/_hoard/shutdown`, SIGTERM, Ctrl-C) drains the queue for at most 120 s before the prune and the summary; uploads still running then are aborted (no object is left at their keys) and counted as `put_errors`. |
 | `POST /v8/artifacts/events` | Accept (body ignored); `200` |
 | `POST /v8/artifacts` | Body `{"hashes":[…]}` → `200` JSON object mapping each found hash to `{"size":<u64>,"taskDurationMs":<u64\|null>}`; missing hashes are left out (`{}` with `mode=off` or `no-reads`) |
 | `GET /_hoard/health` | `200 ok` (no auth) |
@@ -329,7 +331,11 @@ first (does a same-key copy reset the age?).
 bytes_down, bytes_up, time_saved_ms }` — `time_saved_ms` sums `duration_ms` of every hit.
 The storage line is `Storage: github`, `Storage: r2 (<bucket>/<prefix>)` or `Storage: fs (<root>)`;
 when `put_errors > 0` the line ends with `Upload errors: N` (so a broken storage never looks like
-a cold cache), then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`.
+a cold cache), then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`. When the
+write-behind drain timed out, `Upload queue: N dropped at shutdown` comes right after the
+startup lines (before the prune line); the dropped uploads are also in `Upload errors`. With
+write-behind, a `429` on a background upload that is retried later counts in `rate_limited`
+too.
 
 Summary markdown (written to `summary-file`, appended by the action to `$GITHUB_STEP_SUMMARY`):
 

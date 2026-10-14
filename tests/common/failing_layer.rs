@@ -1,9 +1,11 @@
 //! A test-only OpenDAL layer that fails every write with a chosen `ErrorKind` and counts the
 //! calls that reach the store, to stand in for a backend that rate-limits (GitHub cache 429)
-//! or rejects a second create of an immutable key.
+//! or rejects a second create of an immutable key. [`FailingWrites::slow`] instead lets
+//! writes through and delays each writer's `close` (a slow upload).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use opendal::raw::*;
 use opendal::{Capability, Error, ErrorKind, OperationContext, Result};
@@ -36,6 +38,10 @@ pub struct FailingWrites {
     /// Open the writer normally and fail its first `write` call instead (the GitHub cache
     /// writer is lazy: its create request, and so a 429, happens on the first write).
     pub fail_first_write: bool,
+    /// Fail only this many writes; later writes pass through (`None`: fail every write).
+    pub fail_times: Option<Arc<AtomicU64>>,
+    /// Do not fail: pass writes through and sleep this long in each writer's `close`.
+    pub slow_close: Option<Duration>,
     pub calls: Arc<Calls>,
 }
 
@@ -46,7 +52,28 @@ impl FailingWrites {
             response: None,
             unconditional: false,
             fail_first_write: false,
+            fail_times: None,
+            slow_close: None,
             calls: Arc::default(),
+        }
+    }
+
+    /// A store whose every upload takes at least `delay` (spent in `close`, so the object
+    /// appears only after it).
+    pub fn slow(delay: Duration) -> Self {
+        Self {
+            slow_close: Some(delay),
+            ..Self::new(ErrorKind::Unexpected)
+        }
+    }
+
+    /// True when this write should fail (consumes one of `fail_times`).
+    fn should_fail(&self) -> bool {
+        match &self.fail_times {
+            None => true,
+            Some(left) => left
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok(),
         }
     }
 }
@@ -76,6 +103,27 @@ impl oio::Write for FailFirstWrite {
     }
 
     async fn close(&mut self) -> Result<opendal::Metadata> {
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.inner.abort().await
+    }
+}
+
+/// A writer whose `close` sleeps first.
+struct SlowClose {
+    inner: oio::Writer,
+    delay: Duration,
+}
+
+impl oio::Write for SlowClose {
+    async fn write(&mut self, bs: opendal::Buffer) -> Result<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> Result<opendal::Metadata> {
+        tokio::time::sleep(self.delay).await;
         self.inner.close().await
     }
 
@@ -140,6 +188,13 @@ impl Service for FailingService {
 
     fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         self.cfg.calls.write.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = self.cfg.slow_close {
+            let inner = self.inner.write(ctx, path, args)?;
+            return Ok(Box::new(SlowClose { inner, delay }));
+        }
+        if !self.cfg.should_fail() {
+            return self.inner.write(ctx, path, args);
+        }
         if self.cfg.fail_first_write {
             let inner = self.inner.write(ctx, path, args)?;
             return Ok(Box::new(FailFirstWrite {

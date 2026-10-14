@@ -397,3 +397,65 @@ fn serve_exits_0_on_sigterm_and_cleans_up() {
     );
     assert!(!port_file.exists() && !token_file.exists());
 }
+
+/// SIGTERM with write-behind on: the queue is drained before the summary, the object is
+/// stored, and the spool dir under RUNNER_TEMP is removed.
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_drains_write_behind_queue_on_sigterm() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port_file, token_file, summary, store) = (
+        dir.path().join("port"),
+        dir.path().join("token"),
+        dir.path().join("summary.md"),
+        dir.path().join("store"),
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hoard"))
+        .args(["serve", "--storage", "fs", "--write-behind", "on"])
+        .arg("--fs-root")
+        .arg(&store)
+        .arg("--summary-file")
+        .arg(&summary)
+        .env("HOARD_PORT_FILE", &port_file)
+        .env("HOARD_TOKEN_FILE", &token_file)
+        .env("RUNNER_TEMP", dir.path())
+        .stderr(std::process::Stdio::null())
+        .spawn_guarded();
+    let port = common::wait_for_file(&port_file).await;
+    let token = std::fs::read_to_string(&token_file).unwrap();
+    let spool_dirs = || {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("hoard-spool-")
+            })
+            .count()
+    };
+    assert_eq!(spool_dirs(), 1, "spool dir created at startup");
+    let r = reqwest::Client::new()
+        .put(format!(
+            "http://127.0.0.1:{}/v8/artifacts/abc123",
+            port.trim()
+        ))
+        .bearer_auth(token.trim())
+        .body("payload")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0));
+    assert!(store.join("cache/turbo/v1/abc123").exists());
+    let md = std::fs::read_to_string(&summary).unwrap();
+    assert!(md.contains("| 0 | 0 | 7 B |"), "{md}");
+    assert_eq!(spool_dirs(), 0, "spool dir removed on shutdown");
+}

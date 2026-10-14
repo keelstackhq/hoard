@@ -140,4 +140,8 @@ Every setting is a flag (`--max-size 5GB`) and an environment variable (`HOARD_M
 The full list with defaults is the table in
 [spec §4.2](docs/superpowers/specs/2026-10-14-hoard-design.md#42-configuration).
 
+`--write-behind auto|on|off` (`HOARD_WRITE_BEHIND`, default `auto`: on for `storage=github`,
+off for `r2` and `fs`) answers each PUT once the artifact is spooled to disk and uploads it in
+the background; shutdown waits up to 120 s for the queue.
+
 License: MIT.
