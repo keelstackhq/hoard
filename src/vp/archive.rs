@@ -150,7 +150,14 @@ fn write_archive(dir: &Path, w: impl Write) -> io::Result<()> {
         let t = e.meta.file_type();
         if t.is_dir() {
             tar.append_dir(&e.rel, &e.full)?;
-        } else if t.is_file() || t.is_symlink() {
+        } else if t.is_symlink() {
+            // A link restore would refuse (absolute or with `..`) would fail the whole restore.
+            if std::fs::read_link(&e.full).is_ok_and(|t| is_safe_link_target(&t)) {
+                tar.append_path_with_name(&e.full, &e.rel)?;
+            } else {
+                tracing::warn!(path = %e.rel.display(), "not archiving a symlink that points outside the cache directory");
+            }
+        } else if t.is_file() {
             tar.append_path_with_name(&e.full, &e.rel)?;
         }
         // Sockets, fifos and devices are not cache content; leave them out.
@@ -206,31 +213,37 @@ fn is_safe_relative(p: &Path) -> bool {
     any
 }
 
-/// True when a symlink at `entry` (relative to the root) pointing at `target` stays inside
-/// the root, judged lexically.
-fn symlink_stays_inside(entry: &Path, target: &Path) -> bool {
-    let mut depth = entry
-        .parent()
-        .map(|p| {
-            p.components()
-                .filter(|c| matches!(c, Component::Normal(_)))
-                .count()
-        })
-        .unwrap_or(0);
-    for c in target.components() {
-        match c {
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if depth == 0 {
-                    return false;
-                }
-                depth -= 1;
+/// A symlink target is allowed only when it is relative and has no `..` component: it can then
+/// only point at or below the link's own directory, however links are chained. (A lexical
+/// check that allows `..` is not enough: `a/b -> ..` plus `a/b/c -> ..` escapes.)
+fn is_safe_link_target(target: &Path) -> bool {
+    target.components().next().is_some()
+        && target
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// Defence in depth after extraction: every symlink under `dir` that resolves must resolve
+/// inside `dir`. A dangling link (nothing to resolve) is harmless.
+pub(crate) fn check_links_inside(dir: &Path) -> io::Result<()> {
+    let root = dir.canonicalize()?;
+    for e in walk(dir)? {
+        if !e.meta.file_type().is_symlink() {
+            continue;
+        }
+        match e.full.canonicalize() {
+            Ok(real) if real.starts_with(&root) => {}
+            Ok(_) => {
+                return Err(invalid(format!(
+                    "archive symlink {} points outside the cache directory",
+                    e.rel.display()
+                )));
             }
-            Component::RootDir | Component::Prefix(_) => return false,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
         }
     }
-    true
+    Ok(())
 }
 
 /// Refuses an entry that could write outside the root or is not plain cache content.
@@ -249,7 +262,7 @@ fn check_entry<R: Read>(e: &tar::Entry<'_, R>) -> io::Result<bool> {
             let target = e
                 .link_name()?
                 .ok_or_else(|| invalid("symlink without a target"))?;
-            if !symlink_stays_inside(&path, &target) {
+            if !is_safe_link_target(&target) {
                 return Err(invalid(format!(
                     "archive symlink {} points outside the cache directory",
                     path.display()
@@ -293,7 +306,7 @@ fn unpack_into(r: impl Read, dir: &Path) -> io::Result<()> {
     }
     // Read to the end so a truncated or corrupt zstd frame (checksum) is an error.
     io::copy(&mut archive.into_inner(), &mut io::sink())?;
-    Ok(())
+    check_links_inside(dir)
 }
 
 /// Extracts a tar.zst from `body` into `dir` (which must exist).
@@ -384,6 +397,81 @@ mod tests {
         let mut tar = tar::Builder::new(Vec::new());
         tar.append(&h, body).unwrap();
         zstd::encode_all(&tar.into_inner().unwrap()[..], 3).unwrap()
+    }
+
+    /// One raw entry: name, type, link target.
+    type RawEntry<'a> = (&'a [u8], tar::EntryType, Option<&'a [u8]>);
+
+    /// A tar.zst of raw entries; regular files hold `evil`.
+    fn raw_entries(entries: &[RawEntry<'_>]) -> Vec<u8> {
+        let mut tar = tar::Builder::new(Vec::new());
+        for (name, kind, link) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name);
+            if let Some(l) = link {
+                h.as_gnu_mut().unwrap().linkname[..l.len()].copy_from_slice(l);
+            }
+            h.set_entry_type(*kind);
+            h.set_mode(0o755);
+            let body: &[u8] = if *kind == tar::EntryType::Regular {
+                b"evil"
+            } else {
+                b""
+            };
+            h.set_size(body.len() as u64);
+            h.set_cksum();
+            tar.append(&h, body).unwrap();
+        }
+        zstd::encode_all(&tar.into_inner().unwrap()[..], 3).unwrap()
+    }
+
+    /// Each symlink alone stays inside, but `a/b/c` resolves through `a/b` (the root) to the
+    /// root's parent.
+    #[tokio::test]
+    async fn chained_symlinks_are_rejected() {
+        use tar::EntryType as T;
+        let root = tempfile::tempdir().unwrap();
+        let dst = root.path().join("dst");
+        std::fs::create_dir(&dst).unwrap();
+        let bytes = raw_entries(&[
+            (b"a", T::Directory, None),
+            (b"a/b", T::Symlink, Some(b"..")),
+            (b"a/b/c", T::Symlink, Some(b"..")),
+        ]);
+        let err = extract_archive(&bytes[..], &dst).await.unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn absolute_symlink_then_file_through_it_is_rejected() {
+        use tar::EntryType as T;
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("etc");
+        std::fs::create_dir(&outside).unwrap();
+        let dst = root.path().join("dst");
+        std::fs::create_dir(&dst).unwrap();
+        let target = outside.to_str().unwrap().as_bytes().to_vec();
+        let bytes = raw_entries(&[
+            (b"a", T::Symlink, Some(&target)),
+            (b"a/passwd", T::Regular, None),
+        ]);
+        assert!(extract_archive(&bytes[..], &dst).await.is_err());
+        assert!(!outside.join("passwd").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_escaping_after_extraction_are_found() {
+        let root = tempfile::tempdir().unwrap();
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(dst.join("d")).unwrap();
+        std::fs::write(dst.join("d/f"), b"x").unwrap();
+        std::os::unix::fs::symlink("d/f", dst.join("ok")).unwrap();
+        std::os::unix::fs::symlink("missing", dst.join("dangling")).unwrap();
+        assert!(check_links_inside(&dst).is_ok());
+        std::os::unix::fs::symlink(root.path(), dst.join("d/up")).unwrap();
+        let err = check_links_inside(&dst).unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err}");
     }
 
     #[tokio::test]

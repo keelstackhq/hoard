@@ -79,7 +79,7 @@ One Rust crate (`hoard`, lib + bin) and one small TypeScript action in `action/`
 | `hoard env` | Print `export` lines for a running server (reads the port file and token file). |
 | `hoard prune` | Enforce `max-size` on R2 (or fs) now (ignores the 24 h throttle with `--force`); prints `pruned N of M objects, freed X, Y remain (max Z)` or `skipped: last prune < 24 h ago (use --force)`. With `storage=github` it fails: `prune is only for r2/fs storage; GitHub evicts old cache entries itself`. |
 | `hoard doctor` | Check storage credentials, bucket access and the R2 lifecycle rule; print fixes. The access check writes, reads and deletes `{prefix}_hoard/doctor`, also with `mode=read`. With `storage=github` it only checks that the GitHub Actions cache environment is complete and prints `✓ GitHub cache environment`; it never writes (entries are immutable and count against the quota). |
-| `hoard vp restore` / `vp save` | Restore or save the Vite+ task-cache directory (milestone 3; §6.1). Same storage flags as `serve`, plus `--workspace <dir>` (default `.`), `--os-arch` (default this machine in Node-style names: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `windows-x64`), `--run-key` (default `${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}`, else `local-<unix secs>-<random>`) and `--vp-max-size`. `os-arch` and `run-key` are one key segment (`[A-Za-z0-9._-]`, not `.`, `..` or `latest`). Prints one line: `restored <key> (<size>)`, `no cache found`, `saved <key> (<size>)`, ``skipped: the task cache is <size>, larger than vp-max-size (<max>); run `vp cache clean` ``, `skipped: cache directory is empty or missing`, `skipped: mode=off`, `skipped: mode=read (nothing is written)` (save), `skipped: no-reads (the cache is not read)` (restore), or on a storage or disk error `warning: Vite+ cache <save\|restore> failed (<redacted error>); the build continues without it`. All of these exit 0; only setup errors (bad flags, missing GitHub env) exit non-zero. |
+| `hoard vp restore` / `vp save` | Restore or save the Vite+ task-cache directory (milestone 3; §6.1). Same storage flags as `serve`, plus `--workspace <dir>` (default `.`), `--os-arch` (default this machine in Node-style names: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `windows-x64`), `--run-key` (default `${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-<8 random hex>`, so matrix legs of one run get distinct keys, else `local-<unix secs>-<8 random hex>`) and `--vp-max-size`. `os-arch` and `run-key` are one key segment (`[A-Za-z0-9._-]`, not `.`, `..` or `latest`). Prints one line: `restored <key> (<size>)`, `no cache found`, `saved <key> (<size>)`, ``skipped: the task cache is <size>, larger than vp-max-size (<max>); run `vp cache clean` ``, `skipped: cache directory is empty or missing`, `skipped: mode=off`, `skipped: mode=read (nothing is written)` (save), `skipped: no-reads (the cache is not read)` (restore), or on a storage or disk error `warning: Vite+ cache <save\|restore> failed (<redacted error>); the build continues without it`. The `skipped: mode…`/`no-reads` checks come before any storage setup (e.g. `mode=off` with `storage=github` needs no GitHub env). SIGTERM or Ctrl-C ends the command with the `warning: … failed (interrupted)` line, after removing its spooled archive and any half-extracted directory. All of these exit 0; only setup errors (bad flags, missing GitHub env) exit non-zero. |
 
 ### 4.2 Configuration
 
@@ -148,7 +148,7 @@ For `github` storage the prefix is `hoard/` (GitHub keys are flat strings; max 5
 Vite+ (milestone 3). Vite+ remote caching is unreleased upstream, so hoard archives Vite Task's
 cache directory: `VITE_CACHE_PATH` when it is absolute, else `node_modules/.vite/task-cache`
 under the workspace root (the default of Vite+ 1.2.0). One archive per run:
-`{prefix}vp/{cache_version}/{os}-{arch}/{run_key}`, e.g. `cache/vp/v1/linux-x64/123456-1`.
+`{prefix}vp/{cache_version}/{os}-{arch}/{run_key}`, e.g. `cache/vp/v1/linux-x64/123456-1-9f3a0c2e`.
 Task-cache paths are OS-specific, so restore only ever looks at the same `{os}-{arch}`, and
 takes the newest archive there:
 
@@ -157,18 +157,26 @@ takes the newest archive there:
   whose content is the full archive key. `vp restore` reads the pointer, then the archive; a
   missing pointer, a pointer naming a key outside that prefix, or a missing archive (pruned or
   expired) is `no cache found`. Concurrent saves both succeed; the pointer ends on one of them.
-  Matrix jobs of one run on the same OS share the run key: the first archive stays. The
-  archives live under the prefix, so the lifecycle rule and the size cap (§7) bound them too.
+  The archives live under the prefix, so the lifecycle rule and the size cap (§7) bound them too.
+- Matrix legs of one run on the same OS each save their own archive (the random suffix of the
+  default run key). Restore takes the newest one of them: when the legs run different task
+  subsets, the next run restores only one leg's task cache (the other legs' tasks miss once).
 - github: through the cache service v2 directly (§6.4), not OpenDAL: restore asks
   `GetCacheEntryDownloadURL` with `key` and `restore_keys` both the prefix
   `hoard/vp/{cache_version}/{os}-{arch}/`; GitHub returns the newest matching entry.
 
 The archive is a tar of the directory's contents (relative paths; file bytes, mtimes and unix
 permission bits kept; regular files, directories and symlinks only), zstd level 3 with a frame
-checksum. `vp save` first sums the regular files' sizes against `vp-max-size`, then spools the
-archive to a temp file (its size goes into the envelope) and uploads it from there. `vp
-restore` streams the archive into a new directory next to the target and only then swaps it in
-place of the target, so a failed or partial restore leaves the old directory as it was.
+checksum. A symlink is archived and restored only when its target is relative with no `..`
+component (it then always resolves inside the directory, however links chain); others are left
+out of the archive, and restore rejects them. After extraction every symlink that resolves must
+resolve inside the new directory. On Windows without symlink privilege a symlink entry cannot
+be created, so such a restore fails with a warning (Vite+'s task cache holds plain files). `vp save` first sums the regular files' sizes against `vp-max-size`, then spools the
+archive to a temp file in `RUNNER_TEMP` (else the system temp dir; the runner empties it after
+the job) and uploads it from there (its size goes into the envelope). `vp restore` streams the
+archive into a new directory next to the target (the same filesystem, so the swap is a rename;
+not `RUNNER_TEMP`, which may be another filesystem) and only then swaps it in place of the
+target, so a failed or partial restore leaves the old directory as it was.
 Extraction rejects absolute paths, `..` components, symlinks or hardlinks whose target leaves
 the directory, and device or fifo entries.
 
@@ -398,8 +406,12 @@ main:
    token, pid, summary and log paths and the settings warnings as step state. Each settings
    warning (e.g. the R2 → github fallback, §8) is also a `core.warning`.
 6. Vite+ (milestone 3; only when step 1 found vp): run `hoard vp restore` with the same storage
-   flags and environment as the server, plus `--workspace <root>` and `--vp-max-size` (input
-   `vp-max-size`, default `2GB`), at most 120 s. Its line is logged (`hoard vp restore: …`); a
+   flags and environment as the server, plus `--workspace <root>` (`GITHUB_WORKSPACE`, the
+   checkout root) and `--vp-max-size` (input `vp-max-size`, default `2GB`, validated like the
+   binary's sizes so a typo fails the step), at most 120 s; at the limit the action sends
+   SIGTERM (hoard cleans up and exits 0) and SIGKILL 5 s later. When `node_modules` is missing
+   at the root, main warns `Vite+ found but node_modules is missing: put the hoard step after
+   the dependency install, or the install may drop the restored task cache` (and still restores). Its line is logged (`hoard vp restore: …`); a
    `warning:` line, a non-zero exit, a timeout or a spawn error becomes a `core.warning` and a
    settings warning (job summary) and never fails the step. The args and the restore line are
    saved as state `vp`. Restore runs in main, so with Vite+ the hoard step belongs after the
@@ -410,7 +422,7 @@ download failed), set the outputs to `0`, write it and the settings warnings to
 `$GITHUB_STEP_SUMMARY` and stop. If main saved no other
 state, do nothing. Mask the saved token again with `core.setSecret` before any output (post is a
 separate process). If main saved `vp`, run `<bin> vp save` with the saved args (the binary from
-state `bin`, the R2 keys from the inputs again, at most 300 s) before anything else, in
+state `bin`, the R2 keys from the inputs again, at most 300 s, then SIGTERM and SIGKILL 5 s later) before anything else, in
 particular before the shutdown (save does not need the server, and the shutdown prune then sees
 the new archive); a failure is a warning. The job summary gets the line
 `**Vite+ task cache:** restore: <restore line> · save: <save line>` after hoard's summary. Read `GET /_hoard/stats` and set the outputs (`hits`, `misses`,

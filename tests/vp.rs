@@ -12,8 +12,8 @@ use common::{fs_config, gha_mock, minio_bucket, r2_config, s3_runtime};
 use hoard::envelope::Header;
 use hoard::store::{Store, build_operator};
 use hoard::vp::{
-    GhaTwirp, RestoreOutcome, SaveOutcome, VpBackend, default_os_arch, vp_restore, vp_save,
-    vp_version,
+    GhaTwirp, RestoreOutcome, SaveOutcome, VpBackend, default_os_arch, default_run_key, vp_restore,
+    vp_save, vp_version,
 };
 
 const V: &str = "v1";
@@ -182,15 +182,27 @@ async fn check_empty_is_skipped(b: &VpBackend) {
     );
 }
 
-/// Two jobs on one OS save at once: both succeed, and restore finds one of them.
+/// Two matrix legs of one run (same GITHUB_RUN_ID and attempt) save at once: both get their
+/// own archive, and restore finds one of them.
 async fn check_concurrent_saves(b: &VpBackend) {
+    let gh = |k: &str| match k {
+        "GITHUB_RUN_ID" => Some("10".to_string()),
+        "GITHUB_RUN_ATTEMPT" => Some("1".to_string()),
+        _ => None,
+    };
+    let (ka, kb) = (default_run_key(gh), default_run_key(gh));
+    assert_ne!(ka, kb);
     let (_a, a) = cache_with(&[("db", b"job-a")]);
     let (_b, bdir) = cache_with(&[("db", b"job-b")]);
     let (ra, rb) = tokio::join!(
-        vp_save(b, V, LINUX, "10-1", &a, BIG),
-        vp_save(b, V, LINUX, "11-1", &bdir, BIG)
+        vp_save(b, V, LINUX, &ka, &a, BIG),
+        vp_save(b, V, LINUX, &kb, &bdir, BIG)
     );
     let keys = [saved_key(ra.unwrap()), saved_key(rb.unwrap())];
+    assert_ne!(keys[0], keys[1]);
+    for key in &keys {
+        assert!(archive_exists(b, key).await, "{key} missing");
+    }
     let (_ws, dir) = empty_target();
     match vp_restore(b, V, LINUX, &dir).await.unwrap() {
         RestoreOutcome::Restored { key, .. } => assert!(keys.contains(&key), "{key}"),
@@ -198,6 +210,18 @@ async fn check_concurrent_saves(b: &VpBackend) {
     }
     let db = std::fs::read(dir.join("db")).unwrap();
     assert!(db == b"job-a" || db == b"job-b");
+}
+
+/// True when the archive `key` is stored (exact key, no restore-key fallback).
+async fn archive_exists(b: &VpBackend, key: &str) -> bool {
+    match b {
+        VpBackend::Store { store, .. } => store.head(key).await.unwrap().is_some(),
+        VpBackend::Github(g) => g
+            .get_download_url(key, &[], &vp_version(V))
+            .await
+            .unwrap()
+            .is_some(),
+    }
 }
 
 /// Saving the same run key twice is success (keys are immutable; the first archive stays).
@@ -530,7 +554,7 @@ fn binary_fs_save_then_restore() {
     assert_eq!(code, 0, "{err}");
     let os = default_os_arch();
     assert!(
-        out.starts_with(&format!("saved cache/vp/v1/{os}/77-1 (")),
+        out.starts_with(&format!("saved cache/vp/v1/{os}/77-1-")),
         "{out}"
     );
     assert_eq!(out.lines().count(), 1);
@@ -541,7 +565,7 @@ fn binary_fs_save_then_restore() {
     let (code, out, err) = run(c);
     assert_eq!(code, 0, "{err}");
     assert!(
-        out.starts_with(&format!("restored cache/vp/v1/{os}/77-1 (")),
+        out.starts_with(&format!("restored cache/vp/v1/{os}/77-1-")),
         "{out}"
     );
     assert_eq!(std::fs::read(dst.join("db")).unwrap(), b"tasks");
@@ -692,6 +716,18 @@ fn binary_setup_errors_fail() {
     let (code, _, err) = run(c);
     assert_ne!(code, 0);
     assert!(err.contains("invalid size"), "{err}");
+}
+
+/// mode=off is checked before any storage setup: no GitHub env needed.
+#[test]
+fn binary_mode_off_needs_no_storage() {
+    let (ws, _) = cache_with(&[("db", b"x")]);
+    for cmd in ["save", "restore"] {
+        let mut c = hoard(ws.path());
+        c.args([cmd, "--storage", "github", "--mode", "off"]);
+        let (code, out, err) = run(c);
+        assert_eq!((code, out.trim()), (0, "skipped: mode=off"), "{err}");
+    }
 }
 
 #[test]

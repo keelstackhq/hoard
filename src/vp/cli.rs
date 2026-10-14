@@ -16,7 +16,7 @@ use super::{
 };
 use crate::config::{Config, Mode, ServeArgs, Storage, parse_size, valid_segment};
 use crate::redact::redacted;
-use crate::serve::storage_layout;
+use crate::serve::{storage_layout, termination_signal};
 use crate::stats::human_bytes;
 use crate::store::{Store, build_operator};
 
@@ -36,10 +36,12 @@ pub struct VpArgs {
     /// VITE_CACHE_PATH when that is absolute.
     #[arg(long, env = "HOARD_WORKSPACE", default_value = ".")]
     pub workspace: PathBuf,
-    /// Key segment for the OS and architecture, e.g. linux-x64 (default: this machine).
+    /// Key segment for the OS and architecture: linux-x64, linux-arm64, darwin-x64,
+    /// darwin-arm64 or windows-x64 (default: this machine).
     #[arg(long, env = "HOARD_OS_ARCH")]
     pub os_arch: Option<String>,
-    /// Key segment of this run's archive (default: GITHUB_RUN_ID-GITHUB_RUN_ATTEMPT).
+    /// Key segment of this run's archive (default: GITHUB_RUN_ID-GITHUB_RUN_ATTEMPT-<8 random
+    /// hex>, else local-<unix secs>-<8 random hex>).
     #[arg(long, env = "HOARD_RUN_KEY")]
     pub run_key: Option<String>,
     /// Skip the save when the task cache is larger: KB, MB, GB or TB (powers of 1000).
@@ -112,51 +114,62 @@ fn backend(cfg: &Config) -> anyhow::Result<VpBackend> {
 }
 
 impl VpJob {
-    /// Builds the backend (setup errors are `Err`) and runs the command; the `Ok` line covers
-    /// every outcome after setup, storage errors included.
+    /// Runs the command and returns its one line. The mode skips come first, before any storage
+    /// setup; a setup error (backend, signal handler) is `Err`; every other outcome, a storage
+    /// error or SIGTERM / Ctrl-C included, is an `Ok` line. An interrupted command drops its
+    /// work, which removes the spooled archive and a half-extracted directory.
     pub async fn run(self) -> anyhow::Result<String> {
         let j = self;
-        let backend = backend(&j.cfg)?;
-        let cv = &j.cfg.cache_version;
+        let cmd = if j.save { "save" } else { "restore" };
         if j.cfg.mode == Mode::Off {
             return Ok("skipped: mode=off".into());
         }
-        if j.save {
-            if j.cfg.mode == Mode::Read {
-                return Ok("skipped: mode=read (nothing is written)".into());
-            }
-            let r = vp_save(&backend, cv, &j.os_arch, &j.run_key, &j.dir, j.max_size).await;
-            Ok(match r {
-                Ok(SaveOutcome::Saved { key, bytes }) => {
-                    format!("saved {key} ({})", human_bytes(bytes))
-                }
-                Ok(SaveOutcome::SkippedTooLarge { bytes }) => format!(
-                    "skipped: the task cache is {}, larger than vp-max-size ({}); run `vp cache clean`",
-                    human_bytes(bytes),
-                    human_bytes(j.max_size)
-                ),
-                Ok(SaveOutcome::SkippedEmpty) => {
-                    "skipped: cache directory is empty or missing".into()
-                }
-                Err(e) => format!(
-                    "warning: Vite+ cache save failed ({}); the build continues without it",
-                    redacted(&e)
-                ),
-            })
-        } else {
-            if j.cfg.no_reads {
-                return Ok("skipped: no-reads (the cache is not read)".into());
-            }
-            Ok(match vp_restore(&backend, cv, &j.os_arch, &j.dir).await {
-                Ok(RestoreOutcome::Restored { key, bytes }) => {
-                    format!("restored {key} ({})", human_bytes(bytes))
-                }
-                Ok(RestoreOutcome::NotFound) => "no cache found".into(),
-                Err(e) => format!(
-                    "warning: Vite+ cache restore failed ({}); the build continues without it",
-                    redacted(&e)
-                ),
-            })
+        if j.save && j.cfg.mode == Mode::Read {
+            return Ok("skipped: mode=read (nothing is written)".into());
         }
+        if !j.save && j.cfg.no_reads {
+            return Ok("skipped: no-reads (the cache is not read)".into());
+        }
+        let backend = backend(&j.cfg)?;
+        let signal = termination_signal()?;
+        let work = async {
+            let cv = &j.cfg.cache_version;
+            if j.save {
+                vp_save(&backend, cv, &j.os_arch, &j.run_key, &j.dir, j.max_size)
+                    .await
+                    .map(|o| match o {
+                        SaveOutcome::Saved { key, bytes } => {
+                            format!("saved {key} ({})", human_bytes(bytes))
+                        }
+                        SaveOutcome::SkippedTooLarge { bytes } => format!(
+                            "skipped: the task cache is {}, larger than vp-max-size ({}); run `vp cache clean`",
+                            human_bytes(bytes),
+                            human_bytes(j.max_size)
+                        ),
+                        SaveOutcome::SkippedEmpty => {
+                            "skipped: cache directory is empty or missing".into()
+                        }
+                    })
+            } else {
+                vp_restore(&backend, cv, &j.os_arch, &j.dir)
+                    .await
+                    .map(|o| match o {
+                        RestoreOutcome::Restored { key, bytes } => {
+                            format!("restored {key} ({})", human_bytes(bytes))
+                        }
+                        RestoreOutcome::NotFound => "no cache found".into(),
+                    })
+            }
+        };
+        let result = tokio::select! {
+            r = work => r,
+            _ = signal => Err(anyhow::anyhow!("interrupted")),
+        };
+        Ok(result.unwrap_or_else(|e| {
+            format!(
+                "warning: Vite+ cache {cmd} failed ({}); the build continues without it",
+                redacted(&e)
+            )
+        }))
     }
 }

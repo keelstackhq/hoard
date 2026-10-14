@@ -55,11 +55,17 @@ pub fn default_os_arch() -> String {
     format!("{os}-{arch}")
 }
 
-/// `{GITHUB_RUN_ID}-{GITHUB_RUN_ATTEMPT}` when both are set, else `local-{unix secs}-{random}`.
+/// `{GITHUB_RUN_ID}-{GITHUB_RUN_ATTEMPT}-{8 random hex}` when both are set (matrix legs of one
+/// run share the id and attempt; the suffix gives each its own archive), else
+/// `local-{unix secs}-{8 random hex}`.
 pub fn default_run_key(lookup: impl Fn(&str) -> Option<String>) -> String {
     let var = |k: &str| lookup(k).filter(|v| !v.is_empty());
     if let (Some(id), Some(attempt)) = (var("GITHUB_RUN_ID"), var("GITHUB_RUN_ATTEMPT")) {
-        return format!("{id}-{attempt}");
+        let rand: String = rand::random::<[u8; 4]>()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        return format!("{id}-{attempt}-{rand}");
     }
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -114,7 +120,27 @@ impl Spool {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        Self(std::env::temp_dir().join(format!("hoard-vp-{name}.tar.zst")))
+        Self(scratch_dir().join(format!("hoard-vp-{name}.tar.zst")))
+    }
+}
+
+/// `RUNNER_TEMP` when set (the runner empties it after the job, so a spool left by a killed
+/// process does not outlive the job), else the system temp dir.
+fn scratch_dir() -> PathBuf {
+    match std::env::var_os("RUNNER_TEMP") {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => std::env::temp_dir(),
+    }
+}
+
+/// A restore's new directory, removed on drop unless it was moved into place.
+struct FreshDir(Option<PathBuf>);
+
+impl Drop for FreshDir {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_dir_all(p);
+        }
     }
 }
 
@@ -194,16 +220,16 @@ async fn restore_into(
     tokio::fs::create_dir(&fresh)
         .await
         .with_context(|| format!("cannot create {}", fresh.display()))?;
-    if let Err(e) = extract_stream(body, &fresh).await {
-        let _ = tokio::fs::remove_dir_all(&fresh).await;
-        return Err(anyhow::Error::new(e).context("cannot extract the Vite+ cache archive"));
-    }
+    // Removed on every early return and when the command is interrupted (the future dropped).
+    let mut guard = FreshDir(Some(fresh.clone()));
+    extract_stream(body, &fresh)
+        .await
+        .context("cannot extract the Vite+ cache archive")?;
     let old = parent.join(format!(".{name}.hoard-old-{}", random_suffix()));
     let had_old = match tokio::fs::rename(dir, &old).await {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => {
-            let _ = tokio::fs::remove_dir_all(&fresh).await;
             return Err(anyhow::Error::new(e).context(format!("cannot replace {}", dir.display())));
         }
     };
@@ -211,9 +237,9 @@ async fn restore_into(
         if had_old {
             let _ = tokio::fs::rename(&old, dir).await;
         }
-        let _ = tokio::fs::remove_dir_all(&fresh).await;
         return Err(anyhow::Error::new(e).context(format!("cannot replace {}", dir.display())));
     }
+    guard.0 = None; // moved into place
     if had_old && let Err(e) = tokio::fs::remove_dir_all(&old).await {
         warn!(path = %old.display(), error = %e, "cannot remove the previous Vite+ cache");
     }
@@ -384,7 +410,15 @@ mod tests {
             "GITHUB_RUN_ATTEMPT" => Some("2".to_string()),
             _ => None,
         };
-        assert_eq!(default_run_key(env), "123-2");
+        // Matrix legs of one run share the run id and attempt; the suffix keeps them apart.
+        let k = default_run_key(env);
+        let (head, tail) = k.rsplit_once('-').unwrap();
+        assert_eq!(head, "123-2");
+        assert!(
+            tail.len() == 8 && tail.chars().all(|c| c.is_ascii_hexdigit()),
+            "{k}"
+        );
+        assert_ne!(k, default_run_key(env));
         let local = default_run_key(|_| None);
         assert!(local.starts_with("local-"), "{local}");
         assert!(crate::config::valid_segment(&local));

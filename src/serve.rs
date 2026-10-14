@@ -141,7 +141,7 @@ fn remove_if_present(path: &Path) {
 /// Installs the SIGTERM and Ctrl-C handlers now and returns a future that resolves when
 /// either arrives. Installing early means a signal sent right after startup is not lost.
 #[cfg(unix)]
-fn termination_signal() -> anyhow::Result<impl Future<Output = ()>> {
+pub(crate) fn termination_signal() -> anyhow::Result<impl Future<Output = ()>> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).context("cannot install SIGTERM handler")?;
     let mut int = signal(SignalKind::interrupt()).context("cannot install Ctrl-C handler")?;
@@ -154,7 +154,7 @@ fn termination_signal() -> anyhow::Result<impl Future<Output = ()>> {
 }
 
 #[cfg(not(unix))]
-fn termination_signal() -> anyhow::Result<impl Future<Output = ()>> {
+pub(crate) fn termination_signal() -> anyhow::Result<impl Future<Output = ()>> {
     Ok(async {
         if tokio::signal::ctrl_c().await.is_err() {
             std::future::pending::<()>().await;
