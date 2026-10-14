@@ -6,6 +6,7 @@ use bytes::Bytes;
 use crate::config::{Config, LifecycleMode, Storage};
 use crate::envelope::Header;
 use crate::r2::lifecycle::{ensure_lifecycle, r2_client, rule_id};
+use crate::redact::redacted;
 use crate::serve::storage_layout;
 use crate::store::{GetOutcome, PutOutcome, Store, build_operator};
 
@@ -24,7 +25,7 @@ pub async fn run_doctor(cfg: &Config) -> anyhow::Result<()> {
             Ok(_) => println!("✓ lifecycle rule {id} ({days} days)"),
             Err(e) => {
                 failed += 1;
-                println!("✗ lifecycle rule {id}: {e}");
+                println!("✗ lifecycle rule {id}: {}", redacted(&e));
             }
         }
     }
@@ -33,7 +34,7 @@ pub async fn run_doctor(cfg: &Config) -> anyhow::Result<()> {
         Ok(()) => println!("✓ bucket read/write"),
         Err(e) => {
             failed += 1;
-            println!("✗ bucket read/write ({key}): {e:#}");
+            println!("✗ bucket read/write ({key}): {}", redacted(&e));
         }
     }
     if failed > 0 {

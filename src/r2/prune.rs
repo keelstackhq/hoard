@@ -10,6 +10,7 @@ use opendal::raw::normalize_path;
 use tracing::warn;
 
 use crate::config::Config;
+use crate::redact::redacted;
 use crate::serve::storage_layout;
 use crate::stats::human_bytes;
 use crate::store::{ObjectInfo, Store, StoreError, build_operator};
@@ -142,9 +143,10 @@ pub async fn prune(
                 report.freed_bytes += size;
             }
             Err(e) => {
+                let e = redacted(&e);
                 warn!(key = %key, error = %e, "prune: cannot delete object");
                 report.delete_errors += 1;
-                report.last_error = Some(e.to_string());
+                report.last_error = Some(e);
             }
         }
     }

@@ -19,6 +19,7 @@ use super::body::ExactLength;
 use crate::config::Mode;
 use crate::envelope::{Header, MAX_HEADER_LEN, PREFIX_LEN, encode_header};
 use crate::key::validate_hash;
+use crate::redact::redacted;
 use crate::store::{GetOutcome, PutOutcome};
 
 const DURATION: &str = "x-artifact-duration";
@@ -82,7 +83,7 @@ pub async fn query(State(s): State<AppState>, body: Bytes) -> Json<HashMap<Strin
                     )),
                     Ok(None) => None,
                     Err(e) => {
-                        warn!(%hash, error = %e, "batch query: storage error, treating as miss");
+                        warn!(%hash, error = %redacted(&e), "batch query: storage error, treating as miss");
                         None
                     }
                 }
@@ -122,7 +123,7 @@ pub async fn head_artifact(State(s): State<AppState>, Path(hash): Path<String>) 
             StatusCode::NOT_FOUND.into_response()
         }
         Err(e) => {
-            warn!(%hash, error = %e, "HEAD: storage error, treating as miss");
+            warn!(%hash, error = %redacted(&e), "HEAD: storage error, treating as miss");
             inc(&s.stats.misses, 1);
             StatusCode::NOT_FOUND.into_response()
         }
@@ -149,14 +150,14 @@ pub async fn get_artifact(State(s): State<AppState>, Path(hash): Path<String>) -
             return miss();
         }
         Err(e) => {
-            warn!(%hash, error = %e, "GET: storage error, treating as miss");
+            warn!(%hash, error = %redacted(&e), "GET: storage error, treating as miss");
             return miss();
         }
     };
     let stream = match reader.into_bytes_stream(offset..offset + h.size).await {
         Ok(st) => st,
         Err(e) => {
-            warn!(%hash, error = %e, "GET: cannot open body stream, treating as miss");
+            warn!(%hash, error = %redacted(&e), "GET: cannot open body stream, treating as miss");
             return miss();
         }
     };
@@ -217,7 +218,7 @@ pub async fn put_artifact(
         }
         Ok(PutOutcome::AlreadyExists) => inc(&s.stats.put_skipped_existing, 1),
         Err(e) => {
-            warn!(%hash, error = %e, "PUT: storage error, not cached");
+            warn!(%hash, error = %redacted(&e), "PUT: storage error, not cached");
             inc(&s.stats.put_errors, 1);
         }
     }

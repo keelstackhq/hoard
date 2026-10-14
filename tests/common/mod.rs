@@ -49,7 +49,17 @@ pub struct TestServer {
 pub async fn spawn_test_server(mode: Mode) -> TestServer {
     let dir = tempfile::tempdir().unwrap();
     let cfg = fs_config(dir.path());
-    let store = Arc::new(Store::new(build_operator(&cfg).unwrap()));
+    let store = Store::new(build_operator(&cfg).unwrap());
+    spawn_test_server_with(store, mode, dir).await
+}
+
+/// A running server on `127.0.0.1:<random>` over `store`; `dir` lives as long as the server.
+pub async fn spawn_test_server_with(
+    store: Store,
+    mode: Mode,
+    dir: tempfile::TempDir,
+) -> TestServer {
+    let store = Arc::new(store);
     let stats = Arc::new(Stats::default());
     let token: String = rand::random::<[u8; 16]>()
         .iter()

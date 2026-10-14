@@ -127,7 +127,10 @@ Validation: `{hash}` must match `^[a-fA-F0-9]{1,128}$` → otherwise `400`. Quer
 and `slug` are accepted and ignored.
 
 **Never fail the build.** Any storage error on GET/HEAD returns `404` (a miss); on PUT returns `200`
-and is counted as `put_errors`. Errors are logged without secrets or signed URLs.
+and is counted as `put_errors`. Errors are logged without secrets or signed URLs: every logged or
+printed storage error is redacted first (the values of the query parameters `sig`, `se`, `sp`,
+`sv`, `X-Amz-Signature`, `X-Amz-Credential` and `X-Amz-Security-Token` become `REDACTED`, and
+`user:password@` is removed from URLs).
 
 ## 6. Storage
 

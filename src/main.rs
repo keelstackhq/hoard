@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 use hoard::config::{Config, ServeArgs, TokenPaths, drop_empty_hoard_env};
 use hoard::doctor::run_doctor;
 use hoard::r2::prune::run_prune;
+use hoard::redact::redacted;
 use hoard::serve::{env_for, run_serve};
 use tracing_subscriber::EnvFilter;
 
@@ -43,7 +44,7 @@ fn main() {
     drop_empty_hoard_env();
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
-        eprintln!("error: {e:#}");
+        eprintln!("error: {}", redacted(&e));
         std::process::exit(1);
     }
 }

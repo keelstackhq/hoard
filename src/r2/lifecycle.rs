@@ -59,7 +59,10 @@ pub enum LifecycleError {
     AccessDenied { fix: String },
     /// Transient or unexpected (network, timeout, 5xx). `error`'s outermost context is a
     /// short reason such as `timed out` (see [`LifecycleError::reason`]).
-    #[error("{error:#}\nIf the rule is missing, a bucket admin can add it with:\n{fix}")]
+    #[error(
+        "{}\nIf the rule is missing, a bucket admin can add it with:\n{fix}",
+        crate::redact::redacted(.error)
+    )]
     Other { error: anyhow::Error, fix: String },
 }
 
@@ -408,6 +411,18 @@ mod tests {
             LifecycleError::AccessDenied { fix }.reason(),
             "AccessDenied"
         );
+    }
+
+    #[test]
+    fn other_error_display_is_redacted() {
+        let e = LifecycleError::Other {
+            error: anyhow::anyhow!("GET https://h/b?lifecycle&X-Amz-Signature=abc123")
+                .context("HTTP 500"),
+            fix: fix_command("b", "cache/", 7),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("X-Amz-Signature=REDACTED"), "{msg}");
+        assert!(!msg.contains("abc123"), "{msg}");
     }
 
     /// A server that accepts connections and never answers: the check fails within the bound.

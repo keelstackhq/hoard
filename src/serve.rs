@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, fix_command, r2_client, rule_id};
 use crate::r2::prune::prune;
+use crate::redact::redacted;
 use crate::server::{AppState, router};
 use crate::stats::{Stats, human_bytes, render_summary};
 use crate::store::{Store, StoreError, build_operator};
@@ -285,7 +286,7 @@ async fn lifecycle_startup_within(cfg: &Config, bound: Duration) -> anyhow::Resu
         }
         Err(e @ LifecycleError::Other { .. }) => {
             warn!(
-                error = %e,
+                error = %redacted(&e),
                 "cannot check the R2 lifecycle rule; continuing (the size cap still bounds the bucket)"
             );
             Ok(Some(format!("Lifecycle: not checked ({})", e.reason())))
@@ -334,7 +335,10 @@ async fn prune_on_shutdown_within(
             lines.push("Prune: failed (timed out)".to_string());
         }
         Ok(Err(e)) => {
-            warn!(error = %e, "prune failed; the lifecycle rule still bounds the bucket");
+            warn!(
+                error = %redacted(&e),
+                "prune failed; the lifecycle rule still bounds the bucket"
+            );
             lines.push(format!("Prune: failed ({})", short_reason(&e)));
         }
         Ok(Ok(r)) => {
