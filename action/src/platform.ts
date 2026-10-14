@@ -9,3 +9,16 @@ export const TARGETS = [
 ] as const;
 
 export type Target = (typeof TARGETS)[number];
+
+const BY_PLATFORM: Partial<Record<string, Partial<Record<string, Target>>>> = {
+  linux: { x64: "x86_64-unknown-linux-musl", arm64: "aarch64-unknown-linux-musl" },
+  darwin: { x64: "x86_64-apple-darwin", arm64: "aarch64-apple-darwin" },
+  win32: { x64: "x86_64-pc-windows-msvc" },
+};
+
+/** The release target for a Node `process.platform` / `process.arch` pair. */
+export function targetFor(platform: NodeJS.Platform, arch: string): Target {
+  const target = BY_PLATFORM[platform]?.[arch];
+  if (!target) throw new Error(`unsupported platform ${platform}/${arch}`);
+  return target;
+}

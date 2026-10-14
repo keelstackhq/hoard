@@ -297,15 +297,21 @@ Storage: r2 (my-team-cache/cache/) · Lifecycle: 7 days ✓ · Pruned: 18 object
 `action.yml` at the repo root (so `uses: keelstack/hoard@v1` works): `runs.using: node24`,
 `main: action/dist/main.js`, `post: action/dist/post.js`, `post-if: always()`. Source in
 `action/src/`, bundled with esbuild; committed `action/dist/` < 200 KB. Inputs mirror §4.2 plus
-`version` (binary version, default = the action's own release). R2 secrets reach the binary through
+`version` (binary version, default = the action's own release; any other value fails, because the
+action can only verify its own release — change `uses:` instead). The action manages `port`,
+`token`, `port-file`, `token-file`, `summary-file` and `fs-root` itself, so they are not inputs.
+Outputs: `hits`, `misses`, `time-saved-ms`. R2 secrets reach the binary through
 `HOARD_R2_*` env vars, never argv.
 
 main:
 1. Resolve `mode`/`storage` (§8) and the tool (`turbo.json` present → turbo; `vite.config.*` with
    `vite-plus` in the root `package.json` → vp; both allowed).
-2. Download `hoard-<target>.tar.gz` from the GitHub release of `version`, verify its SHA-256
-   against `action/src/checksums.generated.ts` (written at release time, bundled into `dist/`),
-   cache it with `@actions/tool-cache`.
+2. Resolve the target from `process.platform`/`process.arch` (anything else fails with
+   `unsupported platform <platform>/<arch>`, before any download). Refuse a target with no
+   checksum in `action/src/checksums.generated.ts` (written at release time, bundled into `dist/`)
+   without downloading. Otherwise use the `@actions/tool-cache` entry if present, else download
+   `hoard-<target>.tar.gz` from the release `v<version>` of the action's own repository
+   (`GITHUB_ACTION_REPOSITORY`), verify its SHA-256 before extracting, and cache it.
 3. Spawn `hoard serve` detached (`stdio` to `$RUNNER_TEMP/hoard.log`, `unref()`), passing the
    full environment (includes `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`).
 4. Poll `/_hoard/health` every 100 ms up to 10 s; on timeout print the log and fail.
