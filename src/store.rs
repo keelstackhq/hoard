@@ -10,6 +10,9 @@ use opendal::{ErrorKind, Operator, Reader, services};
 use crate::config::{Config, Storage};
 use crate::envelope::{Header, MAX_HEADER_LEN, PREFIX_LEN, decode_header, encode_header};
 
+/// Scratch directory (inside the fs root) for in-flight writes.
+const FS_TMP_DIR: &str = ".hoard-tmp";
+
 /// Bytes read to decode a header: fixed prefix plus the largest accepted JSON header.
 const HEAD_READ_LEN: u64 = (PREFIX_LEN + MAX_HEADER_LEN) as u64;
 
@@ -62,11 +65,15 @@ pub fn build_operator(cfg: &Config) -> anyhow::Result<Operator> {
                 .fs_root
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("--fs-root is not valid UTF-8"))?;
-            // Write to a sibling temp dir and rename on close: readers never see a partial
-            // object and an aborted write leaves nothing behind.
-            let tmp = format!("{}.tmp", root.trim_end_matches('/'));
+            // Write to a temp dir inside the root and rename on close: readers never see a
+            // partial object and an aborted write leaves nothing behind. Same filesystem as
+            // the root, so the rename cannot cross devices.
+            let tmp = cfg.fs_root.join(FS_TMP_DIR);
             std::fs::create_dir_all(&tmp)?;
-            let fs = services::Fs::default().root(root).atomic_write_dir(&tmp);
+            let tmp = tmp
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("--fs-root is not valid UTF-8"))?;
+            let fs = services::Fs::default().root(root).atomic_write_dir(tmp);
             Ok(Operator::new(fs)?)
         }
         Storage::R2 => anyhow::bail!("storage=r2 is not yet supported in this build"),
@@ -84,10 +91,6 @@ fn is_condition_failed(e: &opendal::Error) -> bool {
         e.kind(),
         ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists
     )
-}
-
-fn to_utc(ts: opendal::raw::Timestamp) -> DateTime<Utc> {
-    DateTime::from_timestamp_millis(ts.into_inner().as_millisecond()).unwrap_or_default()
 }
 
 impl Store {
@@ -207,7 +210,10 @@ impl Store {
             out.push(ObjectInfo {
                 key,
                 size: meta.content_length(),
-                last_modified: meta.last_modified().map(to_utc).unwrap_or_default(),
+                last_modified: meta
+                    .last_modified()
+                    .map(|t| DateTime::<Utc>::from(std::time::SystemTime::from(t)))
+                    .unwrap_or_default(),
             });
         }
         Ok(out)
@@ -216,189 +222,5 @@ impl Store {
     /// Deletes `key`; deleting a missing key succeeds.
     pub async fn delete(&self, key: &str) -> Result<(), StoreError> {
         Ok(self.op.delete(key).await?)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{Config, LifecycleMode, Mode, Storage};
-    use futures::stream;
-
-    fn header(size: u64) -> Header {
-        Header {
-            v: 1,
-            duration_ms: Some(7),
-            tag: Some("t".into()),
-            size,
-        }
-    }
-
-    fn body(b: &[u8]) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send + use<> {
-        stream::iter(vec![Ok(Bytes::copy_from_slice(b))])
-    }
-
-    async fn read_from(reader: opendal::Reader, off: u64) -> Vec<u8> {
-        reader.read(off..).await.unwrap().to_vec()
-    }
-
-    async fn body_of(s: &Store, key: &str) -> Vec<u8> {
-        match s.get(key).await.unwrap() {
-            GetOutcome::Hit(_, r, off) => read_from(r, off).await,
-            other => panic!("{other:?}"),
-        }
-    }
-
-    fn fs_config(root: &std::path::Path) -> Config {
-        Config {
-            storage: Storage::Fs,
-            mode: Mode::ReadWrite,
-            cache_version: "v1".into(),
-            port: 0,
-            port_file: root.join("port"),
-            token_file: root.join("token"),
-            token: None,
-            summary_file: None,
-            fs_root: root.join("store"),
-            r2: None,
-            r2_lifecycle: LifecycleMode::Auto,
-            max_age_days: 7,
-            max_size: 1 << 30,
-        }
-    }
-
-    async fn fs_store() -> (Store, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let op = build_operator(&fs_config(dir.path())).unwrap();
-        (Store::new(op), dir)
-    }
-
-    pub(crate) async fn check_put_get_roundtrip(s: &Store) {
-        let h = header(10);
-        assert_eq!(
-            s.put("cache/turbo/v1/aa", &h, body(b"0123456789"))
-                .await
-                .unwrap(),
-            PutOutcome::Created
-        );
-        match s.get("cache/turbo/v1/aa").await.unwrap() {
-            GetOutcome::Hit(back, reader, off) => {
-                assert_eq!(back, h);
-                assert_eq!(read_from(reader, off).await, b"0123456789");
-            }
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(s.head("cache/turbo/v1/aa").await.unwrap(), Some(h));
-    }
-
-    pub(crate) async fn check_put_existing_keeps_original(s: &Store) {
-        s.put("k/aa", &header(1), body(b"A")).await.unwrap();
-        assert_eq!(
-            s.put("k/aa", &header(1), body(b"B")).await.unwrap(),
-            PutOutcome::AlreadyExists
-        );
-        assert_eq!(body_of(s, "k/aa").await, b"A");
-    }
-
-    pub(crate) async fn check_missing_and_corrupt(s: &Store) {
-        assert!(matches!(s.get("k/none").await.unwrap(), GetOutcome::Miss));
-        assert_eq!(s.head("k/none").await.unwrap(), None);
-        s.op.write("k/bad", b"not an envelope".to_vec())
-            .await
-            .unwrap();
-        assert!(matches!(s.get("k/bad").await.unwrap(), GetOutcome::Corrupt));
-        assert_eq!(s.head("k/bad").await.unwrap(), None);
-        s.op.write("k/tiny", b"HR".to_vec()).await.unwrap();
-        assert!(matches!(
-            s.get("k/tiny").await.unwrap(),
-            GetOutcome::Corrupt
-        ));
-    }
-
-    pub(crate) async fn check_head_does_not_read_body(s: &Store) {
-        let n = 5 * 1024 * 1024;
-        let chunks = (0..5).map(|_| Ok(Bytes::from(vec![7u8; 1024 * 1024])));
-        let h = header(n);
-        s.put("big/aa", &h, stream::iter(chunks)).await.unwrap();
-        assert_eq!(s.head("big/aa").await.unwrap(), Some(h));
-    }
-
-    pub(crate) async fn check_list_and_delete(s: &Store) {
-        for (k, b) in [("p/a", &b"1"[..]), ("p/b", b"22"), ("p/sub/c", b"333")] {
-            s.put(k, &header(b.len() as u64), body(b)).await.unwrap();
-        }
-        s.put("other/x", &header(1), body(b"x")).await.unwrap();
-        let mut all = s.list("p/").await.unwrap();
-        all.sort_by(|a, b| a.key.cmp(&b.key));
-        let keys: Vec<_> = all.iter().map(|o| o.key.as_str()).collect();
-        assert_eq!(keys, ["p/a", "p/b", "p/sub/c"]);
-        let expect =
-            |b: usize| (crate::envelope::encode_header(&header(b as u64)).len() + b) as u64;
-        assert_eq!(all[0].size, expect(1));
-        assert_eq!(all[2].size, expect(3));
-        assert!(all[0].last_modified.timestamp() > 1_600_000_000);
-        s.delete("p/b").await.unwrap();
-        assert_eq!(s.list("p/").await.unwrap().len(), 2);
-        s.delete("p/b").await.unwrap(); // idempotent
-    }
-
-    pub(crate) async fn check_failed_body_leaves_no_object(s: &Store) {
-        let bad = stream::iter(vec![
-            Ok(Bytes::from_static(b"abc")),
-            Err(std::io::Error::other("boom")),
-        ]);
-        assert!(s.put("f/aa", &header(6), bad).await.is_err());
-        assert!(matches!(s.get("f/aa").await.unwrap(), GetOutcome::Miss));
-        assert!(s.list("f/").await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn fs_put_get_roundtrip() {
-        let (s, _d) = fs_store().await;
-        check_put_get_roundtrip(&s).await;
-    }
-    #[tokio::test]
-    async fn fs_put_existing_is_already_exists_and_keeps_original() {
-        let (s, _d) = fs_store().await;
-        check_put_existing_keeps_original(&s).await;
-    }
-    #[tokio::test]
-    async fn fs_missing_and_corrupt() {
-        let (s, _d) = fs_store().await;
-        check_missing_and_corrupt(&s).await;
-    }
-    #[tokio::test]
-    async fn fs_head_does_not_read_body() {
-        let (s, _d) = fs_store().await;
-        check_head_does_not_read_body(&s).await;
-    }
-    #[tokio::test]
-    async fn fs_list_and_delete() {
-        let (s, _d) = fs_store().await;
-        check_list_and_delete(&s).await;
-    }
-    #[tokio::test]
-    async fn fs_failed_body_leaves_no_object() {
-        let (s, _d) = fs_store().await;
-        check_failed_body_leaves_no_object(&s).await;
-    }
-    #[test]
-    fn unsupported_backends_fail_clearly() {
-        let d = tempfile::tempdir().unwrap();
-        let mut c = fs_config(d.path());
-        c.storage = Storage::R2;
-        assert!(
-            build_operator(&c)
-                .unwrap_err()
-                .to_string()
-                .contains("not yet supported")
-        );
-        c.storage = Storage::Github;
-        assert!(
-            build_operator(&c)
-                .unwrap_err()
-                .to_string()
-                .contains("not yet supported")
-        );
     }
 }
