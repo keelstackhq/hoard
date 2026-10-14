@@ -15,6 +15,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 01-core-r2/Task 9 R2 size cap + daily prune · 835631e, e2bc4b5 · 56 unit + 36 r2 (MinIO) + 28 http + 12 store + 8 CLI pass; fmt, clippy clean
 - 2026-10-14 · 01-core-r2/Task 10 e2e with real Turborepo 2.11.8 · e246728 · tests/e2e/turbo.sh PASS (fs) and STORAGE=r2 PASS (MinIO): run 2 FULL TURBO, 2 hits, 2 puts, Lifecycle ✓; cargo test all green
 - 2026-10-14 · **Milestone 1 reviewed** · whole-branch review 4fcec0d..ac1b931 (0 Critical, 5 Important, 14 Minor) → fix wave f29f34b..a75362b, re-review clean · 64 unit + 39 r2 + 28 http + 12 store + 8 CLI + redaction pass; 150 MB stream OK; e2e fs + r2 PASS
+- 2026-10-14 · 02-github-action/Task 1 GitHub cache storage, --no-reads, rate gate · 1c82097, 728b40b · 76 unit + 32 http + 39 r2 + 13 store + 13 CLI + redaction pass; fmt, clippy clean; e2e fs PASS (real ghac only testable on a runner → Task 5)
 
 ## Blocked
 
@@ -34,6 +35,11 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   on pushes to `main` and on pull requests, so it has not run yet; everything it does passes locally. Action: open a
   PR from `claude/admiring-ride-kl6qd9` (or push to `main`) and check both jobs go green; if `pnpm/action-setup` or
   the MinIO image pull fails, paste the job log.
+- **Naming: `keelstack` vs `keelstackhq`.** The spec and README say `uses: keelstack/hoard@v1`, but this repo is
+  `keelstackhq/hoard`. The action downloads release binaries from `$GITHUB_ACTION_REPOSITORY` (falls back to
+  `keelstackhq/hoard`), so it works either way. Action: decide the public name; if it is `keelstack/hoard`, create or
+  transfer the repo and update nothing else; if it stays `keelstackhq`, replace `keelstack/hoard` in README.md and
+  spec §0/§2 (one search-and-replace).
 
 ## Status
 

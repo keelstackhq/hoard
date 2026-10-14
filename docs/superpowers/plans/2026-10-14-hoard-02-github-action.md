@@ -67,7 +67,7 @@ scripts/write-checksums.mjs
   - `struct RateGate` with `fn allow_upload(&self, now: Instant) -> bool`, `fn on_rate_limited(&self, now: Instant, retry_after: Option<Duration>)`; default pause 60 s
   - Store PUT maps OpenDAL `ErrorKind::RateLimited` to `StoreError::RateLimited { retry_after }`; the PUT handler then calls `on_rate_limited`, increments `rate_limited`, returns `200`; while paused, PUTs are skipped (`200`, counted as `rate_limited`)
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```rust
 #[test] fn gate_pauses_and_resumes() {
@@ -87,8 +87,8 @@ scripts/write-checksums.mjs
 #[tokio::test] async fn rate_limited_put_is_200_and_counted() { /* store wrapper that returns RateLimited → PUT 200, rate_limited == 1, next PUT skipped without calling the store */ }
 ```
 
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement** (`services-ghac` with `version` = `hoard-{cache_version}` so cache versions never collide).  **Step 4: Run — PASS.**
-- [ ] **Step 5: Commit** — `feat: GitHub Actions cache storage with rate-limit handling`
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement** (`services-ghac` with `version` = `hoard-{cache_version}` so cache versions never collide).  **Step 4: Run — PASS.**
+- [x] **Step 5: Commit** — `feat: GitHub Actions cache storage with rate-limit handling`
 
 ---
 
