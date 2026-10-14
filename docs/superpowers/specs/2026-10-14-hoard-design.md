@@ -498,7 +498,9 @@ and only forward (never below the newest stable `vX.*` tag, so a backport leaves
 - End-to-end: `tests/e2e/turbo.sh` builds a fixture Turborepo twice against `hoard serve`,
   deleting `.turbo` and `node_modules/.cache` in between; the second run must print `FULL TURBO`.
 - Action: vitest unit tests for input resolution and target selection; a self-test workflow uses
-  the action on the fixture with `storage: github` and `storage: r2`.
+  the action on the fixture with `storage: github` and `storage: r2`, and on the Vite+ fixture
+  (`tests/fixtures/vp-repo`) with `storage: github` on ubuntu-latest, where the second job must
+  print a Vite Task cache hit.
 
 ## 12. Later
 

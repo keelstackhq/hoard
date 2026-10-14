@@ -2,8 +2,10 @@ name: self-test
 # Runs the action (`uses: ./`) on real runners against tests/fixtures/turbo-repo:
 #   warm  builds the fixture with an empty cache (misses, uploads);
 #   hit   rebuilds it in a fresh checkout and must replay everything from the cache.
-# TODO(milestone 3): add a Vite+ leg on tests/fixtures/vp-repo (warm saves the task cache, hit
-#   must restore it and print a Vite Task cache hit).
+# vp-warm / vp-hit do the same for Vite+ on tests/fixtures/vp-repo with storage: github: warm runs
+#   the task and post saves the task cache; hit restores it in a fresh checkout and must print a
+#   Vite Task cache hit. The action only looks for Vite+ at the workspace root, so these jobs check
+#   hoard out into ./hoard (`uses: ./hoard`) and copy the fixture to the root.
 # The cache-version is run-<run_id>-<os>-<storage>: unique per run (runs never see each other) and
 # per matrix leg (task hashes are OS-independent here, so one leg's uploads must not satisfy
 # another leg's hit assertion). run_attempt is deliberately not part of it: re-running only the
@@ -209,5 +211,102 @@ jobs:
           echo "hoard hits: $hits"
           [ "$hits" -gt 0 ] || {
             echo "::error::hoard reported $hits cache hits; expected more than 0"
+            exit 1
+          }
+
+  vp-warm:
+    name: vp warm (ubuntu-latest, github, source)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: hoard
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: hoard
+      - run: cargo build --release
+        working-directory: hoard
+      - name: Share the binary with the hit job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hoard-vp
+          path: hoard/target/release/hoard
+          if-no-files-found: error
+          retention-days: 1
+      - name: Put the fixture at the workspace root
+        run: cp -R hoard/tests/fixtures/vp-repo/. .
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install the fixture
+        run: pnpm install --no-frozen-lockfile # the fixture has no lockfile
+      - name: hoard
+        uses: ./hoard
+        env:
+          HOARD_ACTION_BINARY_PATH: ${{ github.workspace }}/hoard/target/release/hoard
+        with:
+          storage: github
+          cache-version: run-${{ github.run_id }}-vp
+      - name: Run the task (cold cache; post saves the task cache)
+        run: pnpm exec vp run hello
+
+  vp-hit:
+    name: vp hit (ubuntu-latest, github, source)
+    needs: vp-warm
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: hoard
+          persist-credentials: false
+      - name: Fetch the binary built in vp-warm
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hoard-vp
+          path: ${{ runner.temp }}/hoard-bin
+      - run: chmod +x "$RUNNER_TEMP/hoard-bin/hoard"
+      - name: Put the fixture at the workspace root
+        run: cp -R hoard/tests/fixtures/vp-repo/. .
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install the fixture
+        run: pnpm install --no-frozen-lockfile
+      - name: hoard (restores the task cache)
+        uses: ./hoard
+        env:
+          HOARD_ACTION_BINARY_PATH: ${{ runner.temp }}/hoard-bin/hoard
+        with:
+          storage: github
+          cache-version: run-${{ github.run_id }}-vp
+      - name: Assert the task cache was restored
+        run: |
+          [ -n "$(ls -A node_modules/.vite/task-cache 2>/dev/null)" ] || {
+            echo "::error::node_modules/.vite/task-cache is empty after the hoard step: nothing was restored"
+            exit 1
+          }
+      - name: Run the task (warm cache)
+        run: pnpm exec vp run hello 2>&1 | tee "$RUNNER_TEMP/vp.log"
+      - name: Assert a Vite Task cache hit
+        run: |
+          # Vite+ 1.2.0 prints `… cache hit, replaying` per task and `vp run: cache hit, …` at the end.
+          grep -q 'cache hit' "$RUNNER_TEMP/vp.log" || {
+            echo "::error::vp output has no 'cache hit': the restored task cache was not used"
             exit 1
           }
