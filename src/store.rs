@@ -28,6 +28,12 @@ pub enum StoreError {
     Storage(#[from] opendal::Error),
     #[error("body stream error: {0}")]
     Body(#[from] std::io::Error),
+    /// A key prefix the backend would rewrite (leading `/`, `//`, whitespace, `..`); using it
+    /// could reach keys outside the configured prefix.
+    #[error(
+        "refusing key prefix {0:?}: it must be non-empty, end with / and be in normal form (for example cache/)"
+    )]
+    BadPrefix(String),
 }
 
 pub enum GetOutcome {

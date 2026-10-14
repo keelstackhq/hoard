@@ -2,12 +2,11 @@
 //! once per 24 h. The marker `{prefix}_hoard/last-prune` holds the last run's RFC 3339 time.
 //! Everything under `{prefix}_hoard/` is hoard's own bookkeeping: never counted, never deleted.
 
-use std::collections::HashMap;
-
 use anyhow::bail;
 use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt;
 use opendal::ErrorKind;
+use opendal::raw::normalize_path;
 use tracing::warn;
 
 use crate::config::Config;
@@ -45,6 +44,14 @@ pub fn marker_key(prefix: &str) -> String {
 /// Keys to delete so the total fits in `max_size`: oldest `last_modified` first, ties broken
 /// by key, stopping as soon as the total is ≤ `max_size`.
 pub fn plan_deletions(objects: &[ObjectInfo], max_size: u64) -> Vec<String> {
+    plan(objects, max_size)
+        .into_iter()
+        .map(|o| o.key.clone())
+        .collect()
+}
+
+/// The objects [`plan_deletions`] names, in deletion order.
+fn plan(objects: &[ObjectInfo], max_size: u64) -> Vec<&ObjectInfo> {
     let mut total: u64 = objects.iter().map(|o| o.size).sum();
     let mut sorted: Vec<&ObjectInfo> = objects.iter().collect();
     sorted.sort_by(|a, b| (a.last_modified, &a.key).cmp(&(b.last_modified, &b.key)));
@@ -54,7 +61,7 @@ pub fn plan_deletions(objects: &[ObjectInfo], max_size: u64) -> Vec<String> {
             break;
         }
         total -= o.size;
-        out.push(o.key.clone());
+        out.push(o);
     }
     out
 }
@@ -86,6 +93,14 @@ pub async fn prune(
     now: DateTime<Utc>,
     force: bool,
 ) -> Result<PruneReport, StoreError> {
+    // Defence in depth (config validates r2-prefix): OpenDAL normalises paths, so `/` would
+    // list the whole bucket and `cache//` would no longer match `{prefix}_hoard/`.
+    let normal = prefix.ends_with('/')
+        && normalize_path(prefix) == prefix
+        && !prefix.split('/').any(|seg| seg == "." || seg == "..");
+    if !normal || prefix == "/" {
+        return Err(StoreError::BadPrefix(prefix.to_string()));
+    }
     if !force && throttled(store, prefix, now).await? {
         return Ok(PruneReport {
             skipped_throttled: true,
@@ -100,8 +115,10 @@ pub async fn prune(
         .filter(|o| !o.key.starts_with(&internal))
         .collect();
     let total: u64 = objects.iter().map(|o| o.size).sum();
-    let mut sizes: HashMap<String, u64> = objects.iter().map(|o| (o.key.clone(), o.size)).collect();
-    let plan = plan_deletions(&objects, max_size);
+    let doomed: Vec<(String, u64)> = plan(&objects, max_size)
+        .into_iter()
+        .map(|o| (o.key.clone(), o.size))
+        .collect();
 
     let mut report = PruneReport {
         listed: objects.len() as u64,
@@ -109,20 +126,20 @@ pub async fn prune(
     };
     // Owned futures (a cloned Store is a cheap handle): borrowing closures here make the
     // spawned serve future fail the `Send` check.
-    let mut results = futures::stream::iter(plan)
-        .map(|key| {
+    let mut results = futures::stream::iter(doomed)
+        .map(|(key, size)| {
             let store = store.clone();
             async move {
                 let res = store.delete(&key).await;
-                (key, res)
+                (key, size, res)
             }
         })
         .buffer_unordered(DELETE_CONCURRENCY);
-    while let Some((key, res)) = results.next().await {
+    while let Some((key, size, res)) = results.next().await {
         match res {
             Ok(()) => {
                 report.deleted += 1;
-                report.freed_bytes += sizes.remove(&key).unwrap_or(0);
+                report.freed_bytes += size;
             }
             Err(e) => {
                 warn!(key = %key, error = %e, "prune: cannot delete object");
@@ -337,6 +354,24 @@ mod tests {
         let r = prune(&s, "cache/", 0, t0(), false).await.unwrap();
         assert!(!r.skipped_throttled);
         assert_eq!(r.deleted, 1);
+    }
+
+    /// A prefix OpenDAL would rewrite (`/` = the whole bucket, `cache//` = `cache/`) is refused
+    /// before anything is listed or deleted.
+    #[tokio::test]
+    async fn refuses_prefixes_opendal_would_normalise() {
+        let s = fs_store().await;
+        fill(&s, "cache/", 2, 100).await;
+        fill(&s, "other/", 2, 100).await;
+        s.op.write("cache/_hoard/doctor", vec![b'd'; 10])
+            .await
+            .unwrap();
+        for bad in ["/", "", "cache//", " cache/", "/cache/", "a/../cache/"] {
+            let err = prune(&s, bad, 0, t0(), true).await.unwrap_err();
+            assert!(matches!(err, StoreError::BadPrefix(_)), "{bad:?}: {err}");
+        }
+        assert_eq!(keys(&s, "cache/").await.len(), 3);
+        assert_eq!(keys(&s, "other/").await.len(), 2);
     }
 
     #[tokio::test]

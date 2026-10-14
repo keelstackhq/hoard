@@ -97,7 +97,7 @@ secrets as `""`).
 | `fs-root` | `./.hoard/store` | `fs` storage only (tests, local use) |
 | `r2-account-id`, `r2-access-key-id`, `r2-secret-access-key`, `r2-bucket` | — | required for `r2` |
 | `r2-endpoint` | — | Optional S3 endpoint URL override (e.g. MinIO for tests and local use), must start with `http://` or `https://`; when set, `r2-account-id` is not required |
-| `r2-prefix` | `cache/` | must end with `/` |
+| `r2-prefix` | `cache/` | One or more segments of `[A-Za-z0-9._-]` (not `.` or `..`), each followed by `/`, e.g. `cache/` or `team/turbo/`. No leading `/`, `//`, whitespace or control characters: the S3 layer would normalise them and reach keys outside the prefix (`/` = the whole bucket). |
 | `r2-lifecycle` | `auto` | `auto` \| `verify` \| `manual`; see §7.1 |
 | `max-age-days` | `7` | R2 lifecycle expiry; 1–36500 |
 | `max-size` | `5GB` | R2 size cap; accepts `KB`, `MB`, `GB`, `TB` (powers of 1000) |

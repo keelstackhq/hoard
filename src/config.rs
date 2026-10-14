@@ -37,7 +37,10 @@ pub enum ConfigError {
         "cache-version must not be empty; set --cache-version or HOARD_CACHE_VERSION (default v1)"
     )]
     EmptyCacheVersion,
-    #[error("r2-prefix {0:?} must end with / (for example cache/)")]
+    #[error(
+        "r2-prefix {0:?} must be segments of A-Z a-z 0-9 . _ - joined by / and must end with / \
+         (no leading /, //, spaces, . or .. segments); for example cache/"
+    )]
     BadPrefix(String),
     #[error(
         "r2-endpoint {0:?} must start with http:// or https:// (for example http://127.0.0.1:9000)"
@@ -65,6 +68,23 @@ pub fn parse_size(s: &str) -> Result<u64, ConfigError> {
         _ => return Err(bad()),
     };
     n.checked_mul(mult).ok_or_else(bad)
+}
+
+/// An r2 prefix is one or more segments of `[A-Za-z0-9._-]` (not `.` or `..`), each followed
+/// by `/`. Anything else could be rewritten by OpenDAL's path normalisation (leading `/`,
+/// `//`, whitespace) and reach keys outside the prefix, e.g. `/` = the whole bucket.
+fn valid_prefix(p: &str) -> bool {
+    let Some(body) = p.strip_suffix('/') else {
+        return false;
+    };
+    body.split('/').all(|seg| {
+        !seg.is_empty()
+            && seg != "."
+            && seg != ".."
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    })
 }
 
 fn runner_temp_or(file: &str, fallback: &str) -> PathBuf {
@@ -302,7 +322,7 @@ impl TryFrom<ServeArgs> for Config {
             {
                 return Err(ConfigError::BadEndpoint(e.clone()));
             }
-            if !a.r2_prefix.ends_with('/') {
+            if !valid_prefix(&a.r2_prefix) {
                 return Err(ConfigError::BadPrefix(a.r2_prefix));
             }
             Some(R2Config {
@@ -376,6 +396,37 @@ mod tests {
                 .to_string()
                 .contains("must end with /")
         );
+    }
+    fn r2_with_prefix(prefix: &str) -> Result<Config, ConfigError> {
+        Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-account-id",
+            "a",
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+            "--r2-prefix",
+            prefix,
+        ]))
+    }
+    #[test]
+    fn prefix_must_be_plain_segments() {
+        for bad in [
+            "/", "//", "/cache/", "cache//", " cache/", "cache/ ", "a/../b/", "../", "./", "a/./",
+            "ca che/", "ca\tche/", "c\u{7}/", "cache",
+        ] {
+            let err = r2_with_prefix(bad).unwrap_err().to_string();
+            assert!(err.contains("r2-prefix"), "{bad:?}: {err}");
+            assert!(err.contains("cache/"), "{bad:?}: {err}");
+        }
+        for good in ["cache/", "team-a/turbo_v1/", "a.b/c/", "X9/"] {
+            assert_eq!(r2_with_prefix(good).unwrap().r2.unwrap().prefix, good);
+        }
     }
     #[test]
     fn debug_redacts_secrets() {

@@ -24,6 +24,7 @@ const FS_PREFIX: &str = "cache/";
 
 /// Upper bound for the shutdown prune: a slow bucket must not hold the CI job hostage. The
 /// marker is only written on completion, so an interrupted prune runs again next time.
+/// Known limitation: if the LIST alone takes longer than this, the marker is never written.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// The three `export` lines that point Turborepo at a server.
@@ -282,6 +283,15 @@ struct ShutdownCache<'a> {
 /// by [`PRUNE_TIMEOUT`]. Returns the summary lines: `Pruned: ...` when something was deleted,
 /// `Prune: failed (...)` on an error or timeout (also logged), nothing otherwise.
 async fn prune_on_shutdown(cfg: &Config, cache: ShutdownCache<'_>) -> Vec<String> {
+    prune_on_shutdown_within(cfg, cache, PRUNE_TIMEOUT).await
+}
+
+/// [`prune_on_shutdown`] with the time bound as a parameter (tests).
+async fn prune_on_shutdown_within(
+    cfg: &Config,
+    cache: ShutdownCache<'_>,
+    bound: Duration,
+) -> Vec<String> {
     let mut lines = Vec::new();
     if cfg.storage != Storage::R2 || cfg.mode != Mode::ReadWrite {
         return lines;
@@ -293,9 +303,12 @@ async fn prune_on_shutdown(cfg: &Config, cache: ShutdownCache<'_>) -> Vec<String
         chrono::Utc::now(),
         false,
     );
-    match tokio::time::timeout(PRUNE_TIMEOUT, run).await {
+    match tokio::time::timeout(bound, run).await {
         Err(_) => {
-            warn!("prune did not finish within 5 minutes; it runs again on the next shutdown");
+            warn!(
+                "prune did not finish within {}s; it runs again on the next shutdown",
+                bound.as_secs()
+            );
             lines.push("Prune: failed (timed out)".to_string());
         }
         Ok(Err(e)) => {
@@ -331,6 +344,7 @@ fn short_reason(e: &StoreError) -> String {
     match e {
         StoreError::Storage(e) => e.kind().to_string(),
         StoreError::Body(e) => e.kind().to_string(),
+        StoreError::BadPrefix(_) => "bad prefix".into(),
     }
 }
 
@@ -352,5 +366,75 @@ async fn shutdown_work(
         if let Err(e) = write_atomic(path, &md, false) {
             warn!(path = %path.display(), error = format!("{e:#}"), "cannot write summary file");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServeArgs;
+    use clap::Parser;
+
+    /// A prune slower than the bound becomes a summary line, never an error.
+    // Sends S3 requests to a server that never answers, so no pooled connection outlives the
+    // test runtime (see `r2::tests::hung_endpoint_times_out`).
+    #[tokio::test]
+    async fn shutdown_prune_timeout_is_a_summary_line() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let endpoint = format!("http://{addr}");
+        let cfg = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-endpoint",
+            &endpoint,
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+        ]))
+        .unwrap();
+        let store = Store::new(build_operator(&cfg).unwrap());
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+        };
+        let start = std::time::Instant::now();
+        let lines = prune_on_shutdown_within(&cfg, cache, Duration::from_millis(200)).await;
+        assert_eq!(lines, vec!["Prune: failed (timed out)"]);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_prune_skipped_for_fs_and_read_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.fs_root = dir.path().to_path_buf();
+        cfg.max_size = 0;
+        let store = Store::new(build_operator(&cfg).unwrap());
+        store.op.write("cache/aa", vec![0u8; 10]).await.unwrap();
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+        };
+        assert!(prune_on_shutdown(&cfg, cache).await.is_empty());
+        cfg.storage = Storage::R2;
+        cfg.mode = Mode::Read;
+        assert!(prune_on_shutdown(&cfg, cache).await.is_empty());
+        assert!(store.op.exists("cache/aa").await.unwrap());
     }
 }

@@ -3,8 +3,19 @@
 
 mod common;
 
+use aws_sdk_s3::types::{
+    BucketLifecycleConfiguration, ExpirationStatus, LifecycleExpiration, LifecycleRule,
+    LifecycleRuleFilter,
+};
+use chrono::{DateTime, TimeZone, Utc};
 use common::{MinioBucket, minio_bucket, r2_config, s3_runtime as rt, store_checks as c};
+use hoard::config::LifecycleMode;
+use hoard::r2::lifecycle::{
+    LifecycleError, LifecycleStatus, ensure_lifecycle, fix_command, r2_client, rule_id,
+};
+use hoard::r2::prune::{marker_key, prune};
 use hoard::store::{Store, build_operator};
+use std::process::{Command, Stdio};
 
 struct S3Store {
     store: Store,
@@ -123,15 +134,6 @@ fn s3_rejected_large_put_aborts_multipart() {
 }
 
 // ---- §7.1 lifecycle rule ----------------------------------------------------------------
-
-use aws_sdk_s3::types::{
-    BucketLifecycleConfiguration, ExpirationStatus, LifecycleExpiration, LifecycleRule,
-    LifecycleRuleFilter,
-};
-use hoard::config::LifecycleMode;
-use hoard::r2::lifecycle::{
-    LifecycleError, LifecycleStatus, ensure_lifecycle, fix_command, r2_client, rule_id,
-};
 
 /// Credentials of the MinIO user without `s3:PutLifecycleConfiguration` (docker-compose.yml).
 fn limited_creds() -> (String, String) {
@@ -461,8 +463,6 @@ fn r2_cmd(cmd: &str, b: &MinioBucket, dir: &std::path::Path, key: &str, secret: 
     c
 }
 
-use std::process::{Command, Stdio};
-
 /// Waits up to 30 s for the child to exit.
 fn wait_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
     for _ in 0..600 {
@@ -682,9 +682,6 @@ fn doctor_reports_bad_credentials() {
 
 // ---- §7.2 size cap ----------------------------------------------------------------------
 
-use chrono::{DateTime, TimeZone, Utc};
-use hoard::r2::prune::{marker_key, prune};
-
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 14, 12, 0, 0).unwrap()
 }
@@ -833,5 +830,103 @@ fn serve_prune_failure_is_reported_not_fatal() {
         assert!(status.success(), "{stderr}");
         let summary = std::fs::read_to_string(dir.path().join("summary.md")).unwrap();
         assert!(summary.contains("Prune: failed ("), "{summary}");
+    })
+}
+
+/// Credentials of the MinIO user without `s3:DeleteObject` (tests/minio/entrypoint.sh).
+fn nodelete_creds() -> (String, String) {
+    let var = |k: &str, d: &str| {
+        std::env::var(k)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| d.into())
+    };
+    (
+        var("HOARD_TEST_S3_NODELETE_KEY", "hoard-nodelete"),
+        var("HOARD_TEST_S3_NODELETE_SECRET", "hoard-nodelete-secret"),
+    )
+}
+
+/// `b` seen through the no-delete user.
+fn nodelete_bucket(b: &MinioBucket) -> MinioBucket {
+    let (key_id, secret) = nodelete_creds();
+    MinioBucket {
+        key_id,
+        secret,
+        ..b.clone()
+    }
+}
+
+/// Each failed delete is counted, the others are still tried, the bytes stay counted, and
+/// the marker is not written (the next run retries).
+#[test]
+fn s3_prune_counts_failed_deletes() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        fill(&bucket_store(&b), "cache/", 5, 100).await;
+        let s = bucket_store(&nodelete_bucket(&b));
+        let r = prune(&s, "cache/", 250, t0(), false).await.unwrap();
+        assert_eq!((r.listed, r.deleted, r.delete_errors), (5, 0, 3), "{r:?}");
+        assert_eq!((r.freed_bytes, r.remaining_bytes), (0, 500));
+        assert!(r.last_error.is_some());
+        assert_eq!(keys(&s, "cache/obj").await.len(), 5);
+        assert!(!s.op.exists(&marker_key("cache/")).await.unwrap());
+    })
+}
+
+/// On shutdown, failed deletes are a summary line; `serve` still exits 0.
+#[test]
+fn serve_reports_failed_deletes() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        fill(&bucket_store(&b), "cache/", 5, 100).await;
+        let (key, secret) = nodelete_creds();
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = r2_cmd("serve", &b, dir.path(), &key, &secret)
+            .args(["--max-size", "250", "--r2-lifecycle", "manual"])
+            .spawn()
+            .unwrap();
+        shutdown(dir.path()).await;
+        let status = wait_exit(&mut child);
+        let (_, stderr) = output(child);
+        assert!(status.success(), "{stderr}");
+        let summary = std::fs::read_to_string(dir.path().join("summary.md")).unwrap();
+        assert!(
+            summary.contains("Prune: failed (3 deletes failed)"),
+            "{summary}"
+        );
+        assert!(!summary.contains("Pruned:"), "{summary}");
+        assert!(!stderr.contains(&secret), "secret leaked: {stderr}");
+    })
+}
+
+/// `hoard prune` prints its line, then exits non-zero when deletes failed.
+#[test]
+fn prune_command_fails_on_failed_deletes() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        fill(&bucket_store(&b), "cache/", 5, 100).await;
+        let (key, secret) = nodelete_creds();
+        let dir = tempfile::tempdir().unwrap();
+        let child = r2_cmd("prune", &b, dir.path(), &key, &secret)
+            .args(["--max-size", "250"])
+            .spawn()
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{stdout}{stderr}");
+        assert_eq!(
+            stdout,
+            "pruned 0 of 5 objects, freed 0 B, 500 B remain (max 250 B)\n"
+        );
+        assert!(stderr.contains("3 delete(s) failed"), "{stderr}");
+        assert!(!stderr.contains(&secret), "secret leaked: {stderr}");
     })
 }
