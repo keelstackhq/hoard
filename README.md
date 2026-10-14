@@ -85,7 +85,8 @@ summary.
   repository checked out with `actions/checkout`'s `path:` is not looked at) depends on `vite-plus`, main restores Vite Task's
   cache directory (`node_modules/.vite/task-cache`, or `VITE_CACHE_PATH` when absolute) from the
   newest archive saved on the same OS and architecture, and post saves it as a new archive for
-  this run, before the server stops. Vite+ remote caching is not released yet, so this replaces
+  this run, before the server stops (unless the cache is unchanged since the restore: then
+  nothing is uploaded). Vite+ remote caching is not released yet, so this replaces
   the `actions/cache` steps of the Vite+ docs and works with every `storage`. A cache larger
   than `vp-max-size` is not saved (run `vp cache clean`); restore and save problems are warnings
   and never fail the build. With Vite+, put the hoard step after the dependency install (as the

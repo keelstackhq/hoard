@@ -6,6 +6,7 @@
 
 pub mod archive;
 pub mod cli;
+pub mod fingerprint;
 pub mod gha_twirp;
 
 use std::collections::HashMap;

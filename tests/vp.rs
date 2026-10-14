@@ -524,6 +524,7 @@ fn hoard(ws: &Path) -> Command {
         "VITE_CACHE_PATH",
         "GITHUB_RUN_ID",
         "GITHUB_RUN_ATTEMPT",
+        "RUNNER_TEMP", // the fingerprint then lives in <ws>/.hoard
     ] {
         c.env_remove(k);
     }
@@ -584,6 +585,69 @@ fn binary_fs_save_then_restore() {
     ]);
     let (code, out, _) = run(c);
     assert_eq!((code, out.trim()), (0, "no cache found"));
+}
+
+fn fs_cmd(ws: &Path, cmd: &str, fs_root: &str) -> Command {
+    let mut c = hoard(ws);
+    c.args([cmd, "--storage", "fs", "--fs-root", fs_root]);
+    c
+}
+
+/// A job that restored the task cache and changed nothing does not upload it again.
+#[test]
+fn binary_save_unchanged_since_restore_is_skipped() {
+    let store = tempfile::tempdir().unwrap();
+    let fs_root = store.path().to_str().unwrap().to_string();
+    let (src_ws, _) = cache_with(&[("db", b"tasks"), ("out/a", b"x")]);
+    let (code, out, err) = run(fs_cmd(src_ws.path(), "save", &fs_root));
+    assert_eq!(code, 0, "{err}");
+    let first = out.trim().strip_prefix("saved ").unwrap().to_string();
+    let first = first.split(' ').next().unwrap().to_string();
+
+    let (ws, dir) = empty_target();
+    let (code, out, err) = run(fs_cmd(ws.path(), "restore", &fs_root));
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("restored "), "{out}");
+    let os = default_os_arch();
+    assert!(
+        ws.path()
+            .join(format!(".hoard/hoard-vp-{os}.fingerprint"))
+            .is_file()
+    );
+
+    let (code, out, err) = run(fs_cmd(ws.path(), "save", &fs_root));
+    assert_eq!(
+        (code, out.trim()),
+        (0, "skipped: unchanged since restore"),
+        "{err}"
+    );
+    let pointer = format!("{fs_root}/cache/vp/v1/{os}/latest");
+    assert_eq!(std::fs::read_to_string(&pointer).unwrap(), first);
+
+    // A task ran and wrote to the cache: saved.
+    std::fs::write(dir.join("db2"), b"more").unwrap();
+    let (code, out, err) = run(fs_cmd(ws.path(), "save", &fs_root));
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("saved "), "{out}");
+}
+
+/// A restore that finds nothing drops a fingerprint left from earlier, so save uploads.
+#[test]
+fn binary_restore_without_a_cache_drops_an_old_fingerprint() {
+    let store = tempfile::tempdir().unwrap();
+    let fs_root = store.path().to_str().unwrap().to_string();
+    let (ws, dir) = cache_with(&[("db", b"local")]);
+    let os = default_os_arch();
+    let fp = ws.path().join(format!(".hoard/hoard-vp-{os}.fingerprint"));
+    std::fs::create_dir_all(fp.parent().unwrap()).unwrap();
+    std::fs::write(&fp, hoard::vp::fingerprint::fingerprint(&dir).unwrap()).unwrap();
+
+    let (code, out, _) = run(fs_cmd(ws.path(), "restore", &fs_root));
+    assert_eq!((code, out.trim()), (0, "no cache found"));
+    assert!(!fp.exists());
+    let (code, out, err) = run(fs_cmd(ws.path(), "save", &fs_root));
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("saved "), "{out}");
 }
 
 #[test]

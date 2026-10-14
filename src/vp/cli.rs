@@ -5,11 +5,13 @@
 //! build.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
+use tracing::warn;
 
+use super::fingerprint::{fingerprint, fingerprint_file};
 use super::{
     GhaTwirp, RestoreOutcome, SaveOutcome, VpBackend, default_os_arch, default_run_key,
     vp_cache_dir, vp_restore, vp_save,
@@ -113,6 +115,38 @@ fn backend(cfg: &Config) -> anyhow::Result<VpBackend> {
     })
 }
 
+/// The fingerprint of `dir` (on a blocking thread).
+async fn fingerprint_of(dir: &Path) -> std::io::Result<String> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || fingerprint(&dir))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// After a restore: writes `dir`'s fingerprint to `file`. A failure only costs a re-upload.
+async fn record_fingerprint(file: &Path, dir: &Path) {
+    let written = async {
+        let fp = fingerprint_of(dir).await?;
+        if let Some(parent) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(file, fp).await
+    };
+    if let Err(e) = written.await {
+        warn!(path = %file.display(), error = %e, "cannot record the Vite+ cache fingerprint");
+    }
+}
+
+/// True when `file` holds the fingerprint `dir` has now: nothing changed since the restore.
+async fn unchanged_since_restore(file: &Path, dir: &Path) -> bool {
+    let Ok(saved) = tokio::fs::read_to_string(file).await else {
+        return false;
+    };
+    fingerprint_of(dir)
+        .await
+        .is_ok_and(|now| now == saved.trim())
+}
+
 impl VpJob {
     /// Runs the command and returns its one line. The mode skips come first, before any storage
     /// setup; a setup error (backend, signal handler) is `Err`; every other outcome, a storage
@@ -132,9 +166,13 @@ impl VpJob {
         }
         let backend = backend(&j.cfg)?;
         let signal = termination_signal()?;
+        let fp_file = fingerprint_file(std::env::var("RUNNER_TEMP").ok().as_deref(), &j.os_arch);
         let work = async {
             let cv = &j.cfg.cache_version;
             if j.save {
+                if unchanged_since_restore(&fp_file, &j.dir).await {
+                    return Ok("skipped: unchanged since restore".to_string());
+                }
                 vp_save(&backend, cv, &j.os_arch, &j.run_key, &j.dir, j.max_size)
                     .await
                     .map(|o| match o {
@@ -151,14 +189,18 @@ impl VpJob {
                         }
                     })
             } else {
-                vp_restore(&backend, cv, &j.os_arch, &j.dir)
-                    .await
-                    .map(|o| match o {
-                        RestoreOutcome::Restored { key, bytes } => {
-                            format!("restored {key} ({})", human_bytes(bytes))
-                        }
-                        RestoreOutcome::NotFound => "no cache found".into(),
-                    })
+                // Only a successful restore leaves a fingerprint for save.
+                let _ = tokio::fs::remove_file(&fp_file).await;
+                let o = vp_restore(&backend, cv, &j.os_arch, &j.dir).await;
+                if matches!(o, Ok(RestoreOutcome::Restored { .. })) {
+                    record_fingerprint(&fp_file, &j.dir).await;
+                }
+                o.map(|o| match o {
+                    RestoreOutcome::Restored { key, bytes } => {
+                        format!("restored {key} ({})", human_bytes(bytes))
+                    }
+                    RestoreOutcome::NotFound => "no cache found".into(),
+                })
             }
         };
         let result = tokio::select! {
