@@ -47,9 +47,10 @@ pnpm turbo run build
 ```
 
 R2 token permissions: with the default `r2-lifecycle: auto`, a read-write server needs Admin
-Read & Write, because it sets the bucket's lifecycle rule. With `--r2-lifecycle manual` or
-`verify`, object read and write is enough (a bucket admin adds the rule; `hoard doctor` prints
-the command). With `--mode read`, object read is enough.
+Read & Write, because it sets the bucket's lifecycle rule. `--r2-lifecycle verify` only reads
+the rule (Admin Read, plus object read and write); with `--r2-lifecycle manual`, object read
+and write is enough. In both cases a bucket admin adds the rule (`hoard doctor` prints the
+command). With `--mode read`, object read is enough.
 
 ## Settings
 
