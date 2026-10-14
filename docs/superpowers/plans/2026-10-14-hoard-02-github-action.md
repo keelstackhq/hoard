@@ -172,7 +172,7 @@ test("checksum mismatch throws", async () => {
   - main: settings → binary → start → health → `core.setSecret(token)` → export `TURBO_API`, `TURBO_TOKEN`, `TURBO_TEAM=hoard` → `core.saveState("port"|"token"|"summary")`
   - post: shutdown → append summary + warnings to `$GITHUB_STEP_SUMMARY` → outputs `hits`, `misses`, `time-saved-ms` (from `GET /_hoard/stats` before shutdown) → print log on failure or `RUNNER_DEBUG=1`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```ts
 test("serveArgs for r2", () => {
@@ -188,8 +188,8 @@ test("shutdownServer returns false when nothing listens", async () => {
 });
 ```
 
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement** — R2 secrets are passed as `HOARD_R2_SECRET_ACCESS_KEY` etc. in the child env, never argv. Post never throws (wrap and `core.warning`).  **Step 4: Run — PASS.**
-- [ ] **Step 5: Commit** — `feat(action): start, export and shut down hoard`
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement** — R2 secrets are passed as `HOARD_R2_SECRET_ACCESS_KEY` etc. in the child env, never argv. Post never throws (wrap and `core.warning`).  **Step 4: Run — PASS.**
+- [x] **Step 5: Commit** — `feat(action): start, export and shut down hoard`
 
 ---
 
