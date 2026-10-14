@@ -120,28 +120,40 @@ fn remove_if_present(path: &Path) {
     }
 }
 
-/// Resolves on SIGTERM or Ctrl-C.
-async fn termination_signal() {
-    let ctrl_c = async {
+/// Installs the SIGTERM and Ctrl-C handlers now and returns a future that resolves when
+/// either arrives. Installing early means a signal sent right after startup is not lost.
+#[cfg(unix)]
+fn termination_signal() -> anyhow::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).context("cannot install SIGTERM handler")?;
+    let mut int = signal(SignalKind::interrupt()).context("cannot install Ctrl-C handler")?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn termination_signal() -> anyhow::Result<impl Future<Output = ()>> {
+    Ok(async {
         if tokio::signal::ctrl_c().await.is_err() {
             std::future::pending::<()>().await;
         }
-    };
-    #[cfg(unix)]
-    let term = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut s) => {
-                s.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = term => {}
+    })
+}
+
+/// The command to load the env, with the file flags when they are not the defaults.
+fn env_hint(cfg: &Config) -> String {
+    let mut cmd = String::from("hoard env");
+    if cfg.port_file != default_port_file() {
+        cmd.push_str(&format!(" --port-file {}", cfg.port_file.display()));
     }
+    if cfg.token_file != default_token_file() {
+        cmd.push_str(&format!(" --token-file {}", cfg.token_file.display()));
+    }
+    format!("eval \"$({cmd})\"")
 }
 
 /// Runs the server until `POST /_hoard/shutdown`, SIGTERM or Ctrl-C, then runs the shutdown
@@ -174,9 +186,14 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         shutdown: shutdown_tx,
     };
 
+    let signal = termination_signal()?;
+
     // The token file first: the port file is the readiness signal.
     write_atomic(&cfg.token_file, &token, true)?;
-    write_atomic(&cfg.port_file, &port.to_string(), false)?;
+    if let Err(e) = write_atomic(&cfg.port_file, &port.to_string(), false) {
+        remove_if_present(&cfg.token_file);
+        return Err(e);
+    }
 
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(
@@ -186,15 +203,18 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
             })
             .into_future(),
     );
-    info!("hoard listening on http://127.0.0.1:{port} — run: eval \"$(hoard env)\"");
+    info!(
+        "hoard listening on http://127.0.0.1:{port} — run: {}",
+        env_hint(&cfg)
+    );
 
     let reply = tokio::select! {
         r = shutdown_rx.recv() => r,
-        _ = termination_signal() => None,
+        _ = signal => None,
     };
     info!("shutting down");
 
-    let result = shutdown_work(&cfg, &stats, &storage_line).await;
+    shutdown_work(&cfg, &stats, &storage_line).await;
     remove_if_present(&cfg.port_file);
     remove_if_present(&cfg.token_file);
 
@@ -205,16 +225,18 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     drop(shutdown_rx);
     let _ = stop_tx.send(());
     server.await.context("server task failed")??;
-    result
+    Ok(())
 }
 
 /// Work done once on shutdown: hooks contribute extra summary lines, then the summary is
-/// written.
-async fn shutdown_work(cfg: &Config, stats: &Stats, storage_line: &str) -> anyhow::Result<()> {
+/// written. Contract: this never fails. Hooks and the summary report problems as warnings
+/// or summary lines, so shutdown always exits 0 (the cache must never fail the build).
+async fn shutdown_work(cfg: &Config, stats: &Stats, storage_line: &str) {
     let extra_lines: Vec<String> = Vec::new();
     if let Some(path) = &cfg.summary_file {
         let md = render_summary(&stats.snapshot(), storage_line, &extra_lines);
-        write_atomic(path, &md, false)?;
+        if let Err(e) = write_atomic(path, &md, false) {
+            warn!(path = %path.display(), error = format!("{e:#}"), "cannot write summary file");
+        }
     }
-    Ok(())
 }

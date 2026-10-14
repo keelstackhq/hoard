@@ -670,3 +670,30 @@ async fn serve_github_storage_fails_with_hint() {
     assert!(err.contains("--storage fs"), "{err}");
     assert!(!cfg.port_file.exists());
 }
+
+#[tokio::test]
+async fn serve_summary_write_failure_does_not_fail_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = fs_config(&dir);
+    let blocker = dir.path().join("a-file");
+    std::fs::write(&blocker, "x").unwrap();
+    cfg.summary_file = Some(blocker.join("summary.md")); // parent is a regular file
+    let h = tokio::spawn(run_serve(cfg.clone()));
+    let port: u16 = wait_for_file(&cfg.port_file).await.trim().parse().unwrap();
+    let token = std::fs::read_to_string(&cfg.token_file).unwrap();
+    let r = post_shutdown(port, &token).await.unwrap();
+    assert_eq!(r.status(), 200);
+    h.await.unwrap().unwrap();
+    assert!(!cfg.port_file.exists() && !cfg.token_file.exists());
+}
+
+#[tokio::test]
+async fn serve_port_file_failure_removes_token_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = fs_config(&dir);
+    let blocker = dir.path().join("a-file");
+    std::fs::write(&blocker, "x").unwrap();
+    cfg.port_file = blocker.join("port");
+    assert!(run_serve(cfg.clone()).await.is_err());
+    assert!(!cfg.token_file.exists());
+}

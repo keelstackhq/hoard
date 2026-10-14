@@ -78,3 +78,50 @@ fn unimplemented_commands_fail_cleanly() {
         assert!(!stderr.contains("panicked"), "{stderr}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn serve_exits_0_on_sigterm_and_cleans_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port_file, token_file, summary) = (
+        dir.path().join("port"),
+        dir.path().join("token"),
+        dir.path().join("summary.md"),
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hoard"))
+        .args(["serve", "--storage", "fs"])
+        .arg("--fs-root")
+        .arg(dir.path().join("store"))
+        .arg("--summary-file")
+        .arg(&summary)
+        .env("HOARD_PORT_FILE", &port_file)
+        .env("HOARD_TOKEN_FILE", &token_file)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ready = false;
+    for _ in 0..200 {
+        if std::fs::read_to_string(&port_file).is_ok_and(|s| !s.is_empty()) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !ready {
+        let _ = child.kill();
+        panic!("server did not write its port file");
+    }
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0));
+    assert!(
+        std::fs::read_to_string(&summary)
+            .unwrap()
+            .contains("### hoard")
+    );
+    assert!(!port_file.exists() && !token_file.exists());
+}
