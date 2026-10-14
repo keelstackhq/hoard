@@ -14,26 +14,46 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
+/// Largest lifecycle configuration accepted (S3 allows 1,000 rules; this is plenty).
+const MAX_LIFECYCLE_BODY: usize = 1 << 20;
+
+/// The stored lifecycle configurations, by bucket: raw XML exactly as last PUT (or seeded).
+#[derive(Clone, Default)]
+pub struct Lifecycles(Arc<Mutex<HashMap<String, Bytes>>>);
+
+impl Lifecycles {
+    pub fn get(&self, bucket: &str) -> Option<String> {
+        let map = self.0.lock().unwrap();
+        map.get(bucket)
+            .map(|b| String::from_utf8(b.to_vec()).unwrap())
+    }
+    pub fn set(&self, bucket: &str, xml: &str) {
+        let mut map = self.0.lock().unwrap();
+        map.insert(bucket.to_string(), Bytes::from(xml.to_string()));
+    }
+}
+
 #[derive(Clone)]
 struct Proxy {
     upstream: String,
     client: reqwest::Client,
-    lifecycles: Arc<Mutex<HashMap<String, Bytes>>>,
+    lifecycles: Lifecycles,
 }
 
 /// Starts the proxy for `upstream` (e.g. `http://127.0.0.1:9000`) on the current runtime and
-/// returns its base URL. Call it from inside `s3_runtime().block_on(..)`.
-pub async fn spawn(upstream: &str) -> String {
+/// returns its base URL and its lifecycle store. Call it inside `s3_runtime().block_on(..)`.
+pub async fn spawn(upstream: &str) -> (String, Lifecycles) {
+    let lifecycles = Lifecycles::default();
     let proxy = Proxy {
         upstream: upstream.trim_end_matches('/').to_string(),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
-        lifecycles: Arc::default(),
+        lifecycles: lifecycles.clone(),
     };
     let app = axum::Router::new().fallback(handle).with_state(proxy);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
+    (format!("http://{addr}"), lifecycles)
 }
 
 /// Hop-by-hop and length headers the HTTP stacks set themselves.
@@ -61,7 +81,7 @@ async fn handle(State(p): State<Proxy>, req: Request) -> Response {
 
 async fn lifecycle(p: &Proxy, bucket: &str, req: Request) -> Response {
     match *req.method() {
-        Method::GET => match p.lifecycles.lock().unwrap().get(bucket) {
+        Method::GET => match p.lifecycles.0.lock().unwrap().get(bucket) {
             Some(xml) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/xml")], xml.clone())
                 .into_response(),
             None => (
@@ -75,12 +95,15 @@ async fn lifecycle(p: &Proxy, bucket: &str, req: Request) -> Response {
                 .into_response(),
         },
         Method::PUT => {
-            let body = axum::body::to_bytes(req.into_body(), 1 << 20).await.unwrap();
-            p.lifecycles.lock().unwrap().insert(bucket.to_string(), body);
+            let Ok(body) = axum::body::to_bytes(req.into_body(), MAX_LIFECYCLE_BODY).await else {
+                return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+            };
+            let mut map = p.lifecycles.0.lock().unwrap();
+            map.insert(bucket.to_string(), body);
             StatusCode::OK.into_response()
         }
         Method::DELETE => {
-            p.lifecycles.lock().unwrap().remove(bucket);
+            p.lifecycles.0.lock().unwrap().remove(bucket);
             StatusCode::NO_CONTENT.into_response()
         }
         _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
@@ -101,7 +124,9 @@ async fn forward(p: &Proxy, req: Request) -> Response {
         }
     }
     // Test proxy: buffering is fine here (small objects only).
-    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
+        return (StatusCode::BAD_REQUEST, "cannot read request body").into_response();
+    };
     let mut up = p
         .client
         .request(parts.method.clone(), format!("{}{path_q}", p.upstream))
@@ -121,7 +146,10 @@ async fn forward(p: &Proxy, req: Request) -> Response {
     }
     let is_head = parts.method == Method::HEAD;
     let len = res.headers().get(header::CONTENT_LENGTH).cloned();
-    let bytes = res.bytes().await.unwrap_or_default();
+    let bytes = match res.bytes().await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    };
     if is_head {
         // HEAD keeps the upstream length; there is no body to measure.
         if let Some(len) = len {

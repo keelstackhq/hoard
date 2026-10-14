@@ -249,12 +249,12 @@ async fn lifecycle_startup(cfg: &Config) -> anyhow::Result<Option<String>> {
             info!(rule = rule_id(&r2.prefix), ?status, "R2 lifecycle rule ok");
             Ok(Some(format!("Lifecycle: {days} days ✓")))
         }
-        Err(LifecycleError::Other(e)) => {
+        Err(e @ LifecycleError::Other { .. }) => {
             warn!(
-                error = format!("{e:#}"),
+                error = %e,
                 "cannot check the R2 lifecycle rule; continuing (the size cap still bounds the bucket)"
             );
-            Ok(Some(format!("Lifecycle: not checked ({e})")))
+            Ok(Some(format!("Lifecycle: not checked ({})", e.reason())))
         }
         Err(e) => Err(e.into()),
     }

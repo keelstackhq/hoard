@@ -2,7 +2,8 @@
 //!
 //! Rule `hoard-<prefix with / replaced by ->`: objects under the prefix expire after
 //! `max-age-days`, unfinished multipart uploads after 1 day. Other rules in the bucket are
-//! written back exactly as read.
+//! written back as read: every field the S3 lifecycle model defines is kept (elements unknown
+//! to aws-sdk-s3 would be lost on our Put).
 
 use std::time::Duration;
 
@@ -56,10 +57,22 @@ pub enum LifecycleError {
          or use an R2 token with Admin Read & Write, or --r2-lifecycle manual to skip the check"
     )]
     AccessDenied { fix: String },
-    /// Transient or unexpected (network, timeout, 5xx). `Display` is a short reason such as
-    /// `timed out`; `{:#}` adds the details.
-    #[error("{0}")]
-    Other(anyhow::Error),
+    /// Transient or unexpected (network, timeout, 5xx). `error`'s outermost context is a
+    /// short reason such as `timed out` (see [`LifecycleError::reason`]).
+    #[error("{error:#}\nIf the rule is missing, a bucket admin can add it with:\n{fix}")]
+    Other { error: anyhow::Error, fix: String },
+}
+
+impl LifecycleError {
+    /// A few words for the summary line `Lifecycle: not checked (<reason>)`.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Missing { differs: true, .. } => "rule differs".into(),
+            Self::Missing { differs: false, .. } => "rule missing".into(),
+            Self::AccessDenied { .. } => "AccessDenied".into(),
+            Self::Other { error, .. } => error.to_string(),
+        }
+    }
 }
 
 /// An S3 client for R2 with only the given static credentials (no env, profile or IMDS
@@ -113,8 +126,9 @@ pub async fn ensure_lifecycle(
         return Ok(LifecycleStatus::Skipped);
     }
     let fix = || fix_command(bucket, prefix, max_age_days);
-    let days = i32::try_from(max_age_days).map_err(|_| {
-        LifecycleError::Other(anyhow::anyhow!("max-age-days {max_age_days} is too large"))
+    let days = i32::try_from(max_age_days).map_err(|_| LifecycleError::Other {
+        error: anyhow::anyhow!("max-age-days {max_age_days} is too large"),
+        fix: fix(),
     })?;
     let id = rule_id(prefix);
 
@@ -156,8 +170,9 @@ pub async fn ensure_lifecycle(
     let config = BucketLifecycleConfiguration::builder()
         .set_rules(Some(rules))
         .build()
-        .map_err(|e| {
-            LifecycleError::Other(anyhow::Error::new(e).context("invalid lifecycle configuration"))
+        .map_err(|e| LifecycleError::Other {
+            error: anyhow::Error::new(e).context("invalid lifecycle configuration"),
+            fix: fix(),
         })?;
     client
         .put_bucket_lifecycle_configuration()
@@ -243,7 +258,10 @@ where
         _ => "request failed".to_string(),
     };
     let detail = aws_sdk_s3::error::DisplayErrorContext(&e).to_string();
-    LifecycleError::Other(anyhow::anyhow!("{what}: {detail}").context(reason))
+    LifecycleError::Other {
+        error: anyhow::anyhow!("{what}: {detail}").context(reason),
+        fix,
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +388,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn other_error_has_short_reason_and_the_fix() {
+        let fix = fix_command("b", "cache/", 7);
+        let e = LifecycleError::Other {
+            error: anyhow::anyhow!("dispatch failure: connection refused").context("timed out"),
+            fix: fix.clone(),
+        };
+        assert_eq!(e.reason(), "timed out");
+        let msg = e.to_string();
+        assert!(msg.lines().any(|l| l == fix), "{msg}");
+        assert!(msg.contains("connection refused"), "{msg}");
+        let missing = LifecycleError::Missing {
+            differs: true,
+            fix: fix.clone(),
+        };
+        assert_eq!(missing.reason(), "rule differs");
+        assert_eq!(
+            LifecycleError::AccessDenied { fix }.reason(),
+            "AccessDenied"
+        );
+    }
+
     /// A server that accepts connections and never answers: the check fails within the bound.
     #[tokio::test]
     async fn hung_endpoint_times_out() {
@@ -392,8 +432,8 @@ mod tests {
         let err = ensure_lifecycle(&c, "b", "cache/", 7, LifecycleMode::Auto)
             .await
             .unwrap_err();
-        assert!(matches!(err, LifecycleError::Other(_)), "{err:?}");
-        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(matches!(err, LifecycleError::Other { .. }), "{err:?}");
+        assert_eq!(err.reason(), "timed out");
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "{:?}",

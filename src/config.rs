@@ -43,6 +43,10 @@ pub enum ConfigError {
         "r2-endpoint {0:?} must start with http:// or https:// (for example http://127.0.0.1:9000)"
     )]
     BadEndpoint(String),
+    #[error(
+        "max-age-days {0} must be between 1 and 36500; set --max-age-days or HOARD_MAX_AGE_DAYS"
+    )]
+    BadMaxAge(u32),
 }
 
 /// Parse a size such as `5GB`, `750MB` or `1024` (powers of 1000).
@@ -262,6 +266,9 @@ impl TryFrom<ServeArgs> for Config {
             return Err(ConfigError::EmptyCacheVersion);
         }
         let max_size = parse_size(&a.max_size)?;
+        if !(1..=36_500).contains(&a.max_age_days) {
+            return Err(ConfigError::BadMaxAge(a.max_age_days));
+        }
         let r2 = if a.storage == Storage::R2 {
             let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
             let endpoint = non_empty(a.r2_endpoint);
@@ -548,6 +555,21 @@ mod tests {
         let dbg = format!("{c:?}");
         for s in ["topsecret", "akid-xyz"] {
             assert!(!dbg.contains(s), "{s} leaked");
+        }
+    }
+    #[test]
+    fn max_age_days_must_be_in_range() {
+        for bad in ["0", "36501"] {
+            let a = ServeArgs::parse_from(["serve", "--storage", "fs", "--max-age-days", bad]);
+            let err = Config::try_from(a).unwrap_err().to_string();
+            assert!(
+                err.contains("max-age-days") && err.contains("36500"),
+                "{err}"
+            );
+        }
+        for ok in ["1", "36500"] {
+            let a = ServeArgs::parse_from(["serve", "--storage", "fs", "--max-age-days", ok]);
+            assert!(Config::try_from(a).is_ok());
         }
     }
     #[test]

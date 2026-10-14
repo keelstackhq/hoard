@@ -179,8 +179,15 @@ pub fn r2_config(root: impl AsRef<std::path::Path>, b: &MinioBucket) -> Config {
 /// `b` reached through a [`lifecycle_proxy`]: lifecycle rules are kept verbatim (MinIO drops
 /// `AbortIncompleteMultipartUpload`), everything else goes to MinIO.
 pub async fn proxied(b: &MinioBucket) -> MinioBucket {
-    MinioBucket {
-        endpoint: lifecycle_proxy::spawn(&b.endpoint).await,
+    proxied_with_store(b).await.0
+}
+
+/// [`proxied`], plus the proxy's lifecycle store (to seed or inspect the raw XML).
+pub async fn proxied_with_store(b: &MinioBucket) -> (MinioBucket, lifecycle_proxy::Lifecycles) {
+    let (endpoint, store) = lifecycle_proxy::spawn(&b.endpoint).await;
+    let b = MinioBucket {
+        endpoint,
         ..b.clone()
-    }
+    };
+    (b, store)
 }

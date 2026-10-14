@@ -24,7 +24,7 @@ pub async fn run_doctor(cfg: &Config) -> anyhow::Result<()> {
             Ok(_) => println!("✓ lifecycle rule {id} ({days} days)"),
             Err(e) => {
                 failed += 1;
-                println!("✗ lifecycle rule {id}: {e:#}");
+                println!("✗ lifecycle rule {id}: {e}");
             }
         }
     }

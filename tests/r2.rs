@@ -307,6 +307,76 @@ fn keeps_foreign_rules() {
     })
 }
 
+/// The `<Rule>` element whose `<ID>` is `id` in a lifecycle configuration.
+fn rule_xml<'a>(xml: &'a str, id: &str) -> &'a str {
+    xml.split("<Rule>")
+        .find(|r| r.contains(&format!("<ID>{id}</ID>")))
+        .and_then(|r| r.split("</Rule>").next())
+        .unwrap_or_else(|| panic!("no rule {id} in {xml}"))
+}
+
+/// Foreign rules keep every S3 lifecycle field through our Get, merge and Put (raw XML in,
+/// raw XML out; MinIO is bypassed for the lifecycle calls).
+#[test]
+fn foreign_rules_survive_as_xml() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let (b, store) = common::proxied_with_store(&b).await;
+        store.set(
+            &b.bucket,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Rule>
+    <ID>archive-web</ID>
+    <Filter><And><Prefix>web/</Prefix><Tag><Key>team</Key><Value>web</Value></Tag><ObjectSizeGreaterThan>1024</ObjectSizeGreaterThan></And></Filter>
+    <Status>Enabled</Status>
+    <Transition><Days>30</Days><StorageClass>GLACIER</StorageClass></Transition>
+    <NoncurrentVersionExpiration><NoncurrentDays>5</NoncurrentDays><NewerNoncurrentVersions>2</NewerNoncurrentVersions></NoncurrentVersionExpiration>
+  </Rule>
+  <Rule>
+    <ID>markers</ID>
+    <Filter><Prefix>old/</Prefix></Filter>
+    <Status>Disabled</Status>
+    <Expiration><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration>
+  </Rule>
+</LifecycleConfiguration>"#,
+        );
+        let got = ensure_lifecycle(&client(&b), &b.bucket, "cache/", 7, LifecycleMode::Auto)
+            .await
+            .unwrap();
+        assert_eq!(got, LifecycleStatus::Created);
+        let xml = store.get(&b.bucket).unwrap();
+        let web = rule_xml(&xml, "archive-web");
+        for want in [
+            "<Prefix>web/</Prefix>",
+            "<Key>team</Key>",
+            "<Value>web</Value>",
+            "<ObjectSizeGreaterThan>1024</ObjectSizeGreaterThan>",
+            "<Status>Enabled</Status>",
+            "<Days>30</Days>",
+            "<StorageClass>GLACIER</StorageClass>",
+            "<NoncurrentDays>5</NoncurrentDays>",
+            "<NewerNoncurrentVersions>2</NewerNoncurrentVersions>",
+        ] {
+            assert!(web.contains(want), "{want} lost from {web}");
+        }
+        assert!(web.contains("<And>") && web.contains("<Transition>"), "{web}");
+        assert!(!web.contains("<Expiration>"), "{web}");
+        let markers = rule_xml(&xml, "markers");
+        for want in [
+            "<Prefix>old/</Prefix>",
+            "<Status>Disabled</Status>",
+            "<ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker>",
+        ] {
+            assert!(markers.contains(want), "{want} lost from {markers}");
+        }
+        let ours = rule_xml(&xml, "hoard-cache-");
+        assert!(ours.contains("<DaysAfterInitiation>1</DaysAfterInitiation>"), "{ours}");
+    })
+}
+
 #[test]
 fn verify_mode_reports_missing_with_fix() {
     rt().block_on(async {
@@ -364,7 +434,9 @@ fn unreachable_endpoint_is_other() {
         let err = ensure_lifecycle(&c, "b", "cache/", 7, LifecycleMode::Auto)
             .await
             .unwrap_err();
-        assert!(matches!(err, LifecycleError::Other(_)), "{err:?}");
+        assert!(matches!(err, LifecycleError::Other { .. }), "{err:?}");
+        let fix = fix_command("b", "cache/", 7);
+        assert!(err.to_string().lines().any(|l| l == fix), "{err}");
     })
 }
 

@@ -9,7 +9,8 @@ rm -f "$ready"
 
 minio server /data &
 server=$!
-trap 'kill -TERM "$server"' TERM INT
+# PID 1 forwards the stop signal and exits only after the server has.
+trap 'kill -TERM "$server"; wait "$server"; exit $?' TERM INT
 
 until curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null; do
 	kill -0 "$server"

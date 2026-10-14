@@ -75,7 +75,7 @@ One Rust crate (`hoard`, lib + bin) and one small TypeScript action in `action/`
 | `hoard serve` | Run the cache server until shutdown. |
 | `hoard env` | Print `export` lines for a running server (reads the port file and token file). |
 | `hoard prune` | Enforce `max-size` on R2 now (ignores the 24 h throttle with `--force`). |
-| `hoard doctor` | Check storage credentials, bucket access and the R2 lifecycle rule; print fixes. |
+| `hoard doctor` | Check storage credentials, bucket access and the R2 lifecycle rule; print fixes. The access check writes, reads and deletes `{prefix}_hoard/doctor`, also with `mode=read`. |
 | `hoard vp restore` / `vp save` | Restore or save the Vite+ task-cache directory (milestone 3). |
 
 ### 4.2 Configuration
@@ -99,7 +99,7 @@ secrets as `""`).
 | `r2-endpoint` | — | Optional S3 endpoint URL override (e.g. MinIO for tests and local use), must start with `http://` or `https://`; when set, `r2-account-id` is not required |
 | `r2-prefix` | `cache/` | must end with `/` |
 | `r2-lifecycle` | `auto` | `auto` \| `verify` \| `manual`; see §7.1 |
-| `max-age-days` | `7` | R2 lifecycle expiry |
+| `max-age-days` | `7` | R2 lifecycle expiry; 1–36500 |
 | `max-size` | `5GB` | R2 size cap; accepts `KB`, `MB`, `GB`, `TB` (powers of 1000) |
 
 R2 endpoint: `https://<account_id>.r2.cloudflarestorage.com` unless `r2-endpoint` overrides it,
@@ -180,6 +180,8 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
 
 Rule ID `hoard-<prefix with / replaced by ->` (e.g. `hoard-cache-`), filter = `r2-prefix`,
 `Expiration.Days = max-age-days`, `AbortIncompleteMultipartUpload.DaysAfterInitiation = 1`.
+Other rules are written back with every field the S3 lifecycle model defines; elements unknown
+to `aws-sdk-s3` would be lost on the Put.
 
 On `serve` startup with `storage=r2`:
 
@@ -191,7 +193,8 @@ On `serve` startup with `storage=r2`:
 
 Any other error while reading or writing the rules (network, timeout, 5xx) is transient: `serve`
 logs a warning and starts anyway (the size cap still bounds the bucket); the summary shows
-`Lifecycle: not checked (<reason>)`. `hoard doctor` always verifies (never writes) the rule.
+`Lifecycle: not checked (<reason>)`. Every lifecycle error message, transient ones included, contains the
+fix command. `hoard doctor` always verifies (never writes) the rule.
 
 The fix message must contain the exact command:
 
