@@ -252,7 +252,8 @@ async fn read_mode_rejects_put() {
     let t = spawn_test_server(Mode::Read).await;
     let r = put(&t, "aa", b"x", &[]).await;
     assert_eq!(r.status(), 403);
-    // Turborepo parses a 403 body as {"error":{"code","message"}} and prints the message.
+    // Turborepo parses a 403 body as {"error":{"code","message"}} and prints both. The code is
+    // not "forbidden": that makes Turborepo disable the remote cache (reads too) for the run.
     assert_eq!(
         r.headers()["content-type"].to_str().unwrap(),
         "application/json"
@@ -260,7 +261,7 @@ async fn read_mode_rejects_put() {
     let body: Value = r.json().await.unwrap();
     assert_eq!(
         body,
-        json!({"error": {"code": "forbidden", "message": "hoard is in read-only mode"}})
+        json!({"error": {"code": "read_only", "message": "hoard is in read-only mode"}})
     );
     assert!(!exists(&t, "aa").await);
     // Seed directly; GET still works.
@@ -296,7 +297,7 @@ async fn off_mode_status_disabled() {
     let r = put(&t, "aa", b"x", &[]).await;
     assert_eq!(r.status(), 403);
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "forbidden");
+    assert_eq!(body["error"]["code"], "off");
     assert_eq!(body["error"]["message"], "hoard is off (mode=off)");
     assert!(!exists(&t, "aa").await);
     let rw = hoard::envelope::Header {
