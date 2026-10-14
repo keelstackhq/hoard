@@ -87,8 +87,11 @@ jobs:
           # package is accounted for (uploaded, already there, failed or skipped as rate limited)
           # so the counters are final. A 429 under write-behind pauses and retries the upload (not
           # counted as rate_limited), so `throttled` is the decisive number and a long drain its
-          # cost. 900 s is under the hoard shutdown drain budget plus slack; the 45 min job limit
-          # covers a build, a drain and a slow runner without letting a hang run for 6 hours.
+          # cost. This wait (at most 900 s) runs while the server is up, before the shutdown, so
+          # it is separate from hoard's own shutdown budget (120 s drain within 270 s); it is long
+          # enough for a rate-limited queue to drain here instead of being dropped there. The
+          # 45 min job limit covers a build, this wait and a slow runner without letting a hang
+          # run for 6 hours.
           start=$(date +%s)
           while :; do
             s="$(stats)"
@@ -167,8 +170,13 @@ jobs:
         run: |
           s="$(curl -fsS -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/stats")"
           echo "$s"
-          [ "$(jq .hits <<<"$s")" -eq "$PACKAGES" ] || echo "::warning::expected $PACKAGES hits on the warm run, got $(jq .hits <<<"$s")"
-          echo "hits=$(jq .hits <<<"$s")" >> "$GITHUB_OUTPUT"
+          # A missing or non-numeric counter would make `-eq` fail with a bash error; say why.
+          hits="$(jq -e '.hits | numbers' <<<"$s")" || {
+            echo "::error::hoard stats have no numeric hits counter: $s"
+            exit 1
+          }
+          [ "$hits" -eq "$PACKAGES" ] || echo "::warning::expected $PACKAGES hits on the warm run, got $hits"
+          echo "hits=$hits" >> "$GITHUB_OUTPUT"
           echo "misses=$(jq .misses <<<"$s")" >> "$GITHUB_OUTPUT"
           {
             echo "### Warm run: $PACKAGES packages, write-behind $WRITE_BEHIND"
@@ -176,7 +184,7 @@ jobs:
             echo "| metric | value |"
             echo "| --- | --- |"
             echo "| wall seconds (build) | ${{ steps.build.outputs.wall-seconds }} |"
-            echo "| hits | $(jq .hits <<<"$s") |"
+            echo "| hits | $hits |"
             echo "| misses | $(jq .misses <<<"$s") |"
           } >> "$GITHUB_STEP_SUMMARY"
 
