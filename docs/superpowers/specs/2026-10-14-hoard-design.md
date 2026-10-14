@@ -64,7 +64,7 @@ GitHub job ─┬─ action main (node24, ~100 KB)  ── downloads + verifies 
             │                                   ├─ Turborepo API (/v8/artifacts…)
             │                                   ├─ Store (OpenDAL operator: ghac | s3→R2 | fs)
             │                                   └─ stats
-            └─ action post  ── POST /_hoard/shutdown → flush, prune (R2), write summary, exit
+            └─ action post  ── POST /_hoard/shutdown → drain, prune (R2), write summary, final stats, exit
 ```
 
 One Rust crate (`hoard`, lib + bin) and one small TypeScript action in `action/`.
@@ -124,12 +124,12 @@ Bound to `127.0.0.1` only. Every route except `/_hoard/health` requires
 | `HEAD /v8/artifacts/{hash}` | `200` + `Content-Length` and `x-artifact-duration`/`x-artifact-tag` headers if present, else `404`. Must not download the body. Counts misses only (the following GET counts the hit). With `no-reads`: always `404`, counted as a miss, store not read. |
 | `GET /v8/artifacts/{hash}` | `200` streaming body (`application/octet-stream`, `Content-Length`, artifact headers) or `404`. With `no-reads`: always `404`, counted as a miss, store not read. |
 | `PUT /v8/artifacts/{hash}` | Stream body to the store; `200 {"urls":[]}`. Existing key → also `200`. `mode=read`/`off` → `403` with `{"error":{"code":"read_only","message":"hoard is in read-only mode"}}` (code `off`, message `hoard is off (mode=off)` for `off`), the error shape Turborepo prints. The code is never `forbidden` or `remote_caching_*`: Turborepo answers those by disabling the remote cache for the whole run, reads included. Needs `Content-Length` (becomes the envelope `size`); missing, a body of a different length, or a header over 4096 bytes → not stored, `200`, counted as `put_errors`. A backend rate limit → `200`, counted as `rate_limited`, and uploads pause (§6.4): while paused, a PUT (after the auth, hash and mode checks) is answered `200` and counted as `rate_limited` without touching the store or reading the body. |
-| `PUT` with `write-behind` on (`mode=read-write` only) | After the same checks (auth, hash, mode, rate-limit pause, `Content-Length`, header size), the body is streamed to a spool file in `<RUNNER_TEMP or ./.hoard>/hoard-spool-<random>` (created at startup, removed on shutdown) and length-checked; then `200`. A spool error (disk full, a short or long body) → no file kept, `200`, counted as `put_errors`. A hash already queued or uploading is not spooled again: `200`, counted as `put_skipped_existing`. A body that would push the spool past 2 GB, or a PUT that arrives after the shutdown drain started, is uploaded synchronously as without write-behind (one warning the first time the spool is full). Up to 8 background uploads run at once, each an if-not-exists write of the complete envelope streamed from the spool file (the spool file is deleted after the attempt); they count `puts`/`bytes_up` (on upload, not on enqueue), `put_skipped_existing` or `put_errors`. They obey the rate-limit pause: a queued upload waits while uploads are paused, and a `429` counts `rate_limited`, pauses uploads and retries the item once the pause ends. A GET/HEAD of a hash that is still queued is a miss (Turborepo has the artifact locally). Shutdown (`/_hoard/shutdown`, SIGTERM, Ctrl-C) drains the queue for at most 120 s before the prune and the summary; uploads still running then are aborted (no object is left at their keys) and counted as `put_errors`. |
+| `PUT` with `write-behind` on (`mode=read-write` only) | After the same checks (auth, hash, mode, rate-limit pause, `Content-Length`, header size), the body is streamed to a spool file in `<RUNNER_TEMP or ./.hoard>/hoard-spool-<random>` (created at startup, removed on shutdown) and length-checked; then `200`. A spool error (disk full, a short or long body) → no file kept, `200`, counted as `put_errors`. A hash already queued or uploading is not spooled again: `200`, counted as `put_skipped_existing`. A body that would push the spool past 2 GB, or a PUT that arrives after the shutdown drain started, is uploaded synchronously as without write-behind (one warning the first time the spool is full). Up to 8 background uploads run at once, each an if-not-exists write of the complete envelope streamed from the spool file (the spool file is deleted after the attempt); they count `puts`/`bytes_up` (on upload, not on enqueue), `put_skipped_existing` or `put_errors`. They obey the rate-limit pause: a queued upload waits while uploads are paused, and a `429` pauses uploads and retries the item once the pause ends (not counted as `rate_limited`, which counts only PUTs the handler skipped; an item that never gets through is dropped at shutdown and counted as `put_errors`). While the spool dir is missing, PUTs are uploaded synchronously. A GET/HEAD of a hash that is still queued is a miss (Turborepo has the artifact locally). Shutdown (`/_hoard/shutdown`, SIGTERM, Ctrl-C) drains the queue for at most 120 s (and within the 270 s shutdown budget) before the prune and the summary; uploads still running then are aborted (no object is left at their keys) and counted as `put_errors`. |
 | `POST /v8/artifacts/events` | Accept (body ignored); `200` |
 | `POST /v8/artifacts` | Body `{"hashes":[…]}` → `200` JSON object mapping each found hash to `{"size":<u64>,"taskDurationMs":<u64\|null>}`; missing hashes are left out (`{}` with `mode=off` or `no-reads`) |
 | `GET /_hoard/health` | `200 ok` (no auth) |
 | `GET /_hoard/stats` | `200` JSON `Stats` (§9) |
-| `POST /_hoard/shutdown` | Flush pending work, run prune (R2), write summary, respond `200`, exit 0 |
+| `POST /_hoard/shutdown` | Drain the write-behind queue, run prune (R2), write summary, respond `200` with the final `Stats` JSON (§9; after the drain, so it includes background uploads), exit 0. All of this is bounded by one 270 s shutdown budget (the action waits 300 s): the drain gets at most 120 s, the prune at most 5 minutes but never more than what is left of the budget. A shutdown request while shutdown is already under way answers `200` with the current stats. |
 
 Validation: `{hash}` must match `^[a-fA-F0-9]{1,128}$` → otherwise `400`. Query params `teamId`
 and `slug` are accepted and ignored.
@@ -250,6 +250,11 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
 - Rate limits: 200 uploads/min, 1,500 downloads/min per repo. On `429`, pause all uploads for
   `Retry-After` seconds (default 60, at most 600; a pause is only ever extended), count `rate_limited`, keep
   serving reads. One warning is logged when the pause starts, not one per skipped upload.
+  With write-behind (§5) a background upload that gets a `429` closes the same pause and is
+  retried after it, without counting `rate_limited`.
+- A `ghac` upload that fails after `CreateCacheEntry` (an error mid-upload, or aborted by the
+  shutdown drain) leaves an unfinalized reservation for that key. A later attempt in the same
+  run gets `ok: false`, which reads as `AlreadyExists`, so that hash is not cached this run.
 - Respect `ACTIONS_CACHE_MODE`: the action maps it to `--mode` (`read` → `read`, `none` → `off`,
   `write-only` → `read-write` with reads disabled via `--no-reads`); the binary only reads `--mode`
   and `--no-reads`.
@@ -305,7 +310,8 @@ Everything under `{prefix}_hoard/` (the marker, `doctor`'s object) is neither co
 deleted. A failed delete is counted and the rest go on; the marker is then not written, so the
 next run retries. Deletes are free on R2; listing costs one Class A op per 1,000 objects.
 `PruneReport { listed, deleted, freed_bytes, remaining_bytes }`. On shutdown the prune is
-bounded by 5 minutes and never fails the run: the summary gets `Pruned: N objects, X` when
+bounded by 5 minutes, and by what the write-behind drain left of the 270 s shutdown budget
+(§5), and never fails the run: the summary gets `Pruned: N objects, X` when
 something was deleted, `Prune: failed (reason)` on an error or timeout, nothing otherwise.
 The size cap counts everything under `{prefix}`, so do not nest prefixes in one bucket
 (`cache/` and `cache/team/`): a prune of the outer prefix deletes the inner one's objects.
@@ -333,9 +339,7 @@ The storage line is `Storage: github`, `Storage: r2 (<bucket>/<prefix>)` or `Sto
 when `put_errors > 0` the line ends with `Upload errors: N` (so a broken storage never looks like
 a cold cache), then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`. When the
 write-behind drain timed out, `Upload queue: N dropped at shutdown` comes right after the
-startup lines (before the prune line); the dropped uploads are also in `Upload errors`. With
-write-behind, a `429` on a background upload that is retried later counts in `rate_limited`
-too.
+startup lines (before the prune line); the dropped uploads are also in `Upload errors`.
 
 Summary markdown (written to `summary-file`, appended by the action to `$GITHUB_STEP_SUMMARY`):
 
@@ -431,12 +435,15 @@ separate process). If main saved `vp`, run `<bin> vp save` with the saved args (
 state `bin`, the R2 keys from the inputs again, at most 300 s, then SIGTERM and SIGKILL 5 s later) before anything else, in
 particular before the shutdown (save does not need the server, and the shutdown prune then sees
 the new archive); a failure is a warning. The job summary gets the line
-`**Vite+ task cache:** restore: <restore line> · save: <save line>` after hoard's summary. Read `GET /_hoard/stats` and set the outputs (`hits`, `misses`,
-`time-saved-ms`; `0` when unreachable); when `put_errors > 0`, warn
-`hoard: N uploads failed; see the hoard log` (a broken storage must not look like a cold cache)
-and print the log. Then `POST /_hoard/shutdown` (hoard answers after writing the summary file;
-unreachable → warning `hoard server was not running at shutdown; the summary may be incomplete`,
-and the saved pid is killed in case the server is alive but not answering), append the summary
+`**Vite+ task cache:** restore: <restore line> · save: <save line>` after hoard's summary. Read `GET /_hoard/stats` (the fallback), then `POST /_hoard/shutdown` (at most 300 s; hoard
+answers within its 270 s shutdown budget, after draining its upload queue and writing the
+summary file, with the final stats; unreachable → warning `hoard server was not running at
+shutdown; the summary may be incomplete`, and the saved pid is killed in case the server is
+alive but not answering). Set the outputs (`hits`, `misses`, `time-saved-ms`) from the stats of
+the shutdown reply, or from the earlier stats when the reply body is missing or not stats JSON
+(`0` when neither is available); when `put_errors > 0`, warn
+`hoard: N uploads failed; see the hoard log` (a broken storage must not look like a cold cache;
+the final stats include background uploads that failed or were dropped) and print the log. Then append the summary
 file, if any, plus one `> ⚠️ <warning>` line per warning to `$GITHUB_STEP_SUMMARY`, and print the
 log only on a problem or with `RUNNER_DEBUG=1`. A printed log (main or post) is wrapped in
 `::stop-commands::<random>` … `::<random>::`, so no log line can act as a workflow command.

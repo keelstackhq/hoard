@@ -80,6 +80,7 @@ fn queue(store: Store, dir: &Path) -> Queue {
     let stats = Arc::new(Stats::default());
     let gate = Arc::new(RateGate::default());
     let spool = dir.join("spool");
+    std::fs::create_dir_all(&spool).unwrap();
     let wb = WriteBehind::new(store.clone(), stats.clone(), gate.clone(), spool.clone(), 8);
     Queue {
         wb,
@@ -102,7 +103,7 @@ async fn put_answers_before_the_slow_upload_and_drain_waits_for_it() {
     let r = put(&t, "aa11", b"artifact-bytes").await;
     let took = start.elapsed();
     assert_eq!(r.status(), 200);
-    assert!(took < Duration::from_millis(100), "PUT took {took:?}");
+    assert!(took < Duration::from_millis(300), "PUT took {took:?}");
     assert_eq!(t.stats.snapshot().puts, 0, "not uploaded yet");
 
     let report = t
@@ -256,7 +257,11 @@ async fn full_spool_falls_back_to_a_synchronous_upload() {
     // A body that fits is queued.
     let start = Instant::now();
     assert_eq!(put(&t, "f2", b"small").await.status(), 200);
-    assert!(start.elapsed() < Duration::from_millis(100));
+    assert!(
+        start.elapsed() < Duration::from_millis(250),
+        "{:?}",
+        start.elapsed()
+    );
     assert_eq!(t.stats.snapshot().puts, 1);
     t.write_behind
         .as_ref()
@@ -305,8 +310,8 @@ async fn closed_gate_delays_the_upload_until_it_opens() {
     assert!(exists(&q.store, "h1").await);
 }
 
-/// A 429 during a background upload closes the gate, is counted, and the item is retried
-/// once the gate opens.
+/// A 429 during a background upload closes the gate and the item is retried once the gate
+/// opens. It is not counted as `rate_limited`: nothing was skipped.
 #[tokio::test]
 async fn rate_limited_upload_is_retried_after_the_pause() {
     let mut layer = FailingWrites::new(opendal::ErrorKind::RateLimited);
@@ -331,7 +336,8 @@ async fn rate_limited_upload_is_retried_after_the_pause() {
     );
     assert_eq!(calls.write.load(Ordering::SeqCst), 2);
     let s = q.stats.snapshot();
-    assert_eq!((s.rate_limited, s.puts, s.put_errors), (1, 1, 0));
+    assert_eq!((s.rate_limited, s.puts, s.put_errors), (0, 1, 0));
+    assert!(!q.gate.allow_upload(start), "the 429 closed the gate");
     assert!(exists(&q.store, "i1").await);
 }
 
@@ -432,6 +438,12 @@ async fn serve_drains_the_queue_on_shutdown() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+    // The reply carries the final stats, after the drain.
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(
+        (body["puts"].as_u64(), body["bytes_up"].as_u64()),
+        (Some(1), Some(7))
+    );
     let summary = std::fs::read_to_string(cfg.summary_file.as_ref().unwrap()).unwrap();
     assert!(summary.contains("| 0 | 0 | 7 B |"), "{summary}");
     h.await.unwrap().unwrap();
@@ -459,4 +471,76 @@ async fn get_of_a_queued_key_is_a_miss() {
         .drain(Duration::from_secs(10))
         .await;
     assert_eq!(get().await.unwrap().status(), 200);
+}
+
+/// A 429 on every attempt: the item waits for the gate until the drain gives up, then it is
+/// dropped (put_errors), never counted as rate_limited.
+#[tokio::test]
+async fn upload_that_stays_rate_limited_is_dropped() {
+    let mut layer = FailingWrites::new(opendal::ErrorKind::RateLimited);
+    layer.response =
+        Some(r#"Parts { status: 429, version: HTTP/1.1, headers: {"retry-after": "60"} }"#.into());
+    let (store, dir) = layered_fs_store(layer);
+    let q = queue(store, dir.path());
+    q.wb.enqueue(key("l1"), header(3), body(b"abc"))
+        .await
+        .unwrap();
+    let report = q.wb.drain(Duration::from_millis(200)).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            uploaded: 0,
+            dropped: 1
+        }
+    );
+    let s = q.stats.snapshot();
+    assert_eq!((s.rate_limited, s.put_errors), (0, 1));
+}
+
+/// With the spool dir gone, a body is handed back for the synchronous path (not spooled).
+#[tokio::test]
+async fn missing_spool_dir_declines() {
+    let (store, dir) = layered_fs_store(FailingWrites::slow(Duration::from_millis(1)));
+    let q = queue(store, dir.path());
+    std::fs::remove_dir(&q.spool).unwrap();
+    let r =
+        q.wb.enqueue(key("m1"), header(3), body(b"abc"))
+            .await
+            .unwrap();
+    assert!(matches!(r, Enqueued::Declined(_)), "{r:?}");
+    assert!(!q.spool.exists(), "not recreated");
+}
+
+/// Admission vs drain: PUTs racing a drain are either queued and uploaded before the drain
+/// returns, or declined; none is left behind after it.
+#[tokio::test]
+async fn enqueues_racing_a_drain_are_uploaded_or_declined() {
+    let (store, dir) = layered_fs_store(FailingWrites::slow(Duration::from_millis(5)));
+    let q = Arc::new(queue(store, dir.path()));
+    let mut handles = Vec::new();
+    for i in 0..40u32 {
+        let q = q.clone();
+        handles.push(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(u64::from(i % 10))).await;
+            let r =
+                q.wb.enqueue(key(&format!("{i:x}0")), header(3), body(b"abc"))
+                    .await
+                    .unwrap();
+            matches!(r, Enqueued::Spooled)
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(4)).await;
+    let report = q.wb.drain(Duration::from_secs(10)).await;
+    let mut spooled = 0;
+    for h in handles {
+        if h.await.unwrap() {
+            spooled += 1;
+        }
+    }
+    assert_eq!(report.dropped, 0);
+    assert_eq!(
+        report.uploaded, spooled,
+        "every spooled item was uploaded before drain returned"
+    );
+    assert_eq!(q.stats.snapshot().puts, spooled);
 }

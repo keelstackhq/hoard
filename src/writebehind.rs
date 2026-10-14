@@ -6,10 +6,10 @@
 //! - Workers upload with [`Store::put`]: an if-not-exists write of the complete envelope.
 //!   A worker aborted mid-upload (drain timeout) leaves no object at the key.
 //! - Workers respect the [`RateGate`]: while uploads are paused they wait, and a 429 closes
-//!   the gate and retries the item after the pause.
+//!   the gate and retries the item after the pause (not counted as `rate_limited`).
 //! - A key already queued or uploading is not spooled again (`Duplicate`).
-//! - A body that would push the spool past its cap, or one arriving after the drain started,
-//!   is handed back (`Declined`) for a synchronous upload.
+//! - A body that would push the spool past its cap, one arriving after the drain started, or
+//!   any body while the spool dir is missing, is handed back (`Declined`) for a synchronous upload.
 //! - A GET of a key that is still queued is a miss; Turborepo has the artifact locally.
 
 use std::collections::HashSet;
@@ -105,11 +105,10 @@ struct Inner {
     state: Mutex<State>,
     /// Items reserved and not yet finished (spooling, queued or uploading).
     pending: watch::Sender<u64>,
-    /// Set when the drain starts: new bodies are declined.
-    closed: AtomicBool,
     uploaded: AtomicU64,
     next_file: AtomicU64,
     warned_full: AtomicBool,
+    warned_missing: AtomicBool,
 }
 
 #[derive(Default)]
@@ -118,6 +117,8 @@ struct State {
     keys: HashSet<String>,
     /// Declared sizes of the reserved items.
     spooled_bytes: u64,
+    /// Set when the drain starts: new bodies are declined.
+    closed: bool,
     /// Upload tasks; taken (and aborted) by a drain that times out, after which no task is
     /// added.
     tasks: Option<JoinSet<()>>,
@@ -162,7 +163,7 @@ enum Reserve {
 }
 
 impl WriteBehind {
-    /// A queue that spools into `spool_dir` (created on first use, removed by [`Self::drain`])
+    /// A queue that spools into `spool_dir` (the caller creates it; [`Self::drain`] removes it)
     /// and uploads at most `concurrency` items at once. Workers update `stats` and obey
     /// `gate`, shared with the request handlers.
     pub fn new(
@@ -185,10 +186,10 @@ impl WriteBehind {
                     ..State::default()
                 }),
                 pending: watch::Sender::new(0),
-                closed: AtomicBool::new(false),
                 uploaded: AtomicU64::new(0),
                 next_file: AtomicU64::new(0),
                 warned_full: AtomicBool::new(false),
+                warned_missing: AtomicBool::new(false),
             }),
         }
     }
@@ -205,12 +206,24 @@ impl WriteBehind {
         &self.inner.spool_dir
     }
 
+    /// Admission. `closed` is read and `pending` bumped under the state lock, and the drain
+    /// sets `closed` under the same lock, so once the drain is waiting no new item can slip in.
     fn reserve(&self, key: &str, size: u64) -> Reserve {
         let inner = &self.inner;
-        if inner.closed.load(Ordering::SeqCst) {
+        // The dir is created at startup; if it is gone, upload synchronously.
+        if !inner.spool_dir.is_dir() {
+            if !inner.warned_missing.swap(true, Ordering::Relaxed) {
+                warn!(
+                    path = %inner.spool_dir.display(),
+                    "write-behind spool dir is missing; uploading PUTs synchronously"
+                );
+            }
             return Reserve::Declined;
         }
         let mut st = inner.lock();
+        if st.closed {
+            return Reserve::Declined;
+        }
         if st.keys.contains(key) {
             return Reserve::Duplicate;
         }
@@ -226,8 +239,8 @@ impl WriteBehind {
         }
         st.keys.insert(key.to_owned());
         st.spooled_bytes += size;
-        drop(st);
         inner.pending.send_modify(|n| *n += 1);
+        drop(st);
         let n = inner.next_file.fetch_add(1, Ordering::Relaxed);
         Reserve::Ok(Reservation {
             inner: inner.clone(),
@@ -265,7 +278,7 @@ impl WriteBehind {
     /// Removes the spool directory.
     pub async fn drain(&self, timeout: Duration) -> DrainReport {
         let inner = &self.inner;
-        inner.closed.store(true, Ordering::SeqCst);
+        inner.lock().closed = true;
         let mut pending = inner.pending.subscribe();
         let finished = tokio::time::timeout(timeout, pending.wait_for(|n| *n == 0))
             .await
@@ -309,9 +322,6 @@ async fn spool<S>(path: &Path, mut body: S) -> io::Result<()>
 where
     S: Stream<Item = io::Result<Bytes>> + Unpin,
 {
-    if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir).await?;
-    }
     let file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -372,9 +382,10 @@ async fn upload(res: Reservation, header: Header) {
             Ok(PutOutcome::AlreadyExists) => {
                 stats.put_skipped_existing.fetch_add(1, Ordering::Relaxed);
             }
+            // Not counted as `rate_limited` (that counts PUTs skipped by the handler): the item
+            // is retried, and one that never gets through ends as dropped (`put_errors`).
             Err(StoreError::RateLimited { retry_after }) => {
                 inner.gate.on_rate_limited(Instant::now(), retry_after);
-                stats.rate_limited.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             Err(e) => {

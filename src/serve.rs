@@ -18,7 +18,7 @@ use crate::r2::prune::prune;
 use crate::ratelimit::RateGate;
 use crate::redact::redacted;
 use crate::server::{AppState, router};
-use crate::stats::{Stats, human_bytes, render_summary};
+use crate::stats::{Stats, StatsSnapshot, human_bytes, render_summary};
 use crate::store::{Store, StoreError, build_operator};
 use crate::writebehind::{CONCURRENCY, DRAIN_TIMEOUT, WriteBehind, default_spool_dir};
 
@@ -32,6 +32,27 @@ pub const GITHUB_PREFIX: &str = "hoard/";
 /// marker is only written on completion, so an interrupted prune runs again next time.
 /// Known limitation: if the LIST alone takes longer than this, the marker is never written.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Upper bound for all shutdown work together (drain, then prune, then the summary). The
+/// GitHub Action waits 300 s for the shutdown reply; staying under it keeps the summary.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(270);
+
+/// Time bounds of the shutdown work: the drain gets `min(drain, budget)`, the prune
+/// `min(prune, budget - time already spent)`.
+#[derive(Debug, Clone, Copy)]
+struct ShutdownBounds {
+    budget: Duration,
+    drain: Duration,
+    prune: Duration,
+}
+
+impl ShutdownBounds {
+    const DEFAULT: Self = Self {
+        budget: SHUTDOWN_BUDGET,
+        drain: DRAIN_TIMEOUT,
+        prune: PRUNE_TIMEOUT,
+    };
+}
 
 /// Upper bound for the whole startup lifecycle check (Get, maybe Put, SDK retries included).
 /// It runs before the port file, the readiness signal, is written, and the GitHub Action fails
@@ -197,7 +218,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let stats = Arc::new(Stats::default());
     let rate_gate = Arc::new(RateGate::default());
     let write_behind = start_write_behind(&cfg, &store, &stats, &rate_gate);
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<oneshot::Sender<()>>(8);
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<oneshot::Sender<StatsSnapshot>>(8);
     let state = AppState {
         store,
         stats: stats.clone(),
@@ -244,14 +265,15 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         prefix: &prefix,
         write_behind: write_behind.as_deref(),
     };
-    shutdown_work(&cfg, cache, &stats, &storage_line, startup_lines).await;
+    let final_stats = shutdown_work(&cfg, cache, &stats, &storage_line, startup_lines).await;
     remove_if_present(&cfg.port_file);
     remove_if_present(&cfg.token_file);
 
     if let Some(reply) = reply {
-        let _ = reply.send(());
+        let _ = reply.send(final_stats);
     }
-    // Later shutdown requests: their reply channels are dropped here, so they answer 200.
+    // Later shutdown requests: their reply channels are dropped here, so they answer 200
+    // with the current stats.
     drop(shutdown_rx);
     let _ = stop_tx.send(());
     server.await.context("server task failed")??;
@@ -360,13 +382,9 @@ struct ShutdownCache<'a> {
 }
 
 /// Shutdown hook for `storage=r2`, `mode=read-write` (spec §7.2): enforce `max-size`, bounded
-/// by [`PRUNE_TIMEOUT`]. Returns the summary lines: `Pruned: ...` when something was deleted,
+/// by `bound` (at most [`PRUNE_TIMEOUT`], less when the shutdown budget is nearly spent).
+/// Returns the summary lines: `Pruned: ...` when something was deleted,
 /// `Prune: failed (...)` on an error or timeout (also logged), nothing otherwise.
-async fn prune_on_shutdown(cfg: &Config, cache: ShutdownCache<'_>) -> Vec<String> {
-    prune_on_shutdown_within(cfg, cache, PRUNE_TIMEOUT).await
-}
-
-/// [`prune_on_shutdown`] with the time bound as a parameter (tests).
 async fn prune_on_shutdown_within(
     cfg: &Config,
     cache: ShutdownCache<'_>,
@@ -432,41 +450,36 @@ fn short_reason(e: &StoreError) -> String {
     }
 }
 
-/// Work done once on shutdown: the write-behind queue is drained (at most [`DRAIN_TIMEOUT`]),
-/// then hooks contribute extra summary lines (after the startup lines), then the summary is
-/// written. Contract: this never fails. Hooks and the summary report problems as warnings or
-/// summary lines, so shutdown always exits 0 (the cache must never fail the build).
+/// Work done once on shutdown, within [`SHUTDOWN_BUDGET`]: the write-behind queue is drained
+/// (at most [`DRAIN_TIMEOUT`]), then hooks contribute extra summary lines (after the startup
+/// lines), then the summary is written. Returns the final stats (the shutdown reply).
+/// Contract: this never fails. Hooks and the summary report problems as warnings or summary
+/// lines, so shutdown always exits 0 (the cache must never fail the build).
 async fn shutdown_work(
     cfg: &Config,
     cache: ShutdownCache<'_>,
     stats: &Stats,
     storage_line: &str,
     startup_lines: Vec<String>,
-) {
-    shutdown_work_within(
-        cfg,
-        cache,
-        stats,
-        storage_line,
-        startup_lines,
-        DRAIN_TIMEOUT,
-    )
-    .await;
+) -> StatsSnapshot {
+    let bounds = ShutdownBounds::DEFAULT;
+    shutdown_work_within(cfg, cache, stats, storage_line, startup_lines, bounds).await
 }
 
-/// [`shutdown_work`] with the drain bound as a parameter (tests).
+/// [`shutdown_work`] with the time bounds as a parameter (tests).
 async fn shutdown_work_within(
     cfg: &Config,
     cache: ShutdownCache<'_>,
     stats: &Stats,
     storage_line: &str,
     startup_lines: Vec<String>,
-    drain_timeout: Duration,
-) {
+    bounds: ShutdownBounds,
+) -> StatsSnapshot {
+    let start = std::time::Instant::now();
     let mut extra_lines = startup_lines;
     // Before the prune, so it sees the uploads, and before the summary, so it counts them.
     if let Some(wb) = cache.write_behind {
-        let report = wb.drain(drain_timeout).await;
+        let report = wb.drain(bounds.drain.min(bounds.budget)).await;
         if report.dropped > 0 {
             extra_lines.push(format!(
                 "Upload queue: {} dropped at shutdown",
@@ -474,7 +487,10 @@ async fn shutdown_work_within(
             ));
         }
     }
-    extra_lines.extend(prune_on_shutdown(cfg, cache).await);
+    let prune_bound = bounds
+        .prune
+        .min(bounds.budget.saturating_sub(start.elapsed()));
+    extra_lines.extend(prune_on_shutdown_within(cfg, cache, prune_bound).await);
     let snapshot = stats.snapshot();
     // Without this a broken storage (every upload failing) would look like a cold cache.
     if snapshot.put_errors > 0 {
@@ -492,6 +508,7 @@ async fn shutdown_work_within(
             warn!(path = %path.display(), error = format!("{e:#}"), "cannot write summary file");
         }
     }
+    snapshot
 }
 
 #[cfg(test)]
@@ -673,6 +690,7 @@ mod tests {
         let store = Arc::new(Store::new(build_operator(&cfg).unwrap()));
         let stats = Arc::new(Stats::default());
         let spool = dir.path().join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
         let wb = WriteBehind::new(
             store.clone(),
             stats.clone(),
@@ -696,15 +714,12 @@ mod tests {
             write_behind: Some(&wb),
         };
         let start = std::time::Instant::now();
-        shutdown_work_within(
-            &cfg,
-            cache,
-            &stats,
-            "Storage: r2",
-            vec![],
-            Duration::from_millis(100),
-        )
-        .await;
+        let bounds = ShutdownBounds {
+            drain: Duration::from_millis(100),
+            ..ShutdownBounds::DEFAULT
+        };
+        let snap = shutdown_work_within(&cfg, cache, &stats, "Storage: r2", vec![], bounds).await;
+        assert_eq!(snap.put_errors, 1);
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "{:?}",
@@ -716,6 +731,110 @@ mod tests {
             "{md}"
         );
         assert!(!spool.exists());
+    }
+
+    /// Drain and prune share one budget: a hung drain and a hung prune together stay within
+    /// it (the prune gets only what the drain left), and both end up as summary lines.
+    #[tokio::test]
+    async fn drain_and_prune_stay_within_the_shutdown_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = black_hole().await;
+        let mut cfg = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-endpoint",
+            &endpoint,
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+        ]))
+        .unwrap();
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Arc::new(Store::new(build_operator(&cfg).unwrap()));
+        let stats = Arc::new(Stats::default());
+        let spool = dir.path().join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        let wb = WriteBehind::new(
+            store.clone(),
+            stats.clone(),
+            Arc::new(RateGate::default()),
+            spool,
+            8,
+        );
+        let header = crate::envelope::Header {
+            v: 1,
+            duration_ms: None,
+            tag: None,
+            size: 3,
+        };
+        let body = futures::stream::iter([Ok(bytes::Bytes::from_static(b"abc"))]);
+        wb.enqueue("cache/turbo/v1/ab".into(), header, body)
+            .await
+            .unwrap();
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+            write_behind: Some(&wb),
+        };
+        let bounds = ShutdownBounds {
+            budget: Duration::from_millis(600),
+            drain: Duration::from_millis(400),
+            prune: Duration::from_secs(60),
+        };
+        let start = std::time::Instant::now();
+        shutdown_work_within(&cfg, cache, &stats, "Storage: r2", vec![], bounds).await;
+        let took = start.elapsed();
+        assert!(took >= Duration::from_millis(550), "{took:?}");
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.contains("Upload queue: 1 dropped at shutdown · Prune: failed (timed out)"),
+            "{md}"
+        );
+
+        // A drain bound above the budget is cut to the budget.
+        let bounds = ShutdownBounds {
+            budget: Duration::from_millis(200),
+            drain: Duration::from_secs(60),
+            prune: Duration::from_secs(60),
+        };
+        let wb2 = WriteBehind::new(
+            store.clone(),
+            stats.clone(),
+            Arc::new(RateGate::default()),
+            dir.path().join("spool2"),
+            8,
+        );
+        std::fs::create_dir_all(dir.path().join("spool2")).unwrap();
+        let body = futures::stream::iter([Ok(bytes::Bytes::from_static(b"abc"))]);
+        wb2.enqueue("cache/turbo/v1/cd".into(), header_of(3), body)
+            .await
+            .unwrap();
+        let cache = ShutdownCache {
+            write_behind: Some(&wb2),
+            ..cache
+        };
+        let start = std::time::Instant::now();
+        shutdown_work_within(&cfg, cache, &stats, "Storage: r2", vec![], bounds).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(1000),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    fn header_of(size: u64) -> crate::envelope::Header {
+        crate::envelope::Header {
+            v: 1,
+            duration_ms: None,
+            tag: None,
+            size,
+        }
     }
 
     #[test]
@@ -743,10 +862,18 @@ mod tests {
             prefix: "cache/",
             write_behind: None,
         };
-        assert!(prune_on_shutdown(&cfg, cache).await.is_empty());
+        assert!(
+            prune_on_shutdown_within(&cfg, cache, PRUNE_TIMEOUT)
+                .await
+                .is_empty()
+        );
         cfg.storage = Storage::R2;
         cfg.mode = Mode::Read;
-        assert!(prune_on_shutdown(&cfg, cache).await.is_empty());
+        assert!(
+            prune_on_shutdown_within(&cfg, cache, PRUNE_TIMEOUT)
+                .await
+                .is_empty()
+        );
         assert!(store.op.exists("cache/aa").await.unwrap());
     }
 }

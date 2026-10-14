@@ -10,7 +10,13 @@ import {
   runMain,
   runPost,
 } from "../src/lifecycle.js";
-import { getStats, shutdownServer, startServer, waitForHealth } from "../src/server.js";
+import {
+  getStats,
+  type ShutdownResult,
+  shutdownServer,
+  startServer,
+  waitForHealth,
+} from "../src/server.js";
 
 /** Records every @actions/core call as [method, ...args]. */
 function fakeCore(inputs: Record<string, string> = {}, state: Record<string, string> = {}) {
@@ -443,7 +449,7 @@ describe("post", () => {
       core: f.core,
       env: {},
       getStats: vi.fn(async () => ({ hits: 3, misses: 1, put_errors: 0, time_saved_ms: 900 })),
-      shutdownServer: vi.fn(async () => true),
+      shutdownServer: vi.fn(async (): Promise<ShutdownResult> => ({ ok: true })),
       kill: vi.fn(),
       runVp: vi.fn(async () => ({ ok: true, line: "saved cache/vp/v1/linux-x64/9-1 (3 KB)" })),
       ...over,
@@ -572,6 +578,31 @@ describe("post", () => {
     expect(f.of("setOutput")).toContainEqual(["misses", "5"]);
   });
 
+  test("the shutdown reply's final stats win over the earlier ones", async () => {
+    const s = await state({ warnings: "[]" });
+    const f = fakeCore({}, s);
+    const final = { hits: 7, misses: 2, put_errors: 3, time_saved_ms: 50 };
+    const d = deps(f, {
+      shutdownServer: vi.fn(async (): Promise<ShutdownResult> => ({ ok: true, stats: final })),
+    });
+    await runPost(d);
+    expect(f.of("setOutput")).toEqual([
+      ["hits", "7"],
+      ["misses", "2"],
+      ["time-saved-ms", "50"],
+    ]);
+    // Background uploads that failed or were dropped at shutdown are in the final stats only.
+    expect(f.of("warning")).toEqual([["hoard: 3 uploads failed; see the hoard log"]]);
+  });
+
+  test("a shutdown reply without stats falls back to the earlier stats", async () => {
+    const s = await state({ warnings: "[]" });
+    const f = fakeCore({}, s);
+    await runPost(deps(f));
+    expect(f.of("setOutput")).toContainEqual(["hits", "3"]);
+    expect(f.of("warning")).toEqual([]);
+  });
+
   test("after a failed binary download post writes one note to the summary", async () => {
     const note = "hoard binary could not be downloaded (HTTP 502); continuing without the cache";
     const f = fakeCore({}, { unavailable: note });
@@ -621,7 +652,7 @@ describe("post", () => {
       }),
       shutdownServer: vi.fn(async () => {
         f.calls.push(["shutdown"]);
-        return true;
+        return { ok: true };
       }),
     });
     d.env = { PATH: "/bin", HOARD_TOKEN: "stray" };
@@ -673,7 +704,9 @@ describe("post", () => {
   test("a refused shutdown kills the saved pid", async () => {
     const s = await state({ pid: "4321" });
     const f = fakeCore({}, s);
-    const d = deps(f, { shutdownServer: vi.fn(async () => false) });
+    const d = deps(f, {
+      shutdownServer: vi.fn(async (): Promise<ShutdownResult> => ({ ok: false })),
+    });
     await runPost(d);
     expect(d.kill).toHaveBeenCalledWith(4321);
   });

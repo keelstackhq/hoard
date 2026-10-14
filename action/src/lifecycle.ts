@@ -285,7 +285,7 @@ function savedWarnings(raw: string): string[] {
   }
 }
 
-/** post: outputs from stats → shutdown → job summary → log on problems. Never throws. */
+/** post: stats → shutdown (its reply has the final stats) → outputs → job summary → log on problems. Never throws. */
 export async function runPost(d: PostDeps = postDeps()): Promise<void> {
   const { core, env } = d;
   try {
@@ -315,7 +315,11 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
     const vp = savedVp(core.getState("vp"));
     const vpLine = vp ? await saveVp(d, vp, note) : "";
 
-    const stats = await d.getStats(port, token);
+    // Stats from before the shutdown are the fallback: the shutdown reply carries the final
+    // ones, which include the background uploads drained at shutdown.
+    const before = await d.getStats(port, token);
+    const shut = await d.shutdownServer(port, token);
+    const stats = (shut.ok ? shut.stats : undefined) ?? before;
     core.setOutput("hits", String(stats?.hits ?? 0));
     core.setOutput("misses", String(stats?.misses ?? 0));
     core.setOutput("time-saved-ms", String(stats?.time_saved_ms ?? 0));
@@ -326,7 +330,7 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
       core.warning(`hoard: ${putErrors} uploads failed; see the hoard log`);
     }
 
-    if (!(await d.shutdownServer(port, token))) {
+    if (!shut.ok) {
       warn("hoard server was not running at shutdown; the summary may be incomplete");
       d.kill(Number(core.getState("pid"))); // in case it is alive but not answering
     } else if (!stats) {

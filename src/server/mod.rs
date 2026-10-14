@@ -31,8 +31,8 @@ pub struct AppState {
     /// Set when PUTs are spooled and uploaded in the background (`write-behind`).
     pub write_behind: Option<Arc<WriteBehind>>,
     /// `POST /_hoard/shutdown` sends a reply channel here and answers once the shutdown work
-    /// (prune, summary) has replied, or the receiver is gone.
-    pub shutdown: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
+    /// (drain, prune, summary) has replied with the final stats, or the receiver is gone.
+    pub shutdown: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<StatsSnapshot>>,
 }
 
 impl AppState {
@@ -70,11 +70,15 @@ async fn stats(State(s): State<AppState>) -> Json<StatsSnapshot> {
     Json(s.stats.snapshot())
 }
 
-async fn shutdown(State(s): State<AppState>) -> &'static str {
+/// Answers with the final stats once the shutdown work is done (after the drain, so they
+/// include background uploads). A closed channel or a dropped reply means shutdown is already
+/// done or under way: then the current stats.
+async fn shutdown(State(s): State<AppState>) -> Json<StatsSnapshot> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    // A closed channel or a dropped reply means shutdown is already done or under way.
-    if s.shutdown.send(tx).await.is_ok() {
-        let _ = rx.await;
+    if s.shutdown.send(tx).await.is_ok()
+        && let Ok(snapshot) = rx.await
+    {
+        return Json(snapshot);
     }
-    "ok"
+    Json(s.stats.snapshot())
 }

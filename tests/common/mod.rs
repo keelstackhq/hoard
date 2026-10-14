@@ -96,7 +96,8 @@ pub struct TestServer {
     pub write_behind: Option<Arc<WriteBehind>>,
     /// Receives a reply channel when `POST /_hoard/shutdown` is called; the handler answers
     /// once the reply is sent (or dropped).
-    pub shutdown: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>,
+    pub shutdown:
+        tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<hoard::stats::StatsSnapshot>>,
     pub addr: std::net::SocketAddr,
     _dir: tempfile::TempDir,
 }
@@ -150,6 +151,7 @@ pub async fn spawn_write_behind_server(
     dir: tempfile::TempDir,
 ) -> TestServer {
     let mut parts = ServerParts::new(Arc::new(store));
+    std::fs::create_dir_all(dir.path().join("spool")).unwrap();
     let wb = WriteBehind::new(
         parts.store.clone(),
         parts.stats.clone(),

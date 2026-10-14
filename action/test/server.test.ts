@@ -347,7 +347,7 @@ describe("startServer", () => {
 
 describe("shutdownServer and getStats", () => {
   test("shutdownServer returns false when nothing listens", async () => {
-    expect(await shutdownServer(1, "t")).toBe(false);
+    expect(await shutdownServer(1, "t")).toEqual({ ok: false });
   });
 
   test("shutdownServer posts with the bearer token", async () => {
@@ -356,8 +356,25 @@ describe("shutdownServer and getStats", () => {
       seen.push(`${req.method} ${req.url} ${req.headers.authorization}`);
       res.end("ok");
     });
-    expect(await shutdownServer(port, "tok")).toBe(true);
+    // A body that is not stats JSON: ok, no stats.
+    expect(await shutdownServer(port, "tok")).toEqual({ ok: true, stats: undefined });
     expect(seen).toEqual(["POST /_hoard/shutdown Bearer tok"]);
+  });
+
+  test("shutdownServer returns the final stats from the reply body", async () => {
+    const port = await fakeHoard((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ hits: 1, misses: 2, puts: 3, put_errors: 4, time_saved_ms: 5 }));
+    });
+    expect(await shutdownServer(port, "tok")).toEqual({
+      ok: true,
+      stats: { hits: 1, misses: 2, put_errors: 4, time_saved_ms: 5 },
+    });
+  });
+
+  test("shutdownServer ignores stats JSON with missing counters", async () => {
+    const port = await fakeHoard((_req, res) => res.end(JSON.stringify({ hits: 1 })));
+    expect(await shutdownServer(port, "tok")).toEqual({ ok: true, stats: undefined });
   });
 
   test("shutdownServer returns false on a non-2xx answer", async () => {
@@ -365,7 +382,7 @@ describe("shutdownServer and getStats", () => {
       res.statusCode = 401;
       res.end();
     });
-    expect(await shutdownServer(port, "wrong")).toBe(false);
+    expect(await shutdownServer(port, "wrong")).toEqual({ ok: false });
   });
 
   test("getStats reads /_hoard/stats with the bearer token", async () => {

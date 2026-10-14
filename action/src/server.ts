@@ -175,34 +175,61 @@ export interface Stats {
   time_saved_ms: number;
 }
 
+/** `x` as {@link Stats} when it has the four counters as numbers, else undefined. */
+export function parseStats(x: unknown): Stats | undefined {
+  if (typeof x !== "object" || x === null) return undefined;
+  const o = x as Record<string, unknown>;
+  const keys = ["hits", "misses", "put_errors", "time_saved_ms"] as const;
+  if (!keys.every((k) => typeof o[k] === "number")) return undefined;
+  return {
+    hits: o.hits as number,
+    misses: o.misses as number,
+    put_errors: o.put_errors as number,
+    time_saved_ms: o.time_saved_ms as number,
+  };
+}
+
 export async function getStats(port: number, token: string): Promise<Stats | undefined> {
   try {
     const r = await fetch(`http://127.0.0.1:${port}/_hoard/stats`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(5_000),
     });
-    return r.ok ? ((await r.json()) as Stats) : undefined;
+    return r.ok ? parseStats(await r.json()) : undefined;
   } catch {
     return undefined;
   }
 }
 
+/** Outcome of {@link shutdownServer}: `stats` are the final counters from the reply body. */
+export type ShutdownResult = { ok: false } | { ok: true; stats?: Stats };
+
 /**
- * `POST /_hoard/shutdown`: hoard flushes, prunes (R2) and writes the summary before it answers.
- * False if hoard is unreachable or refuses.
+ * `POST /_hoard/shutdown`: hoard drains its upload queue, prunes (R2) and writes the summary
+ * before it answers (within 270 s) with the final stats as JSON. `ok: false` if hoard is
+ * unreachable or refuses; `stats` is missing when the body is not stats JSON.
  */
-export async function shutdownServer(port: number, token: string): Promise<boolean> {
+export async function shutdownServer(port: number, token: string): Promise<ShutdownResult> {
   try {
     const r = await fetch(`http://127.0.0.1:${port}/_hoard/shutdown`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
-      // The R2 size-cap prune runs before the answer; give it time.
+      // The drain and the R2 size-cap prune run before the answer; give them time.
       signal: AbortSignal.timeout(300_000),
     });
-    await r.body?.cancel();
-    return r.ok;
+    if (!r.ok) {
+      await r.body?.cancel();
+      return { ok: false };
+    }
+    let stats: Stats | undefined;
+    try {
+      stats = parseStats(JSON.parse(await r.text()));
+    } catch {
+      stats = undefined;
+    }
+    return { ok: true, stats };
   } catch {
-    return false;
+    return { ok: false };
   }
 }
 

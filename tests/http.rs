@@ -399,10 +399,19 @@ async fn shutdown_waits_for_reply() {
         !resp.is_finished(),
         "responded before the shutdown work finished"
     );
-    reply.send(()).unwrap();
+    let final_stats = hoard::stats::StatsSnapshot {
+        hits: 5,
+        put_errors: 2,
+        ..Default::default()
+    };
+    reply.send(final_stats).unwrap();
     let r = resp.await.unwrap().unwrap();
     assert_eq!(r.status(), 200);
-    assert_eq!(r.text().await.unwrap(), "ok");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(
+        (body["hits"].as_u64(), body["put_errors"].as_u64()),
+        (Some(5), Some(2))
+    );
 }
 
 #[tokio::test]
@@ -417,6 +426,8 @@ async fn shutdown_answers_when_nobody_listens() {
     .unwrap()
     .unwrap();
     assert_eq!(r.status(), 200);
+    // Shutdown already under way: the current stats.
+    assert_eq!(r.json::<Value>().await.unwrap()["hits"].as_u64(), Some(0));
 }
 
 #[tokio::test]
