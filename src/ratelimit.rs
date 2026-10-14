@@ -12,6 +12,11 @@ use tracing::warn;
 /// Pause used when the backend gives no `Retry-After`.
 pub const DEFAULT_PAUSE: Duration = Duration::from_secs(60);
 
+/// Longest pause honoured. A larger `Retry-After` (a bogus or hostile value) would otherwise
+/// overflow `Instant` arithmetic or silently disable uploads for the rest of the job; GitHub's
+/// limits are per minute, so 10 minutes is plenty.
+pub const MAX_PAUSE: Duration = Duration::from_secs(10 * 60);
+
 /// Shared by all request handlers. Open until a rate limit closes it.
 #[derive(Debug, Default)]
 pub struct RateGate {
@@ -29,11 +34,16 @@ impl RateGate {
     }
 
     /// The backend rate-limited an upload at `now`: pause uploads for `retry_after` (default
-    /// [`DEFAULT_PAUSE`]). A pause is only ever extended, never shortened. Logs one warning
+    /// [`DEFAULT_PAUSE`], at most [`MAX_PAUSE`]). A pause is only ever extended, never
+    /// shortened. Logs one warning
     /// when this closes an open gate.
     pub fn on_rate_limited(&self, now: Instant, retry_after: Option<Duration>) {
-        let pause = retry_after.unwrap_or(DEFAULT_PAUSE);
-        let until = now + pause;
+        let pause = retry_after.unwrap_or(DEFAULT_PAUSE).min(MAX_PAUSE);
+        // Cannot overflow for any real clock; if it ever did, pause by the default instead.
+        let until = now
+            .checked_add(pause)
+            .or_else(|| now.checked_add(DEFAULT_PAUSE))
+            .unwrap_or(now);
         let mut slot = self.lock();
         let was_open = slot.is_none_or(|u| now >= u);
         if slot.is_none_or(|u| until > u) {
@@ -86,6 +96,15 @@ mod tests {
         g.on_rate_limited(t0, Some(Duration::from_secs(1)));
         assert!(!g.allow_upload(t0 + Duration::from_secs(29)));
         assert!(g.allow_upload(t0 + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn huge_retry_after_is_clamped_without_panic() {
+        let g = RateGate::default();
+        let t0 = Instant::now();
+        g.on_rate_limited(t0, Some(Duration::from_secs(u64::MAX)));
+        assert!(!g.allow_upload(t0 + MAX_PAUSE - Duration::from_secs(1)));
+        assert!(g.allow_upload(t0 + MAX_PAUSE));
     }
 
     #[test]

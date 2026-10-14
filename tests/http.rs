@@ -792,3 +792,26 @@ async fn rate_limited_put_checks_auth_hash_and_mode_first() {
     assert_eq!(r.status(), 401);
     assert_eq!(t.stats.snapshot().rate_limited, 1);
 }
+
+/// The GitHub cache writer is lazy: a 429 arrives on the first `write`, not when the writer
+/// is opened. Same outcome: 200, counted, gate closed, nothing stored.
+#[tokio::test]
+async fn rate_limited_first_write_closes_the_gate() {
+    let mut layer = FailingWrites::new(opendal::ErrorKind::RateLimited);
+    layer.fail_first_write = true;
+    let calls = layer.calls.clone();
+    let (store, dir) = layered_fs_store(layer);
+    let t = spawn_test_server_with(store, Mode::ReadWrite, dir).await;
+
+    let r = put(&t, "aa", b"one", &[]).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({"urls": []}));
+    let s = t.stats.snapshot();
+    assert_eq!((s.rate_limited, s.put_errors, s.puts), (1, 0, 0));
+    assert!(!exists(&t, "aa").await);
+
+    let before = calls.total();
+    assert_eq!(put(&t, "bb", b"two", &[]).await.status(), 200);
+    assert_eq!(calls.total(), before, "the gate is closed");
+    assert_eq!(t.stats.snapshot().rate_limited, 2);
+}

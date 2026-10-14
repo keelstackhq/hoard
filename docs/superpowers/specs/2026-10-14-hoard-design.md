@@ -166,16 +166,20 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   `write_with_if_not_exists` is true; otherwise `stat` first and skip if present. An existing key is
   success (`PutOutcome::AlreadyExists`), also when a backend without conditional writes rejects a
   second create with "already exists" (`ghac` answers `409` when another job created the key
-  between the `stat` and the write). A rate-limit error (`ErrorKind::RateLimited`, HTTP `429`) is
-  `StoreError::RateLimited { retry_after }`, with `Retry-After` in seconds when the response had one.
+  between the `stat` and the write, or — v2 — `CreateCacheEntry` `ok: false`, which
+  `@actions/cache` reads as "another job may be creating this cache", e.g. matrix jobs building
+  the same hash). A rate-limit error (`ErrorKind::RateLimited`, HTTP `429`) is
+  `StoreError::RateLimited { retry_after }`, with `Retry-After` in seconds when the response had one,
+  clamped to 10 minutes (a larger value would otherwise stop uploads for the rest of the job).
 - `get` is one streaming read of the whole object: the header is parsed from its first bytes
   and the body is the rest of the same read, so a hit costs one storage request (this matters
   under GitHub's download rate limit). `head` (HEAD and the batch query) is one bounded range
   read of the first 4104 bytes and never reads the body.
 - `list` and `delete` are only needed for R2 cleanup; `ghac` does not support them (GitHub evicts).
 - Memory per request is bounded: S3 uploads buffer at most one 8 MiB multipart part (an artifact
-  smaller than that is one part); `ghac` uploads go up in 8 MiB blocks (OpenDAL keeps up to 4 in
-  flight); fs and GET paths stream; nothing is buffered beyond that bound.
+  smaller than that is one part); `ghac` uploads go up in 8 MiB blocks with up to 4 in flight, so
+  one `ghac` PUT holds at most about 40 MiB (the 8 MiB chunk being filled plus 4 × 8 MiB blocks
+  uploading); fs and GET paths stream; nothing is buffered beyond that bound.
 - S3/R2 and `ghac` requests are time-bounded (60 s per operation, 15 s per read/write IO step); a timeout is a
   storage error like any other (GET/HEAD miss, PUT counts `put_errors`), so a hung connection never
   stalls the build.
@@ -183,7 +187,9 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
 ### 6.4 GitHub cache backend specifics
 
 - Needs `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_RESULTS_URL` (only present in JS-action processes;
-  the action passes them to the child; an empty value counts as unset). If missing,
+  the action passes them to the child; an empty value counts as unset). The action must pass the
+  binary its full environment (§10): besides those two, OpenDAL reads `ACTIONS_CACHE_SERVICE_V2`,
+  `GITHUB_SERVER_URL` and `ACTIONS_CACHE_URL` from the process environment itself. If missing,
   `serve --storage github` **fails at startup**, before it listens, with
   `ACTIONS_RESULTS_URL is not set: run hoard through the GitHub Action, or use --storage r2|fs`
   (`ACTIONS_RESULTS_URL` is checked first, then `ACTIONS_RUNTIME_TOKEN`) — never a silent
@@ -192,7 +198,7 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   `ACTIONS_CACHE_URL`, else `ACTIONS_RESULTS_URL`).
 - Cache entries are versioned `hoard-{cache_version}`, so different cache versions never collide.
 - Rate limits: 200 uploads/min, 1,500 downloads/min per repo. On `429`, pause all uploads for
-  `Retry-After` seconds (default 60; a pause is only ever extended), count `rate_limited`, keep
+  `Retry-After` seconds (default 60, at most 600; a pause is only ever extended), count `rate_limited`, keep
   serving reads. One warning is logged when the pause starts, not one per skipped upload.
 - Respect `ACTIONS_CACHE_MODE`: the action maps it to `--mode` (`read` → `read`, `none` → `off`,
   `write-only` → `read-write` with reads disabled via `--no-reads`); the binary only reads `--mode`

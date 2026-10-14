@@ -49,7 +49,8 @@ pub enum StoreError {
     RateLimited { retry_after: Option<Duration> },
 }
 
-/// `Retry-After` (delta-seconds) of the HTTP response an OpenDAL error came from. OpenDAL
+/// `Retry-After` (delta-seconds, clamped to [`crate::ratelimit::MAX_PAUSE`]) of the HTTP
+/// response an OpenDAL error came from. OpenDAL
 /// keeps the response only as `response: Parts { .. headers: {"retry-after": "30", ..} }` in
 /// the error's display text; an HTTP-date or a missing header yields `None`.
 pub fn retry_after(e: &opendal::Error) -> Option<Duration> {
@@ -58,7 +59,8 @@ pub fn retry_after(e: &opendal::Error) -> Option<Duration> {
     let start = text.find(NEEDLE)? + NEEDLE.len();
     let rest = &text[start..];
     let value = &rest[..rest.find('"')?];
-    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+    let secs = value.trim().parse::<u64>().ok()?;
+    Some(Duration::from_secs(secs).min(crate::ratelimit::MAX_PAUSE))
 }
 
 /// `RateLimited` for an OpenDAL rate-limit error; anything else unchanged.
@@ -81,6 +83,11 @@ pub fn ghac_operator(cache_version: &str) -> anyhow::Result<Operator> {
 /// `ACTIONS_RESULTS_URL` and `ACTIONS_RUNTIME_TOKEN` must be set (only JavaScript actions get
 /// them; the action passes them on). Entries are versioned `hoard-{cache_version}`, so
 /// different cache versions never collide.
+///
+/// `lookup` covers only what hoard checks and passes in. OpenDAL's ghac builder still reads
+/// the process environment itself: `ACTIONS_CACHE_SERVICE_V2` and `GITHUB_SERVER_URL` pick
+/// the cache service version, and on v1 `ACTIONS_CACHE_URL` (when set) the endpoint. The
+/// action therefore passes the binary its full environment.
 pub fn ghac_operator_from(
     cache_version: &str,
     lookup: impl Fn(&str) -> Option<String>,
@@ -194,11 +201,19 @@ pub struct Store {
     abort_failed: bool,
 }
 
+/// Message of OpenDAL's ghac (v2) error when `CreateCacheEntry` answers `ok: false`.
+/// `@actions/cache` reads that as "another job may be creating this cache" (matrix jobs
+/// building the same hash), i.e. the key is taken.
+const GHAC_CREATE_NOT_OK: &str = "create cache entry returns non-ok";
+
+/// True when a write failed because the key exists (or is being created): the if-not-exists
+/// condition, a backend's "already exists", or ghac's `CreateCacheEntry` `ok: false`.
 fn is_condition_failed(e: &opendal::Error) -> bool {
-    matches!(
-        e.kind(),
-        ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists
-    )
+    match e.kind() {
+        ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists => true,
+        ErrorKind::Unexpected => e.message() == GHAC_CREATE_NOT_OK,
+        _ => false,
+    }
 }
 
 impl Store {
@@ -504,5 +519,29 @@ mod tests {
             retry_after(&err("Parts { status: 429, headers: {} }")),
             None
         );
+        let huge = r#"Parts { status: 429, headers: {"retry-after": "18446744073709551615"} }"#;
+        assert_eq!(retry_after(&err(huge)), Some(crate::ratelimit::MAX_PAUSE));
+        let hour = r#"Parts { status: 429, headers: {"retry-after": "3600"} }"#;
+        assert_eq!(
+            retry_after(&err(hour)),
+            Some(std::time::Duration::from_secs(600))
+        );
+    }
+
+    #[test]
+    fn existing_key_classifier() {
+        let e = |k, m: &str| opendal::Error::new(k, m.to_string());
+        assert!(is_condition_failed(&e(ErrorKind::AlreadyExists, "x")));
+        assert!(is_condition_failed(&e(ErrorKind::ConditionNotMatch, "x")));
+        // ghac v2 CreateCacheEntry ok=false: another job is creating the same key.
+        let not_ok = e(ErrorKind::Unexpected, "create cache entry returns non-ok")
+            .with_context("parts", "Parts { status: 200 }");
+        assert!(is_condition_failed(&not_ok));
+        assert!(!is_condition_failed(&e(ErrorKind::Unexpected, "boom")));
+        assert!(!is_condition_failed(&e(
+            ErrorKind::PermissionDenied,
+            "create cache entry returns non-ok"
+        )));
+        assert!(!is_condition_failed(&e(ErrorKind::RateLimited, "x")));
     }
 }

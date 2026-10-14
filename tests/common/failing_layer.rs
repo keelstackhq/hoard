@@ -33,6 +33,9 @@ pub struct FailingWrites {
     pub response: Option<String>,
     /// Report `write_with_if_not_exists = false`, like the GitHub cache service.
     pub unconditional: bool,
+    /// Open the writer normally and fail its first `write` call instead (the GitHub cache
+    /// writer is lazy: its create request, and so a 429, happens on the first write).
+    pub fail_first_write: bool,
     pub calls: Arc<Calls>,
 }
 
@@ -42,8 +45,42 @@ impl FailingWrites {
             kind,
             response: None,
             unconditional: false,
+            fail_first_write: false,
             calls: Arc::default(),
         }
+    }
+}
+
+impl FailingWrites {
+    fn error(&self) -> Error {
+        let mut e = Error::new(self.kind, "injected by FailingWrites");
+        if let Some(r) = &self.response {
+            e = e.with_context("response", r);
+        }
+        e
+    }
+}
+
+/// A writer whose first `write` fails with `pending`; later calls go to `inner`.
+struct FailFirstWrite {
+    inner: oio::Writer,
+    pending: Option<Error>,
+}
+
+impl oio::Write for FailFirstWrite {
+    async fn write(&mut self, bs: opendal::Buffer) -> Result<()> {
+        match self.pending.take() {
+            Some(e) => Err(e),
+            None => self.inner.write(bs).await,
+        }
+    }
+
+    async fn close(&mut self) -> Result<opendal::Metadata> {
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.inner.abort().await
     }
 }
 
@@ -101,13 +138,16 @@ impl Service for FailingService {
         self.inner.read(ctx, path, args)
     }
 
-    fn write(&self, _ctx: &OperationContext, _path: &str, _args: OpWrite) -> Result<Self::Writer> {
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         self.cfg.calls.write.fetch_add(1, Ordering::SeqCst);
-        let mut e = Error::new(self.cfg.kind, "injected by FailingWrites");
-        if let Some(r) = &self.cfg.response {
-            e = e.with_context("response", r);
+        if self.cfg.fail_first_write {
+            let inner = self.inner.write(ctx, path, args)?;
+            return Ok(Box::new(FailFirstWrite {
+                inner,
+                pending: Some(self.cfg.error()),
+            }));
         }
-        Err(e)
+        Err(self.cfg.error())
     }
 
     fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
