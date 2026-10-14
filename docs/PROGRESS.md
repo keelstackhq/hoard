@@ -23,6 +23,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · **Milestone 2 reviewed** · whole-branch review cd87105..49fff6b (0 Critical, 5 Important, 11 Minor) → fix wave b6a48b4..890ff79 + follow-ups c218546, 2ab55c1 (90 s download cap, explicit exit), re-reviews clean · cargo 175 pass; action 115 pass incl. real-binary integration; dist 151 KB fresh; actionlint clean; e2e fs PASS
 - 2026-10-14 · 03-vite-plus-throughput/Task 1 vp restore/save · f468989, 7d04344, 2072973, e20d525 · cargo all green (96 unit, 37 vp on fs/MinIO/GitHub mock); action 141/141 incl. real binary; dist 157.8 KB; e2e fs + r2 PASS; real Vite+ 1.2.0 round-trip checked by hand · GitHub cache service only mock-tested (self-test leg pending)
 - 2026-10-14 · 03-vite-plus-throughput/Task 2 write-behind uploads · b064ff2, 3885bd5 · cargo all green (18 write-behind, 100 lib); 150 MB stream on+off; e2e fs, fs+write-behind, r2 PASS; action 145/145; dist 158 KB
+- 2026-10-14 · 03-vite-plus-throughput/Task 3 steps 2–5 (refresh-on-hit) · 2cc23f7 · cargo all green (45 r2 incl. 5 refresh on MinIO); action 148/148; e2e r2 with refresh PASS · Step 1's real-R2 check BLOCKED
 
 ## Blocked
 
@@ -59,6 +60,11 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   Actions); then run it from the Actions tab (*self-test* → *Run workflow* on `claude/admiring-ride-kl6qd9`) or open a
   PR. Expect every `hit` job to log `FULL TURBO` and `hits > 0`, and the job summary to show the hoard table. Paste the
   log of any red job — Windows/macOS legs are the likeliest first failures.
+- **03-vite-plus-throughput/Task 3 Step 1 — does R2 reset an object's age on self-copy?** Refresh-on-hit uses
+  CopyObject onto itself (MinIO: yes). Action: with a test R2 bucket and token, run
+  `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=…
+  HOARD_TEST_R2_BUCKET=… cargo test --test r2 -- --ignored refresh_real_r2`. If it fails, tell me: refresh then
+  switches to a re-PUT of the same envelope and spec §7.3 records it. Until then refresh-on-hit stays off by default.
 
 ## Status
 

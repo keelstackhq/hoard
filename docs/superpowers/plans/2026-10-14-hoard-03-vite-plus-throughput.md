@@ -74,8 +74,8 @@
 - Produces: `async fn refresh_object(client: &aws_sdk_s3::Client, bucket: &str, key: &str) -> Result<()>` (CopyObject onto itself with `MetadataDirective::Replace`); a per-run `DashSet<String>` of refreshed keys
 
 - [ ] **Step 1: Write failing test (MinIO first, then once by hand against a real R2 bucket)** — put object, read `last_modified`, wait 2 s, `refresh_object`, `last_modified` is newer and body unchanged. If R2 does not reset the age with a self-copy, switch to re-PUT of the same envelope and record the finding in the spec §7.3.
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement** (spawned in the background after the GET response starts; never delays the response).  **Step 4: Run — PASS.**
-- [ ] **Step 5: Commit** — `feat: refresh popular R2 artifacts on hit`
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement** (spawned in the background after the GET response starts; never delays the response).  **Step 4: Run — PASS.**
+- [x] **Step 5: Commit** — `feat: refresh popular R2 artifacts on hit`
 
 ---
 
