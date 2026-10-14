@@ -41,7 +41,8 @@ export interface ActionCore {
   summary: { addRaw(text: string): { write(): Promise<unknown> } };
 }
 
-const INPUTS = [
+/** Every input in action.yml (a test checks the two match). */
+export const INPUTS = [
   "storage",
   "mode",
   "cache-version",
@@ -54,6 +55,7 @@ const INPUTS = [
   "r2-lifecycle",
   "max-age-days",
   "max-size",
+  "refresh-on-hit",
   "vp-max-size",
   "version",
 ] as const;

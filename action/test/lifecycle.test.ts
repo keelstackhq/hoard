@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { BinaryDownloadError } from "../src/binary.js";
 import {
   type ActionCore,
+  INPUTS,
   type MainDeps,
   type PostDeps,
   runMain,
@@ -130,6 +132,38 @@ describe("main", () => {
       warnings: expect.stringContaining("R2 secrets are not available"),
     });
     expect(f.of("warning")).toEqual([[expect.stringMatching(/^R2 secrets are not available/)]]);
+  });
+
+  test("refresh-on-hit: true reaches the server as HOARD_REFRESH_ON_HIT=true", async () => {
+    const f = fakeCore({
+      storage: "r2",
+      "r2-endpoint": "http://127.0.0.1:9000",
+      "r2-access-key-id": "ak",
+      "r2-secret-access-key": "sk",
+      "r2-bucket": "b",
+      "refresh-on-hit": "true",
+    });
+    const d = deps(f);
+    await runMain(d);
+    expect(f.of("setFailed")).toEqual([]);
+    const [, args, , env] = vi.mocked(d.startServer).mock.calls[0] ?? [];
+    expect(args?.[args.indexOf("--storage") + 1]).toBe("r2");
+    expect(env).toMatchObject({ HOARD_REFRESH_ON_HIT: "true" });
+  });
+
+  test("action.yml declares exactly the inputs main reads", () => {
+    const yml = readFileSync(new URL("../../action.yml", import.meta.url), "utf8");
+    const names: string[] = [];
+    let inInputs = false;
+    for (const line of yml.split(/\r?\n/)) {
+      if (/^\S/.test(line)) inInputs = line.startsWith("inputs:");
+      else if (inInputs) {
+        const m = /^ {2}([a-z0-9-]+):\s*$/.exec(line);
+        if (m?.[1]) names.push(m[1]);
+      }
+    }
+    expect(names.length).toBeGreaterThan(0);
+    expect([...names].sort()).toEqual([...INPUTS].sort());
   });
 
   test("an unsupported platform fails before any download", async () => {
