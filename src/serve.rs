@@ -4,21 +4,27 @@ use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use crate::config::{
-    Config, LifecycleMode, Storage, TokenPaths, default_port_file, default_token_file,
+    Config, LifecycleMode, Mode, Storage, TokenPaths, default_port_file, default_token_file,
 };
 use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, r2_client, rule_id};
+use crate::r2::prune::prune;
 use crate::server::{AppState, router};
-use crate::stats::{Stats, render_summary};
-use crate::store::{Store, build_operator};
+use crate::stats::{Stats, human_bytes, render_summary};
+use crate::store::{Store, StoreError, build_operator};
 
 /// Key prefix used by the fs backend.
 const FS_PREFIX: &str = "cache/";
+
+/// Upper bound for the shutdown prune: a slow bucket must not hold the CI job hostage. The
+/// marker is only written on completion, so an interrupted prune runs again next time.
+const PRUNE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// The three `export` lines that point Turborepo at a server.
 pub fn env_lines(port: u16, token: &str) -> String {
@@ -164,6 +170,7 @@ fn env_hint(cfg: &Config) -> String {
 pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let (prefix, storage_line) = storage_layout(&cfg)?;
     let store = Arc::new(Store::new(build_operator(&cfg)?));
+    let store_for_shutdown = store.clone();
     let startup_lines: Vec<String> = lifecycle_startup(&cfg).await?.into_iter().collect();
 
     let token = cfg.token.clone().unwrap_or_else(random_token);
@@ -184,7 +191,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         stats: stats.clone(),
         token: token.clone(),
         mode: cfg.mode,
-        prefix,
+        prefix: prefix.clone(),
         cache_version: cfg.cache_version.clone(),
         shutdown: shutdown_tx,
     };
@@ -217,7 +224,11 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     };
     info!("shutting down");
 
-    shutdown_work(&cfg, &stats, &storage_line, startup_lines).await;
+    let cache = ShutdownCache {
+        store: &store_for_shutdown,
+        prefix: &prefix,
+    };
+    shutdown_work(&cfg, cache, &stats, &storage_line, startup_lines).await;
     remove_if_present(&cfg.port_file);
     remove_if_present(&cfg.token_file);
 
@@ -260,17 +271,82 @@ async fn lifecycle_startup(cfg: &Config) -> anyhow::Result<Option<String>> {
     }
 }
 
+/// The store the server used and its key prefix, for the shutdown hooks.
+#[derive(Clone, Copy)]
+struct ShutdownCache<'a> {
+    store: &'a Store,
+    prefix: &'a str,
+}
+
+/// Shutdown hook for `storage=r2`, `mode=read-write` (spec §7.2): enforce `max-size`, bounded
+/// by [`PRUNE_TIMEOUT`]. Returns the summary lines: `Pruned: ...` when something was deleted,
+/// `Prune: failed (...)` on an error or timeout (also logged), nothing otherwise.
+async fn prune_on_shutdown(cfg: &Config, cache: ShutdownCache<'_>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if cfg.storage != Storage::R2 || cfg.mode != Mode::ReadWrite {
+        return lines;
+    }
+    let run = prune(
+        cache.store,
+        cache.prefix,
+        cfg.max_size,
+        chrono::Utc::now(),
+        false,
+    );
+    match tokio::time::timeout(PRUNE_TIMEOUT, run).await {
+        Err(_) => {
+            warn!("prune did not finish within 5 minutes; it runs again on the next shutdown");
+            lines.push("Prune: failed (timed out)".to_string());
+        }
+        Ok(Err(e)) => {
+            warn!(error = %e, "prune failed; the lifecycle rule still bounds the bucket");
+            lines.push(format!("Prune: failed ({})", short_reason(&e)));
+        }
+        Ok(Ok(r)) => {
+            if r.deleted > 0 {
+                lines.push(format!(
+                    "Pruned: {} objects, {}",
+                    r.deleted,
+                    human_bytes(r.freed_bytes)
+                ));
+            }
+            if r.delete_errors > 0 {
+                warn!(
+                    failed = r.delete_errors,
+                    last_error = r.last_error.as_deref().unwrap_or(""),
+                    "prune could not delete some objects; it runs again on the next shutdown"
+                );
+                lines.push(format!(
+                    "Prune: failed ({} deletes failed)",
+                    r.delete_errors
+                ));
+            }
+        }
+    }
+    lines
+}
+
+/// A short, secret-free reason for the summary; the full error goes to the log.
+fn short_reason(e: &StoreError) -> String {
+    match e {
+        StoreError::Storage(e) => e.kind().to_string(),
+        StoreError::Body(e) => e.kind().to_string(),
+    }
+}
+
 /// Work done once on shutdown: hooks contribute extra summary lines (after the startup
 /// lines), then the summary is written. Contract: this never fails. Hooks and the summary
 /// report problems as warnings or summary lines, so shutdown always exits 0 (the cache must
 /// never fail the build).
 async fn shutdown_work(
     cfg: &Config,
+    cache: ShutdownCache<'_>,
     stats: &Stats,
     storage_line: &str,
     startup_lines: Vec<String>,
 ) {
-    let extra_lines = startup_lines;
+    let mut extra_lines = startup_lines;
+    extra_lines.extend(prune_on_shutdown(cfg, cache).await);
     if let Some(path) = &cfg.summary_file {
         let md = render_summary(&stats.snapshot(), storage_line, &extra_lines);
         if let Err(e) = write_atomic(path, &md, false) {

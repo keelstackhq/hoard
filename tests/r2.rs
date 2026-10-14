@@ -679,3 +679,159 @@ fn doctor_reports_bad_credentials() {
         assert!(!stdout.contains("wrong-secret-123") && !stderr.contains("wrong-secret-123"));
     })
 }
+
+// ---- §7.2 size cap ----------------------------------------------------------------------
+
+use chrono::{DateTime, TimeZone, Utc};
+use hoard::r2::prune::{marker_key, prune};
+
+fn t0() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 14, 12, 0, 0).unwrap()
+}
+
+/// `n` raw objects of `size` bytes, written in key order (S3 times may tie at one second;
+/// the key tie-break then matches the write order).
+async fn fill(s: &Store, prefix: &str, n: usize, size: usize) {
+    for i in 0..n {
+        s.op.write(&format!("{prefix}obj{i:03}"), vec![b'x'; size])
+            .await
+            .unwrap();
+    }
+}
+
+async fn keys(s: &Store, prefix: &str) -> Vec<String> {
+    let mut k: Vec<String> = s
+        .list(prefix)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    k.sort();
+    k
+}
+
+#[test]
+fn s3_prune_throttled_within_24h() {
+    rt().block_on(async {
+        let Some(s) = s3_store().await else { return };
+        let s = &s.store;
+        fill(s, "cache/", 5, 100).await;
+        let r1 = prune(s, "cache/", 250, t0(), false).await.unwrap();
+        assert_eq!((r1.deleted, r1.remaining_bytes), (3, 200));
+        assert_eq!(
+            keys(s, "cache/obj").await,
+            vec!["cache/obj003", "cache/obj004"]
+        );
+        let hours = chrono::Duration::hours;
+        let r2 = prune(s, "cache/", 0, t0() + hours(23), false)
+            .await
+            .unwrap();
+        assert!(r2.skipped_throttled);
+        let r3 = prune(s, "cache/", 0, t0() + hours(23), true).await.unwrap();
+        assert_eq!(r3.remaining_bytes, 0);
+        assert!(s.op.exists(&marker_key("cache/")).await.unwrap());
+    })
+}
+
+#[test]
+fn s3_prune_keeps_hoard_objects() {
+    rt().block_on(async {
+        let Some(s) = s3_store().await else { return };
+        let s = &s.store;
+        fill(s, "cache/", 2, 100).await;
+        s.op.write("cache/_hoard/doctor", vec![b'd'; 1000])
+            .await
+            .unwrap();
+        let r = prune(s, "cache/", 0, t0(), false).await.unwrap();
+        assert_eq!((r.listed, r.deleted, r.remaining_bytes), (2, 2, 0));
+        assert!(s.op.exists("cache/_hoard/doctor").await.unwrap());
+    })
+}
+
+/// A store on `b` (for seeding and inspecting what `serve` sees).
+fn bucket_store(b: &MinioBucket) -> Store {
+    let dir = tempfile::tempdir().unwrap();
+    Store::new(build_operator(&r2_config(dir.path(), b)).unwrap())
+}
+
+/// `serve` with a tiny cap deletes the oldest objects on shutdown and reports it.
+#[test]
+fn serve_prunes_on_shutdown() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let s = bucket_store(&b);
+        fill(&s, "cache/", 5, 100).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
+            .args(["--max-size", "250"])
+            .spawn()
+            .unwrap();
+        shutdown(dir.path()).await;
+        let status = wait_exit(&mut child);
+        let (_, stderr) = output(child);
+        assert!(status.success(), "{stderr}");
+        let summary = std::fs::read_to_string(dir.path().join("summary.md")).unwrap();
+        assert!(summary.contains("Pruned: 3 objects, 300 B"), "{summary}");
+        assert_eq!(
+            keys(&s, "cache/obj").await,
+            vec!["cache/obj003", "cache/obj004"]
+        );
+        assert!(s.op.exists(&marker_key("cache/")).await.unwrap());
+    })
+}
+
+/// `mode=read` never prunes.
+#[test]
+fn serve_read_mode_does_not_prune() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let s = bucket_store(&b);
+        fill(&s, "cache/", 2, 100).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
+            .args(["--max-size", "0", "--mode", "read"])
+            .spawn()
+            .unwrap();
+        shutdown(dir.path()).await;
+        let status = wait_exit(&mut child);
+        let (_, stderr) = output(child);
+        assert!(status.success(), "{stderr}");
+        let summary = std::fs::read_to_string(dir.path().join("summary.md")).unwrap();
+        assert!(!summary.contains("Prune"), "{summary}");
+        assert_eq!(keys(&s, "cache/obj").await.len(), 2);
+        assert!(!s.op.exists(&marker_key("cache/")).await.unwrap());
+    })
+}
+
+/// A failing prune (here: the bucket is gone) is a summary line, never a failed shutdown.
+#[test]
+fn serve_prune_failure_is_reported_not_fatal() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
+            .args(["--max-size", "0"])
+            .spawn()
+            .unwrap();
+        common::wait_for_file(&dir.path().join("port")).await;
+        common::s3_client(&b.endpoint, &b.key_id, &b.secret)
+            .delete_bucket()
+            .bucket(&b.bucket)
+            .send()
+            .await
+            .unwrap();
+        shutdown(dir.path()).await;
+        let status = wait_exit(&mut child);
+        let (_, stderr) = output(child);
+        assert!(status.success(), "{stderr}");
+        let summary = std::fs::read_to_string(dir.path().join("summary.md")).unwrap();
+        assert!(summary.contains("Prune: failed ("), "{summary}");
+    })
+}

@@ -1,9 +1,9 @@
 use std::io::IsTerminal;
 
-use anyhow::bail;
 use clap::{Args, Parser, Subcommand};
 use hoard::config::{Config, ServeArgs, TokenPaths, drop_empty_hoard_env};
 use hoard::doctor::run_doctor;
+use hoard::r2::prune::run_prune;
 use hoard::serve::{env_for, run_serve};
 use tracing_subscriber::EnvFilter;
 
@@ -72,9 +72,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 .block_on(run_serve(cfg))
         }
         Command::Prune(p) => {
-            Config::try_from(p.serve)?;
-            let _ = p.force;
-            bail!("`hoard prune` is not implemented yet")
+            let cfg = Config::try_from(p.serve)?;
+            init_logging();
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(run_prune(&cfg, p.force))
         }
         Command::Doctor(args) => {
             let cfg = Config::try_from(args)?;

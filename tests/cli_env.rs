@@ -65,15 +65,72 @@ fn env_prints_export_lines_for_running_server() {
     );
 }
 
+fn prune_cmd(root: &std::path::Path, max_size: &str) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_hoard"));
+    c.args([
+        "prune",
+        "--storage",
+        "fs",
+        "--max-size",
+        max_size,
+        "--fs-root",
+    ])
+    .arg(root)
+    .env("RUST_LOG", "warn");
+    c
+}
+
 #[test]
-fn unimplemented_commands_fail_cleanly() {
+fn prune_fs_prints_report_and_throttles() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    std::fs::create_dir_all(root.join("cache")).unwrap();
+    for i in 0..5 {
+        std::fs::write(root.join(format!("cache/obj{i:03}")), [b'x'; 100]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    let out = prune_cmd(&root, "250").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout,
+        "pruned 3 of 5 objects, freed 300 B, 200 B remain (max 250 B)\n"
+    );
+    assert!(!root.join("cache/obj000").exists());
+    assert!(root.join("cache/obj004").exists());
+
+    let out = prune_cmd(&root, "250").output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "skipped: last prune < 24 h ago (use --force)\n"
+    );
+
+    let out = prune_cmd(&root, "0").arg("--force").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "pruned 2 of 2 objects, freed 200 B, 0 B remain (max 0 B)\n"
+    );
+}
+
+#[test]
+fn prune_github_not_supported_yet() {
     let out = Command::new(env!("CARGO_BIN_EXE_hoard"))
-        .args(["prune", "--storage", "fs"])
+        .args(["prune", "--storage", "github"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("not implemented yet"), "{stderr}");
+    assert!(stderr.contains("--storage fs|r2"), "{stderr}");
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
 

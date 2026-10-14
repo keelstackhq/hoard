@@ -74,7 +74,7 @@ One Rust crate (`hoard`, lib + bin) and one small TypeScript action in `action/`
 |---|---|
 | `hoard serve` | Run the cache server until shutdown. |
 | `hoard env` | Print `export` lines for a running server (reads the port file and token file). |
-| `hoard prune` | Enforce `max-size` on R2 now (ignores the 24 h throttle with `--force`). |
+| `hoard prune` | Enforce `max-size` on R2 (or fs) now (ignores the 24 h throttle with `--force`); prints `pruned N of M objects, freed X, Y remain (max Z)` or `skipped: last prune < 24 h ago (use --force)`. |
 | `hoard doctor` | Check storage credentials, bucket access and the R2 lifecycle rule; print fixes. The access check writes, reads and deletes `{prefix}_hoard/doctor`, also with `mode=read`. |
 | `hoard vp restore` / `vp save` | Restore or save the Vite+ task-cache directory (milestone 3). |
 
@@ -206,11 +206,17 @@ Implemented with `aws-sdk-s3` (rustls) against the R2 endpoint; OpenDAL has no l
 
 ### 7.2 Layer 2 — size cap
 
-On shutdown (and `hoard prune`): if the marker `{prefix}_hoard/last-prune` is younger than
-24 h (and not `--force`), skip. Otherwise list `{prefix}`, sum sizes, delete objects in ascending
-`last_modified` order until total ≤ `max-size`, then write the marker with the current RFC 3339
-time. Deletes are free on R2; listing costs one Class A op per 1,000 objects. Report
-`PruneReport { listed, deleted, freed_bytes, remaining_bytes }` in the summary.
+On shutdown (`storage=r2`, `mode=read-write` only) and `hoard prune`: if the marker
+`{prefix}_hoard/last-prune` is younger than 24 h (and not `--force`), skip; a missing,
+unparseable or future marker does not throttle. Otherwise list `{prefix}`, sum sizes, delete
+objects in ascending `last_modified` order (ties by key) until total ≤ `max-size`, then
+overwrite the marker with the current RFC 3339 time (also when nothing was deleted).
+Everything under `{prefix}_hoard/` (the marker, `doctor`'s object) is neither counted nor
+deleted. A failed delete is counted and the rest go on; the marker is then not written, so the
+next run retries. Deletes are free on R2; listing costs one Class A op per 1,000 objects.
+`PruneReport { listed, deleted, freed_bytes, remaining_bytes }`. On shutdown the prune is
+bounded by 5 minutes and never fails the run: the summary gets `Pruned: N objects, X` when
+something was deleted, `Prune: failed (reason)` on an error or timeout, nothing otherwise.
 
 ### 7.3 Layer 3 — refresh-on-hit (optional, milestone 3)
 
