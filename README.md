@@ -49,6 +49,7 @@ All inputs are optional. Inputs marked (r2) are used only with `storage: r2`.
 | `r2-lifecycle` | `auto` | `auto` (set the bucket's expiry rule), `verify` (fail if it is missing) or `manual` (r2). |
 | `max-age-days` | `7` | Delete R2 objects this many days after their last write, 1–36500 (r2). |
 | `max-size` | `5GB` | Size cap for the R2 prefix; the oldest objects are pruned above it (r2). |
+| `vp-max-size` | `2GB` | Vite+ only: skip saving the task cache when it is larger than this (then run `vp cache clean`). |
 | `version` | empty | hoard binary version. Empty: this action's own release, the only one it can verify. |
 
 ## Outputs
@@ -79,6 +80,15 @@ summary.
 - **Storage errors never fail the build.** A failed read is a miss and a failed upload is
   skipped. If uploads failed, the action shows a warning (`hoard: N uploads failed`) and the job
   summary says `Upload errors: N`, so a broken cache does not look like a cold one.
+- **Vite+.** When the root `package.json` depends on `vite-plus`, main restores Vite Task's
+  cache directory (`node_modules/.vite/task-cache`, or `VITE_CACHE_PATH` when absolute) from the
+  newest archive saved on the same OS and architecture, and post saves it as a new archive for
+  this run, before the server stops. Vite+ remote caching is not released yet, so this replaces
+  the `actions/cache` steps of the Vite+ docs and works with every `storage`. A cache larger
+  than `vp-max-size` is not saved (run `vp cache clean`); restore and save problems are warnings
+  and never fail the build. With Vite+, put the hoard step after the dependency install (as the
+  Vite+ docs do for `actions/cache`): an install can recreate `node_modules` and drop the
+  restored cache.
 - **Binary download failures never fail the build.** If the hoard binary cannot be downloaded
   (one retry, at most 90 s), the action shows a warning and the job runs without the remote cache. A
   checksum mismatch still fails the step.
@@ -94,6 +104,7 @@ laptop:
 | `hoard env` | Prints the `export TURBO_API/TURBO_TOKEN/TURBO_TEAM` lines for a running server. |
 | `hoard prune [--force]` | Deletes the oldest objects until the R2 prefix fits in `max-size` (at most once per 24 h without `--force`). |
 | `hoard doctor` | Checks the storage credentials, bucket read/write and the R2 lifecycle rule, and prints the fixes. |
+| `hoard vp restore` / `hoard vp save` | Restores or saves the Vite+ task-cache directory (`--workspace`, default `.`); prints one line and exits 0 unless the setup is wrong. |
 
 Laptop, sharing the CI bucket. Use a read-only R2 token (object read) and `--mode read`, so
 hoard never writes artifacts or the lifecycle rule:

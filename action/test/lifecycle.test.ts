@@ -75,6 +75,8 @@ describe("main", () => {
       }),
       waitForHealth: vi.fn(async () => 40404),
       kill: vi.fn(),
+      detectTools: vi.fn(() => ({ turbo: true, vp: false })),
+      runVp: vi.fn(async () => ({ ok: true, line: "no cache found" })),
       ...over,
     };
   }
@@ -334,6 +336,62 @@ describe("main", () => {
     );
   });
 
+  test("Vite+ repo: restores the task cache after health, with the server's storage", async () => {
+    const f = fakeCore({ storage: "fs", "vp-max-size": "1GB" });
+    const d = deps(f, {
+      detectTools: vi.fn(() => ({ turbo: false, vp: true })),
+      runVp: vi.fn(async () => {
+        f.calls.push(["runVp"]);
+        return { ok: true, line: "restored cache/vp/v1/linux-x64/1-1 (2 KB)" };
+      }),
+    });
+    d.env.GITHUB_WORKSPACE = "/work/repo";
+    await runMain(d);
+
+    expect(f.of("setFailed")).toEqual([]);
+    expect(d.detectTools).toHaveBeenCalledWith("/work/repo");
+    const [bin, cmd, args, env] = vi.mocked(d.runVp).mock.calls[0] ?? [];
+    expect([bin, cmd]).toEqual(["/opt/hoard", "restore"]);
+    expect(args?.[args.indexOf("--fs-root") + 1]).toBe(join(dir, "hoard-__keelstack_hoard-store"));
+    expect(args?.[args.indexOf("--workspace") + 1]).toBe("/work/repo");
+    expect(args?.[args.indexOf("--vp-max-size") + 1]).toBe("1GB");
+    expect(env).not.toHaveProperty("HOARD_TOKEN");
+    // After the server is healthy and TURBO_* are exported.
+    const exportAt = f.calls.findIndex((c) => c[0] === "exportVariable");
+    expect(f.calls.findIndex((c) => c[0] === "runVp")).toBeGreaterThan(exportAt);
+    expect(f.of("info")).toContainEqual([
+      "hoard vp restore: restored cache/vp/v1/linux-x64/1-1 (2 KB)",
+    ]);
+    const saved = Object.fromEntries(f.of("saveState"));
+    expect(JSON.parse(String(saved.vp))).toEqual({
+      args,
+      restore: "restored cache/vp/v1/linux-x64/1-1 (2 KB)",
+    });
+    expect(f.of("warning")).toEqual([]);
+  });
+
+  test("a failed Vite+ restore is a warning; main still succeeds", async () => {
+    const f = fakeCore();
+    const d = deps(f, {
+      detectTools: vi.fn(() => ({ turbo: true, vp: true })),
+      runVp: vi.fn(async () => ({ ok: false, line: "hoard vp restore timed out after 120s" })),
+    });
+    await runMain(d);
+    expect(f.of("setFailed")).toEqual([]);
+    expect(f.of("warning")).toEqual([["hoard vp restore timed out after 120s"]]);
+    const saved = Object.fromEntries(f.of("saveState"));
+    expect(JSON.parse(String(saved.warnings))).toEqual(["hoard vp restore timed out after 120s"]);
+    expect(f.of("exportVariable")).toHaveLength(3);
+  });
+
+  test("no Vite+: no restore and no vp state", async () => {
+    const f = fakeCore();
+    const d = deps(f);
+    await runMain(d);
+    expect(d.runVp).not.toHaveBeenCalled();
+    expect(Object.keys(Object.fromEntries(f.of("saveState")))).not.toContain("vp");
+  });
+
   test("a missing token file fails the step", async () => {
     const f = fakeCore();
     const d = deps(f, { startServer: vi.fn(async () => running(1)) });
@@ -368,6 +426,7 @@ describe("post", () => {
       getStats: vi.fn(async () => ({ hits: 3, misses: 1, put_errors: 0, time_saved_ms: 900 })),
       shutdownServer: vi.fn(async () => true),
       kill: vi.fn(),
+      runVp: vi.fn(async () => ({ ok: true, line: "saved cache/vp/v1/linux-x64/9-1 (3 KB)" })),
       ...over,
     };
   }
@@ -518,6 +577,78 @@ describe("post", () => {
     );
     await runPost(deps(f));
     expect(f.summaries).toEqual([`> ⚠️ ${note}\n\n> ⚠️ R2 secrets are not available\n`]);
+  });
+
+  test("Vite+: saves the task cache before shutdown and reports both lines", async () => {
+    const vpArgs = ["--storage", "r2", "--r2-bucket", "b", "--workspace", "/w"];
+    const s = await state({
+      warnings: "[]",
+      bin: "/opt/hoard",
+      vp: JSON.stringify({ args: vpArgs, restore: "no cache found" }),
+    });
+    await writeFile(s.summary, summaryText);
+    const inputs = {
+      storage: "r2",
+      "r2-bucket": "b",
+      "r2-access-key-id": "AKID",
+      "r2-secret-access-key": "SECRET",
+      "r2-account-id": "acc",
+    };
+    const f = fakeCore(inputs, s);
+    const d = deps(f, {
+      runVp: vi.fn(async () => {
+        f.calls.push(["runVp"]);
+        return { ok: true, line: "saved cache/vp/v1/linux-x64/9-1 (3 KB)" };
+      }),
+      shutdownServer: vi.fn(async () => {
+        f.calls.push(["shutdown"]);
+        return true;
+      }),
+    });
+    d.env = { PATH: "/bin", HOARD_TOKEN: "stray" };
+    await runPost(d);
+
+    const [bin, cmd, args, env] = vi.mocked(d.runVp).mock.calls[0] ?? [];
+    expect([bin, cmd, args]).toEqual(["/opt/hoard", "save", vpArgs]);
+    expect(env).toMatchObject({
+      PATH: "/bin",
+      HOARD_R2_ACCESS_KEY_ID: "AKID",
+      HOARD_R2_SECRET_ACCESS_KEY: "SECRET",
+      HOARD_R2_ACCOUNT_ID: "acc",
+    });
+    expect(env).not.toHaveProperty("HOARD_TOKEN");
+    const vpAt = f.calls.findIndex((c) => c[0] === "runVp");
+    expect(vpAt).toBeGreaterThanOrEqual(0);
+    expect(vpAt).toBeLessThan(f.calls.findIndex((c) => c[0] === "shutdown"));
+    expect(f.of("warning")).toEqual([]);
+    expect(f.summaries).toEqual([
+      `${summaryText}\n**Vite+ task cache:** restore: no cache found · save: saved cache/vp/v1/linux-x64/9-1 (3 KB)\n`,
+    ]);
+  });
+
+  test("a failed Vite+ save is a warning; post still shuts down", async () => {
+    const s = await state({
+      warnings: "[]",
+      bin: "/opt/hoard",
+      vp: JSON.stringify({ args: [], restore: "no cache found" }),
+    });
+    const f = fakeCore({}, s);
+    const d = deps(f, {
+      runVp: vi.fn(async () => ({ ok: false, line: "Vite+ cache save failed (HTTP 503)" })),
+    });
+    await runPost(d);
+    expect(f.of("warning")).toEqual([["Vite+ cache save failed (HTTP 503)"]]);
+    expect(d.shutdownServer).toHaveBeenCalled();
+    expect(f.summaries[0]).toContain("> ⚠️ Vite+ cache save failed (HTTP 503)");
+    expect(f.summaries[0]).toContain("save: Vite+ cache save failed (HTTP 503)");
+  });
+
+  test("no vp state: no save", async () => {
+    const s = await state();
+    const f = fakeCore({}, s);
+    const d = deps(f);
+    await runPost(d);
+    expect(d.runVp).not.toHaveBeenCalled();
   });
 
   test("a refused shutdown kills the saved pid", async () => {

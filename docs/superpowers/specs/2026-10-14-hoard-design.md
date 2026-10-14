@@ -348,8 +348,11 @@ through `HOARD_R2_*` env vars, never argv. The storage flags (`--storage`, `--mo
 come from one helper, so every hoard command the action runs gets the same storage.
 
 main:
-1. Resolve `mode`/`storage` (§8) and (milestone 3) the tool (`turbo.json` present → turbo;
-   `vite.config.*` with `vite-plus` in the root `package.json` → vp; both allowed).
+1. Resolve `mode`/`storage` (§8) and (milestone 3) the tool (`detectTools` in
+   `action/src/tools.ts`, at `GITHUB_WORKSPACE`, else the working directory: `turbo.json` or
+   `turbo.jsonc` present → turbo; `vite-plus` in the root `package.json` `dependencies`,
+   `devDependencies` or `optionalDependencies` → vp; both allowed). A `vite.config.*` is not
+   required: Vite Task caches `package.json` scripts too.
 2. Resolve the target from `process.platform`/`process.arch` (anything else fails with
    `unsupported platform <platform>/<arch>`, before any download). Refuse a target with no
    checksum in `action/src/checksums.generated.ts` (written at release time, bundled into `dist/`)
@@ -394,12 +397,23 @@ main:
    `TURBO_TEAM=hoard`; save the binary path (for `hoard vp save` in post, milestone 3), port,
    token, pid, summary and log paths and the settings warnings as step state. Each settings
    warning (e.g. the R2 → github fallback, §8) is also a `core.warning`.
+6. Vite+ (milestone 3; only when step 1 found vp): run `hoard vp restore` with the same storage
+   flags and environment as the server, plus `--workspace <root>` and `--vp-max-size` (input
+   `vp-max-size`, default `2GB`), at most 120 s. Its line is logged (`hoard vp restore: …`); a
+   `warning:` line, a non-zero exit, a timeout or a spawn error becomes a `core.warning` and a
+   settings warning (job summary) and never fails the step. The args and the restore line are
+   saved as state `vp`. Restore runs in main, so with Vite+ the hoard step belongs after the
+   dependency install (an install can recreate `node_modules`).
 
 post (never fails the job; problems are warnings): if main saved `unavailable` (the binary
 download failed), set the outputs to `0`, write it and the settings warnings to
 `$GITHUB_STEP_SUMMARY` and stop. If main saved no other
 state, do nothing. Mask the saved token again with `core.setSecret` before any output (post is a
-separate process). Read `GET /_hoard/stats` and set the outputs (`hits`, `misses`,
+separate process). If main saved `vp`, run `<bin> vp save` with the saved args (the binary from
+state `bin`, the R2 keys from the inputs again, at most 300 s) before anything else, in
+particular before the shutdown (save does not need the server, and the shutdown prune then sees
+the new archive); a failure is a warning. The job summary gets the line
+`**Vite+ task cache:** restore: <restore line> · save: <save line>` after hoard's summary. Read `GET /_hoard/stats` and set the outputs (`hits`, `misses`,
 `time-saved-ms`; `0` when unreachable); when `put_errors > 0`, warn
 `hoard: N uploads failed; see the hoard log` (a broken storage must not look like a cold cache)
 and print the log. Then `POST /_hoard/shutdown` (hoard answers after writing the summary file;

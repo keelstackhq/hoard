@@ -21,6 +21,8 @@ export interface Settings {
   r2Lifecycle: "auto" | "verify" | "manual";
   maxAgeDays: number;
   maxSize: string;
+  /** `vp save` skips a Vite+ task cache larger than this (§4.2). */
+  vpMaxSize: string;
   /** The hoard binary version; always the action's own release (the only verified one). */
   version: string;
   warnings: string[];
@@ -115,6 +117,7 @@ export function resolveSettings(inputs: Record<string, string>, env: NodeJS.Proc
     r2Lifecycle: oneOf("r2-lifecycle", input("r2-lifecycle", "auto"), LIFECYCLES),
     maxAgeDays: maxAgeDays(input("max-age-days", "7")),
     maxSize: input("max-size", "5GB"),
+    vpMaxSize: input("vp-max-size", "2GB"),
     version,
     warnings,
   };

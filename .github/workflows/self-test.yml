@@ -2,6 +2,8 @@ name: self-test
 # Runs the action (`uses: ./`) on real runners against tests/fixtures/turbo-repo:
 #   warm  builds the fixture with an empty cache (misses, uploads);
 #   hit   rebuilds it in a fresh checkout and must replay everything from the cache.
+# TODO(milestone 3): add a Vite+ leg on tests/fixtures/vp-repo (warm saves the task cache, hit
+#   must restore it and print a Vite Task cache hit).
 # The cache-version is run-<run_id>-<os>-<storage>: unique per run (runs never see each other) and
 # per matrix leg (task hashes are OS-independent here, so one leg's uploads must not satisfy
 # another leg's hit assertion). run_attempt is deliberately not part of it: re-running only the

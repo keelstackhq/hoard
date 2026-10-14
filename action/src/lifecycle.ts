@@ -20,6 +20,8 @@ import {
   waitForHealth,
 } from "./server.js";
 import { resolveSettings } from "./settings.js";
+import { detectTools, type Tools } from "./tools.js";
+import { runVp, VP_RESTORE_TIMEOUT_MS, VP_SAVE_TIMEOUT_MS, type VpResult, vpArgs } from "./vp.js";
 
 /** The part of @actions/core the action uses. */
 export interface ActionCore {
@@ -50,8 +52,27 @@ const INPUTS = [
   "r2-lifecycle",
   "max-age-days",
   "max-size",
+  "vp-max-size",
   "version",
 ] as const;
+
+/** Runs `hoard vp <cmd>` (bounded; never throws). */
+type RunVp = (
+  bin: string,
+  cmd: "restore" | "save",
+  args: string[],
+  env: NodeJS.ProcessEnv,
+) => Promise<VpResult>;
+
+/** What main saves for post's `hoard vp save`: the same args, and the restore result line. */
+interface VpState {
+  args: string[];
+  restore: string;
+}
+
+function readInputs(core: ActionCore): Record<string, string> {
+  return Object.fromEntries(INPUTS.map((name) => [name, core.getInput(name)]));
+}
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -89,6 +110,8 @@ export interface MainDeps {
   ): Promise<ServerProcess>;
   waitForHealth(portFile: string, exited: Promise<string>): Promise<number>;
   kill(pid: number): void;
+  detectTools(root: string): Tools;
+  runVp: RunVp;
 }
 
 export function mainDeps(): MainDeps {
@@ -102,6 +125,8 @@ export function mainDeps(): MainDeps {
     startServer,
     waitForHealth: (portFile, exited) => waitForHealth(portFile, 10_000, exited),
     kill: killServer,
+    detectTools,
+    runVp: (bin, cmd, args, env) => runVp(bin, cmd, args, env, VP_RESTORE_TIMEOUT_MS),
   };
 }
 
@@ -117,7 +142,7 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
   const files = serverFiles(runnerTemp, id);
   let pid = 0;
   try {
-    const inputs = Object.fromEntries(INPUTS.map((name) => [name, core.getInput(name)]));
+    const inputs = readInputs(core);
     const settings = resolveSettings(inputs, env);
     for (const w of settings.warnings) core.warning(w);
     const target = targetFor(d.platform, d.arch); // before any network call
@@ -158,6 +183,20 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     core.exportVariable("TURBO_TOKEN", token);
     core.exportVariable("TURBO_TEAM", "hoard");
 
+    // Vite+: restore the task cache now; post saves it. Problems are warnings only.
+    const workspace = env.GITHUB_WORKSPACE || process.cwd();
+    let vp: VpState | undefined;
+    if (d.detectTools(workspace).vp) {
+      const args = vpArgs(settings, files, workspace);
+      const r = await d.runVp(bin, "restore", args, serveEnv(settings, env));
+      if (r.ok) core.info(`hoard vp restore: ${r.line}`);
+      else {
+        core.warning(r.line);
+        settings.warnings.push(r.line);
+      }
+      vp = { args, restore: r.line };
+    }
+
     core.saveState("bin", bin); // post runs `hoard vp save` with it (milestone 3)
     core.saveState("port", String(port));
     core.saveState("token", token);
@@ -165,6 +204,7 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     core.saveState("summary", files.summary);
     core.saveState("log", files.log);
     core.saveState("warnings", JSON.stringify(settings.warnings));
+    if (vp) core.saveState("vp", JSON.stringify(vp));
   } catch (e) {
     if (!pid) {
       core.setFailed(message(e));
@@ -184,10 +224,47 @@ export interface PostDeps {
   getStats: typeof getStats;
   shutdownServer: typeof shutdownServer;
   kill(pid: number): void;
+  runVp: RunVp;
 }
 
 export function postDeps(): PostDeps {
-  return { core: actionsCore, env: process.env, getStats, shutdownServer, kill: killServer };
+  return {
+    core: actionsCore,
+    env: process.env,
+    getStats,
+    shutdownServer,
+    kill: killServer,
+    runVp: (bin, cmd, args, env) => runVp(bin, cmd, args, env, VP_SAVE_TIMEOUT_MS),
+  };
+}
+
+function savedVp(raw: string): VpState | undefined {
+  try {
+    const v = JSON.parse(raw) as Partial<VpState>;
+    return Array.isArray(v.args)
+      ? { args: v.args.map(String), restore: String(v.restore) }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * post's `hoard vp save`, before the server shuts down (it does not need the server). Returns
+ * the summary line; a failure is a warning.
+ */
+async function saveVp(d: PostDeps, vp: VpState, warn: (w: string) => void): Promise<string> {
+  let r: VpResult;
+  try {
+    // The child needs the R2 keys again; post is its own process, so resolve them again.
+    const settings = resolveSettings(readInputs(d.core), d.env);
+    r = await d.runVp(d.core.getState("bin"), "save", vp.args, serveEnv(settings, d.env));
+  } catch (e) {
+    r = { ok: false, line: `hoard vp save could not run: ${message(e)}` };
+  }
+  if (r.ok) d.core.info(`hoard vp save: ${r.line}`);
+  else warn(r.line);
+  return `**Vite+ task cache:** restore: ${vp.restore} · save: ${r.line}`;
 }
 
 function savedWarnings(raw: string): string[] {
@@ -217,11 +294,17 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
 
     let problems = false;
     const warnings = savedWarnings(core.getState("warnings"));
-    const warn = (w: string) => {
-      problems = true;
+    const note = (w: string) => {
       warnings.push(w);
       core.warning(w);
     };
+    const warn = (w: string) => {
+      problems = true;
+      note(w);
+    };
+
+    const vp = savedVp(core.getState("vp"));
+    const vpLine = vp ? await saveVp(d, vp, note) : "";
 
     const stats = await d.getStats(port, token);
     core.setOutput("hits", String(stats?.hits ?? 0));
@@ -244,7 +327,7 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
     const summaryFile = core.getState("summary");
     const summary = summaryFile ? await readFile(summaryFile, "utf8").catch(() => "") : "";
     // Blank lines keep the table and each warning in their own Markdown block.
-    const parts = [summary.trimEnd(), ...warnings.map((w) => `> ⚠️ ${w}`)].filter(Boolean);
+    const parts = [summary.trimEnd(), vpLine, ...warnings.map((w) => `> ⚠️ ${w}`)].filter(Boolean);
     if (parts.length > 0) {
       try {
         await core.summary.addRaw(`${parts.join("\n\n")}\n`).write();

@@ -52,6 +52,7 @@ test("defaults", () => {
     r2Lifecycle: "auto",
     maxAgeDays: 7,
     maxSize: "5GB",
+    vpMaxSize: "2GB",
     version: VERSION,
     warnings: [],
   });
@@ -130,8 +131,11 @@ describe("validation", () => {
     }
   });
   test("max-size and cache-version pass through", () => {
-    const s = resolveSettings({ "max-size": "20GB", "cache-version": "v2" }, {});
-    expect(s).toMatchObject({ maxSize: "20GB", cacheVersion: "v2" });
+    const s = resolveSettings(
+      { "max-size": "20GB", "cache-version": "v2", "vp-max-size": "500MB" },
+      {},
+    );
+    expect(s).toMatchObject({ maxSize: "20GB", cacheVersion: "v2", vpMaxSize: "500MB" });
   });
 });
 

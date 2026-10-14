@@ -2,7 +2,7 @@
 // Actions environment. Skipped unless HOARD_TEST_BIN points at a hoard build, e.g.
 //   cargo build && HOARD_TEST_BIN=$PWD/target/debug/hoard pnpm --dir action test
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,4 +123,82 @@ test.skipIf(!bin)(
       .toBe("exited");
   },
   30_000,
+);
+
+test.skipIf(!bin)(
+  "Vite+ repo: post saves the task cache, the next job's main restores it",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "hoard-action-vp-"));
+    const pids: number[] = [];
+    try {
+      const temp = join(root, "runner-temp");
+      await mkdir(temp);
+      async function job(name: string, cache?: string) {
+        const ws = join(root, name);
+        await mkdir(join(ws, "node_modules/.vite/task-cache"), { recursive: true });
+        await writeFile(
+          join(ws, "package.json"),
+          JSON.stringify({ devDependencies: { "vite-plus": "1.2.0" } }),
+        );
+        if (cache) await writeFile(join(ws, "node_modules/.vite/task-cache/cache.db"), cache);
+        const files = Object.fromEntries(
+          ["GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"].map((k) => [
+            k,
+            join(ws, `${k.toLowerCase()}.txt`),
+          ]),
+        );
+        for (const f of Object.values(files)) await writeFile(f, "");
+        const env = {
+          PATH: process.env.PATH,
+          RUNNER_TEMP: temp,
+          GITHUB_WORKSPACE: ws,
+          GITHUB_ACTION: "__keelstack_hoard",
+          GITHUB_RUN_ID: "4242",
+          GITHUB_RUN_ATTEMPT: name === "first" ? "1" : "2",
+          ...files,
+          INPUT_STORAGE: "fs",
+          HOARD_ACTION_BINARY_PATH: bin,
+        };
+        const main = await run(process.execPath, [join(dist, "main.js")], { cwd: ws, env });
+        const state = parseFileCommands(await readFile(files.GITHUB_STATE, "utf8"));
+        pids.push(Number(state.pid));
+        const stateEnv = Object.fromEntries(
+          Object.entries(state).map(([k, v]) => [`STATE_${k}`, v]),
+        );
+        const post = await run(process.execPath, [join(dist, "post.js")], {
+          cwd: ws,
+          env: { ...env, ...stateEnv },
+        });
+        const summary = await readFile(files.GITHUB_STEP_SUMMARY, "utf8");
+        return { ws, main: main.stdout, post: post.stdout, summary };
+      }
+
+      const first = await job("first", "task results v1");
+      expect(first.main).toContain("hoard vp restore: no cache found");
+      expect(first.post).toMatch(
+        /hoard vp save: saved cache\/vp\/v1\/[a-z0-9]+-[a-z0-9]+\/4242-1 \(/,
+      );
+      expect(first.summary).toContain(
+        "**Vite+ task cache:** restore: no cache found · save: saved",
+      );
+      expect(first.post).not.toContain("::warning::");
+
+      const second = await job("second");
+      expect(second.main).toMatch(/hoard vp restore: restored cache\/vp\/v1\/.+\/4242-1 \(/);
+      expect(
+        await readFile(join(second.ws, "node_modules/.vite/task-cache/cache.db"), "utf8"),
+      ).toBe("task results v1");
+      expect(second.post).toMatch(/hoard vp save: saved cache\/vp\/v1\/.+\/4242-2 \(/);
+    } finally {
+      for (const p of pids) {
+        try {
+          process.kill(p);
+        } catch {
+          // exited after post
+        }
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  60_000,
 );
