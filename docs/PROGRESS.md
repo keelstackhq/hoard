@@ -20,6 +20,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 02-github-action/Task 3 action settings, platform, verified download · b6d2c04 · action vitest 51/51, biome + tsc clean, build reproducible (dist 20.9 KB), actionlint clean
 - 2026-10-14 · 02-github-action/Task 4 action main + post · 7d3fc69, bdc2438 · action vitest 95/95 incl. real-binary integration (main → PUT/GET → post: hits=1, summary); biome, tsc, actionlint clean; dist 148.9 KB, fresh
 - 2026-10-14 · 02-github-action/Task 5 steps 1, 3 (self-test workflow) · cf7d876, 4b932ff · actionlint clean; e2e fs + r2 PASS with the portable fixture · Step 2 (run on GitHub runners) BLOCKED
+- 2026-10-14 · **Milestone 2 reviewed** · whole-branch review cd87105..49fff6b (0 Critical, 5 Important, 11 Minor) → fix wave b6a48b4..890ff79 + follow-ups c218546, 2ab55c1 (90 s download cap, explicit exit), re-reviews clean · cargo 175 pass; action 115 pass incl. real-binary integration; dist 151 KB fresh; actionlint clean; e2e fs PASS
 
 ## Blocked
 
