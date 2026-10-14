@@ -35,6 +35,18 @@ fn put_ok() -> Response {
     Json(json!({"urls": []})).into_response()
 }
 
+/// `403` with the error shape Turborepo parses (`{"error":{"code","message"}}`), so it prints
+/// the reason instead of a JSON-parse warning. Codes starting with `remote_caching_` would make
+/// Turborepo treat the cache as disabled, so the code is plain `forbidden`.
+fn forbidden(mode: Mode) -> Response {
+    let message = match mode {
+        Mode::Off => "hoard is off (mode=off)",
+        _ => "hoard is in read-only mode",
+    };
+    let body = json!({"error": {"code": "forbidden", "message": message}});
+    (StatusCode::FORBIDDEN, Json(body)).into_response()
+}
+
 pub async fn status(State(s): State<AppState>) -> Json<serde_json::Value> {
     let status = if s.mode == Mode::Off {
         "disabled"
@@ -178,7 +190,7 @@ pub async fn put_artifact(
         return StatusCode::BAD_REQUEST.into_response();
     }
     if s.mode != Mode::ReadWrite {
-        return StatusCode::FORBIDDEN.into_response();
+        return forbidden(s.mode);
     }
     let Some(size) = headers
         .get(header::CONTENT_LENGTH)

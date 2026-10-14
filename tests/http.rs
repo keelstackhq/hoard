@@ -250,7 +250,18 @@ async fn corrupt_object_is_a_miss() {
 #[tokio::test]
 async fn read_mode_rejects_put() {
     let t = spawn_test_server(Mode::Read).await;
-    assert_eq!(put(&t, "aa", b"x", &[]).await.status(), 403);
+    let r = put(&t, "aa", b"x", &[]).await;
+    assert_eq!(r.status(), 403);
+    // Turborepo parses a 403 body as {"error":{"code","message"}} and prints the message.
+    assert_eq!(
+        r.headers()["content-type"].to_str().unwrap(),
+        "application/json"
+    );
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({"error": {"code": "forbidden", "message": "hoard is in read-only mode"}})
+    );
     assert!(!exists(&t, "aa").await);
     // Seed directly; GET still works.
     let rw = hoard::envelope::Header {
@@ -282,7 +293,11 @@ async fn off_mode_status_disabled() {
         .await
         .unwrap();
     assert_eq!(s, json!({"status": "disabled"}));
-    assert_eq!(put(&t, "aa", b"x", &[]).await.status(), 403);
+    let r = put(&t, "aa", b"x", &[]).await;
+    assert_eq!(r.status(), 403);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden");
+    assert_eq!(body["error"]["message"], "hoard is off (mode=off)");
     assert!(!exists(&t, "aa").await);
     let rw = hoard::envelope::Header {
         v: 1,
