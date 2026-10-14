@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import * as tc from "@actions/tool-cache";
@@ -75,11 +75,25 @@ test("a missing checksum refuses before any download", async () => {
   expect(download).not.toHaveBeenCalled();
 });
 
+const HOSTED = { RUNNER_ENVIRONMENT: "github-hosted" };
+
+/** A download that hands out a fresh copy of `archive` each call (ensureBinary deletes it). */
+function downloadOf(archive: string) {
+  let n = 0;
+  return vi.fn(async (_url: string) => {
+    const copy = `${archive}.dl-${++n}`;
+    await copyFile(archive, copy);
+    downloaded.push(copy);
+    return copy;
+  });
+}
+const downloaded: string[] = [];
+
 test("a verified archive is extracted, made executable and cached", async () => {
   const archive = await writeTempTarGz("#!/bin/sh\necho hoard\n");
-  const download = vi.fn(async (_url: string) => archive);
+  const download = downloadOf(archive);
   const sum = (await sha256(archive)).toUpperCase(); // comparison is case-insensitive
-  const exe = await ensureBinary(LINUX, "1.2.3", { [LINUX]: sum }, download, {});
+  const exe = await ensureBinary(LINUX, "1.2.3", { [LINUX]: sum }, download, HOSTED);
 
   expect(basename(exe)).toBe("hoard");
   expect(await readFile(exe, "utf8")).toBe("#!/bin/sh\necho hoard\n");
@@ -90,20 +104,56 @@ test("a verified archive is extracted, made executable and cached", async () => 
   );
   expect(tc.find("hoard", "1.2.3", LINUX)).not.toBe("");
 
-  // Second run: the tool cache short-circuits the download.
-  const again = await ensureBinary(LINUX, "1.2.3", { [LINUX]: sum }, download, {});
+  // Second run on a GitHub-hosted runner: the tool cache short-circuits the download.
+  const again = await ensureBinary(LINUX, "1.2.3", { [LINUX]: sum }, download, HOSTED);
   expect(again).toBe(exe);
   expect(download).toHaveBeenCalledOnce();
 });
 
-test("a cached tool short-circuits without downloading", async () => {
+test("the downloaded archive is deleted, after success and after a mismatch", async () => {
+  const archive = await writeTempTarGz("bin");
+  const download = downloadOf(archive);
+  await ensureBinary(LINUX, "1.2.3", { [LINUX]: await sha256(archive) }, download, {});
+  await expect(ensureBinary(LINUX, "1.2.4", CHECKSUMS_ZERO, download, {})).rejects.toThrow(
+    "checksum mismatch",
+  );
+  expect(downloaded.slice(-2)).toHaveLength(2);
+  for (const file of downloaded.slice(-2)) await expect(stat(file)).rejects.toThrow(/ENOENT/);
+});
+
+test("a self-hosted runner ignores the tool cache and verifies a fresh download", async () => {
+  // A tool-cache entry on a self-hosted runner may have been planted; it is never trusted.
+  const src = join(dir, "pre");
+  await mkdir(src);
+  await writeFile(join(src, "hoard"), "planted");
+  await tc.cacheDir(src, "hoard", "1.2.3", LINUX);
+  const archive = await writeTempTarGz("real");
+  const download = downloadOf(archive);
+
+  for (const env of [{}, { RUNNER_ENVIRONMENT: "self-hosted" }]) {
+    const exe = await ensureBinary(
+      LINUX,
+      "1.2.3",
+      { [LINUX]: await sha256(archive) },
+      download,
+      env,
+    );
+    expect(await readFile(exe, "utf8")).toBe("real");
+  }
+  expect(download).toHaveBeenCalledTimes(2);
+  await expect(ensureBinary(LINUX, "1.2.3", CHECKSUMS_ZERO, download, {})).rejects.toThrow(
+    "checksum mismatch",
+  );
+});
+
+test("on a GitHub-hosted runner a cached tool short-circuits without downloading", async () => {
   const src = join(dir, "pre");
   await mkdir(src);
   await writeFile(join(src, "hoard"), "cached");
   await tc.cacheDir(src, "hoard", "1.2.3", LINUX);
   const download = vi.fn(async () => writeTempTarGz("x"));
 
-  const exe = await ensureBinary(LINUX, "1.2.3", CHECKSUMS_ZERO, download, {});
+  const exe = await ensureBinary(LINUX, "1.2.3", CHECKSUMS_ZERO, download, HOSTED);
   expect(await readFile(exe, "utf8")).toBe("cached");
   expect(download).not.toHaveBeenCalled();
 });

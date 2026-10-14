@@ -31,9 +31,14 @@ jobs:
           version: 10.28.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       - run: docker compose up -d --wait minio
       - run: cargo build --release
+      - run: pnpm --dir action install --frozen-lockfile
+      - name: Action against the real binary (dist/main.js, dist/post.js)
+        run: pnpm --dir action exec vitest run test/integration.test.ts
+        env:
+          HOARD_TEST_BIN: ${{ github.workspace }}/target/release/hoard
       - run: tests/e2e/turbo.sh
         env:
           HOARD_BIN: ${{ github.workspace }}/target/release/hoard

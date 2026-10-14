@@ -1,5 +1,6 @@
 // Bundles the action into dist/main.js and dist/post.js (spec §10: committed, < 200 KB total).
 import { rm } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const dist = new URL("./dist/", import.meta.url);
@@ -20,5 +21,5 @@ await build({
   },
   alias: { undici: "./src/undici-stub.ts" },
   logLevel: "warning",
-  absWorkingDir: new URL(".", import.meta.url).pathname,
+  absWorkingDir: fileURLToPath(new URL(".", import.meta.url)),
 });

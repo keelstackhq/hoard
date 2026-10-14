@@ -1,3 +1,3 @@
-import * as core from "@actions/core";
+import { runMain } from "./lifecycle.js";
 
-core.setFailed("hoard action: main not implemented yet");
+await runMain();

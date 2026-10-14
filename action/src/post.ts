@@ -1,3 +1,3 @@
-import * as core from "@actions/core";
+import { runPost } from "./lifecycle.js";
 
-core.setFailed("hoard action: post not implemented yet");
+await runPost();

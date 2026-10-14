@@ -2,7 +2,7 @@
 // SHA-256 is not baked into this action build.
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, chmod } from "node:fs/promises";
+import { access, chmod, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import * as tc from "@actions/tool-cache";
@@ -28,7 +28,8 @@ async function sha256(file: string): Promise<string> {
 
 /**
  * Returns the path of a verified hoard executable for `target`. The tool cache is keyed by the
- * target (used as the tool-cache "arch"); an entry there was verified before it was stored.
+ * target (used as the tool-cache "arch"); an entry there was verified before it was stored, and
+ * it is only reused on GitHub-hosted runners.
  */
 export async function ensureBinary(
   target: Target,
@@ -43,22 +44,30 @@ export async function ensureBinary(
   }
   const exeName = target.endsWith("-windows-msvc") ? "hoard.exe" : "hoard";
 
-  const cached = tc.find("hoard", version, target);
-  if (cached) return join(cached, exeName);
+  // Only a GitHub-hosted runner's tool cache is fresh per job; on a self-hosted runner it
+  // persists and anything could have been put there, so the binary is downloaded and verified.
+  if (env.RUNNER_ENVIRONMENT === "github-hosted") {
+    const cached = tc.find("hoard", version, target);
+    if (cached) return join(cached, exeName);
+  }
 
   const archive = await download(releaseUrl(target, version, env));
-  if ((await sha256(archive)) !== expected.toLowerCase()) {
-    throw new Error(`checksum mismatch for ${target}`);
-  }
-
-  const dir = await tc.extractTar(archive);
-  const exe = join(dir, exeName);
   try {
-    await access(exe);
-  } catch {
-    throw new Error(`hoard-${target}.tar.gz does not contain ${exeName}`);
+    if ((await sha256(archive)) !== expected.toLowerCase()) {
+      throw new Error(`checksum mismatch for ${target}`);
+    }
+
+    const dir = await tc.extractTar(archive);
+    const exe = join(dir, exeName);
+    try {
+      await access(exe);
+    } catch {
+      throw new Error(`hoard-${target}.tar.gz does not contain ${exeName}`);
+    }
+    if (exeName === "hoard") await chmod(exe, 0o755);
+    const toolDir = await tc.cacheDir(dir, "hoard", version, target);
+    return join(toolDir, exeName);
+  } finally {
+    await rm(archive, { force: true });
   }
-  if (exeName === "hoard") await chmod(exe, 0o755);
-  const toolDir = await tc.cacheDir(dir, "hoard", version, target);
-  return join(toolDir, exeName);
 }

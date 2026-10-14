@@ -309,17 +309,31 @@ main:
 2. Resolve the target from `process.platform`/`process.arch` (anything else fails with
    `unsupported platform <platform>/<arch>`, before any download). Refuse a target with no
    checksum in `action/src/checksums.generated.ts` (written at release time, bundled into `dist/`)
-   without downloading. Otherwise use the `@actions/tool-cache` entry if present, else download
+   without downloading. Otherwise use the `@actions/tool-cache` entry if present (GitHub-hosted
+   runners only, `RUNNER_ENVIRONMENT=github-hosted`; a self-hosted runner's tool cache persists
+   between jobs, so there the binary is always downloaded and verified again), else download
    `hoard-<target>.tar.gz` from the release `v<version>` of the action's own repository
-   (`GITHUB_ACTION_REPOSITORY`), verify its SHA-256 before extracting, and cache it.
-3. Spawn `hoard serve` detached (`stdio` to `$RUNNER_TEMP/hoard.log`, `unref()`), passing the
-   full environment (includes `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`).
-4. Poll `/_hoard/health` every 100 ms up to 10 s; on timeout print the log and fail.
+   (`GITHUB_ACTION_REPOSITORY`), verify its SHA-256 before extracting, and cache it. The
+   downloaded archive is deleted afterwards. For testing, `HOARD_ACTION_BINARY_PATH` names a
+   local hoard binary to use instead (with a warning); it bypasses checksum verification, so only
+   the workflow author can set it.
+3. Spawn `hoard serve --port 0` detached (`stdio` to `$RUNNER_TEMP/hoard.log`, `unref()`) with
+   `--port-file`, `--token-file` and `--summary-file` in `$RUNNER_TEMP` (`hoard.port`,
+   `hoard.token`, `hoard-summary.md`, removed first), passing the full environment (includes
+   `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`) plus `HOARD_R2_ACCESS_KEY_ID` /
+   `HOARD_R2_SECRET_ACCESS_KEY`, and without any inherited `HOARD_TOKEN`.
+4. Poll every 100 ms, up to 10 s, for the port file and a `200 ok` from `/_hoard/health`; on
+   timeout fail with `hoard did not start within 10s` and print the log.
 5. `core.setSecret(token)`; export `TURBO_API=http://127.0.0.1:<port>`, `TURBO_TOKEN`,
-   `TURBO_TEAM=hoard`.
+   `TURBO_TEAM=hoard`; save port, token, pid, summary and log paths and the settings warnings as
+   step state. Each settings warning (e.g. the R2 → github fallback, §8) is also a `core.warning`.
 
-post: `POST /_hoard/shutdown`, append the summary to `$GITHUB_STEP_SUMMARY`, set outputs
-(`hits`, `misses`, `time-saved-ms`), print the log only on failure or `RUNNER_DEBUG=1`.
+post (never fails the job; problems are warnings): if main saved no state, do nothing. Read
+`GET /_hoard/stats` and set the outputs (`hits`, `misses`, `time-saved-ms`; `0` when unreachable),
+`POST /_hoard/shutdown` (hoard answers after writing the summary file; unreachable → warning
+`hoard server was not running at shutdown; the summary may be incomplete`), append the summary
+file, if any, plus one `> ⚠️ <warning>` line per warning to `$GITHUB_STEP_SUMMARY`, and print the
+log only on a problem or with `RUNNER_DEBUG=1`.
 
 Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`,
 `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
