@@ -91,6 +91,7 @@ Precedence: CLI flag > environment variable > default. Every flag `--foo-bar` ha
 | `port` | `0` | `0` = pick a free port; actual port written to `--port-file` |
 | `port-file` | `$RUNNER_TEMP/hoard.port` or `./.hoard/port` | |
 | `token` | random 32 bytes, hex | Written to `--token-file` (mode 0600); never logged |
+| `token-file` | `$RUNNER_TEMP/hoard.token` or `./.hoard/token` | Where the token is written; read by `hoard env` |
 | `summary-file` | none | Markdown summary written on shutdown |
 | `fs-root` | `./.hoard/store` | `fs` storage only (tests, local use) |
 | `r2-account-id`, `r2-access-key-id`, `r2-secret-access-key`, `r2-bucket` | — | required for `r2` |
