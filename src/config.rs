@@ -1,5 +1,6 @@
 //! CLI flags, `HOARD_*` environment variables and defaults. Precedence: flag > env > default.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -32,6 +33,10 @@ pub enum ConfigError {
     BadSize(String),
     #[error("storage=r2 needs {}; set the flag or its HOARD_* env var", .0.join(", "))]
     MissingR2(Vec<String>),
+    #[error(
+        "cache-version must not be empty; set --cache-version or HOARD_CACHE_VERSION (default v1)"
+    )]
+    EmptyCacheVersion,
     #[error("r2-prefix {0:?} must end with / (for example cache/)")]
     BadPrefix(String),
 }
@@ -80,7 +85,7 @@ pub struct TokenPaths {
     pub token_file: Option<PathBuf>,
 }
 
-#[derive(clap::Parser, Debug, Clone)]
+#[derive(clap::Parser, Clone)]
 pub struct ServeArgs {
     #[arg(long, env = "HOARD_STORAGE", value_enum, default_value = "github")]
     pub storage: Storage,
@@ -121,6 +126,51 @@ pub struct ServeArgs {
     pub max_size: String,
 }
 
+fn redact<T>(v: &Option<T>) -> Option<&'static str> {
+    v.as_ref().map(|_| "<redacted>")
+}
+
+impl fmt::Debug for ServeArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServeArgs")
+            .field("storage", &self.storage)
+            .field("mode", &self.mode)
+            .field("cache_version", &self.cache_version)
+            .field("port", &self.port)
+            .field("paths", &self.paths)
+            .field("token", &redact(&self.token))
+            .field("summary_file", &self.summary_file)
+            .field("fs_root", &self.fs_root)
+            .field("r2_account_id", &self.r2_account_id)
+            .field("r2_access_key_id", &redact(&self.r2_access_key_id))
+            .field("r2_secret_access_key", &redact(&self.r2_secret_access_key))
+            .field("r2_bucket", &self.r2_bucket)
+            .field("r2_prefix", &self.r2_prefix)
+            .field("r2_lifecycle", &self.r2_lifecycle)
+            .field("max_age_days", &self.max_age_days)
+            .field("max_size", &self.max_size)
+            .finish()
+    }
+}
+
+/// Names of `HOARD_*` variables whose value is empty. CI systems export empty values for
+/// unset secrets; those must behave as unset.
+fn empty_hoard_keys<I: IntoIterator<Item = (OsString, OsString)>>(vars: I) -> Vec<OsString> {
+    vars.into_iter()
+        .filter(|(k, v)| v.is_empty() && k.to_string_lossy().starts_with("HOARD_"))
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// Remove empty `HOARD_*` variables from the process environment. Call first thing in `main`,
+/// before any thread or runtime exists.
+pub fn drop_empty_hoard_env() {
+    for key in empty_hoard_keys(std::env::vars_os()) {
+        // SAFETY: called at the start of main, while the process is still single-threaded.
+        unsafe { std::env::remove_var(key) };
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct R2Config {
     pub account_id: String,
@@ -140,7 +190,7 @@ impl fmt::Debug for R2Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("R2Config")
             .field("account_id", &self.account_id)
-            .field("access_key_id", &self.access_key_id)
+            .field("access_key_id", &"<redacted>")
             .field("secret_access_key", &"<redacted>")
             .field("bucket", &self.bucket)
             .field("prefix", &self.prefix)
@@ -189,29 +239,44 @@ impl TryFrom<ServeArgs> for Config {
     type Error = ConfigError;
 
     fn try_from(a: ServeArgs) -> Result<Self, ConfigError> {
+        if a.cache_version.is_empty() {
+            return Err(ConfigError::EmptyCacheVersion);
+        }
         let max_size = parse_size(&a.max_size)?;
         let r2 = if a.storage == Storage::R2 {
-            let missing: Vec<String> = [
-                ("r2-account-id", a.r2_account_id.is_none()),
-                ("r2-access-key-id", a.r2_access_key_id.is_none()),
-                ("r2-secret-access-key", a.r2_secret_access_key.is_none()),
-                ("r2-bucket", a.r2_bucket.is_none()),
-            ]
-            .into_iter()
-            .filter(|(_, m)| *m)
-            .map(|(n, _)| n.to_string())
-            .collect();
-            if !missing.is_empty() {
+            let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
+            let (account_id, access_key_id, secret_access_key, bucket) = (
+                non_empty(a.r2_account_id),
+                non_empty(a.r2_access_key_id),
+                non_empty(a.r2_secret_access_key),
+                non_empty(a.r2_bucket),
+            );
+            let (Some(account_id), Some(access_key_id), Some(secret_access_key), Some(bucket)) = (
+                account_id.clone(),
+                access_key_id.clone(),
+                secret_access_key.clone(),
+                bucket.clone(),
+            ) else {
+                let missing = [
+                    ("r2-account-id", account_id.is_none()),
+                    ("r2-access-key-id", access_key_id.is_none()),
+                    ("r2-secret-access-key", secret_access_key.is_none()),
+                    ("r2-bucket", bucket.is_none()),
+                ]
+                .into_iter()
+                .filter(|(_, m)| *m)
+                .map(|(n, _)| n.to_string())
+                .collect();
                 return Err(ConfigError::MissingR2(missing));
-            }
+            };
             if !a.r2_prefix.ends_with('/') {
                 return Err(ConfigError::BadPrefix(a.r2_prefix));
             }
             Some(R2Config {
-                account_id: a.r2_account_id.unwrap_or_default(),
-                access_key_id: a.r2_access_key_id.unwrap_or_default(),
-                secret_access_key: a.r2_secret_access_key.unwrap_or_default(),
-                bucket: a.r2_bucket.unwrap_or_default(),
+                account_id,
+                access_key_id,
+                secret_access_key,
+                bucket,
                 prefix: a.r2_prefix,
             })
         } else {
@@ -297,6 +362,65 @@ mod tests {
         ]);
         let dbg = format!("{:?}", Config::try_from(args).unwrap());
         assert!(!dbg.contains("topsecret") && !dbg.contains("tok123"));
+        assert!(!dbg.contains("\"k\""));
+        let args = ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-access-key-id",
+            "akid-xyz",
+            "--r2-secret-access-key",
+            "topsecret",
+            "--token",
+            "tok123",
+        ]);
+        let dbg = format!("{args:?}");
+        for s in ["topsecret", "tok123", "akid-xyz"] {
+            assert!(!dbg.contains(s), "{s} leaked");
+        }
+    }
+    #[test]
+    fn empty_values_rejected() {
+        let a = ServeArgs::parse_from(["serve", "--storage", "fs", "--cache-version", ""]);
+        assert!(
+            Config::try_from(a)
+                .unwrap_err()
+                .to_string()
+                .contains("cache-version")
+        );
+        let a = ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-account-id",
+            "a",
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "",
+        ]);
+        assert!(
+            Config::try_from(a)
+                .unwrap_err()
+                .to_string()
+                .contains("r2-bucket")
+        );
+    }
+    #[test]
+    fn finds_only_empty_hoard_vars() {
+        let vars = [
+            ("HOARD_PORT", ""),
+            ("HOARD_TOKEN", "x"),
+            ("OTHER", ""),
+            ("HOARD_R2_BUCKET", ""),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        assert_eq!(
+            empty_hoard_keys(vars),
+            vec!["HOARD_PORT", "HOARD_R2_BUCKET"]
+        );
     }
     #[test]
     fn defaults() {

@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use hoard::config::{Config, ServeArgs, TokenPaths};
+use hoard::config::{Config, ServeArgs, TokenPaths, drop_empty_hoard_env};
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +34,7 @@ struct PruneArgs {
 }
 
 fn main() {
+    drop_empty_hoard_env();
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Serve(args) | Command::Doctor(args) => Config::try_from(args).map(|_| ()),
