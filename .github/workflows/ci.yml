@@ -63,6 +63,7 @@ jobs:
       - run: pnpm --dir action typecheck
       - run: pnpm --dir action test
       - run: pnpm --dir action build
+      - run: node --test "scripts/bench/*.test.mjs" # benchmark generator
       - name: Check action/dist is rebuilt
         run: |
           git add -N action/dist
