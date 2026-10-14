@@ -30,6 +30,8 @@ pub struct AppState {
     pub cache_version: String,
     /// Set when PUTs are spooled and uploaded in the background (`write-behind`).
     pub write_behind: Option<Arc<WriteBehind>>,
+    /// Set for `storage=r2` with `refresh-on-hit`: a GET hit may reset the object's age.
+    pub refresh: Option<Arc<crate::r2::refresh::Refresher>>,
     /// `POST /_hoard/shutdown` sends a reply channel here and answers once the shutdown work
     /// (drain, prune, summary) has replied with the final stats, or the receiver is gone.
     pub shutdown: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<StatsSnapshot>>,

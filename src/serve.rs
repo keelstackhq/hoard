@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, fix_command, r2_client, rule_id};
 use crate::r2::prune::prune;
+use crate::r2::refresh::Refresher;
 use crate::ratelimit::RateGate;
 use crate::redact::redacted;
 use crate::server::{AppState, router};
@@ -218,6 +219,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let stats = Arc::new(Stats::default());
     let rate_gate = Arc::new(RateGate::default());
     let write_behind = start_write_behind(&cfg, &store, &stats, &rate_gate);
+    let refresh = start_refresher(&cfg, &stats);
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<oneshot::Sender<StatsSnapshot>>(8);
     let state = AppState {
         store,
@@ -229,6 +231,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         prefix: prefix.clone(),
         cache_version: cfg.cache_version.clone(),
         write_behind: write_behind.clone(),
+        refresh,
         shutdown: shutdown_tx,
     };
 
@@ -308,6 +311,33 @@ fn start_write_behind(
         gate.clone(),
         dir,
         CONCURRENCY,
+    )))
+}
+
+/// The refresh-on-hit helper (spec §7.3): only for `storage=r2` in `read-write` mode, since a
+/// refresh is a write. Asking for it elsewhere is ignored with one info line.
+fn start_refresher(cfg: &Config, stats: &Arc<Stats>) -> Option<Arc<Refresher>> {
+    if !cfg.refresh_on_hit {
+        return None;
+    }
+    let r2 = match (&cfg.r2, cfg.storage, cfg.mode) {
+        (Some(r2), Storage::R2, Mode::ReadWrite) => r2,
+        _ => {
+            info!("refresh-on-hit is ignored: it needs storage=r2 and mode=read-write");
+            return None;
+        }
+    };
+    let client = r2_client(&r2.endpoint(), &r2.access_key_id, &r2.secret_access_key);
+    let threshold = Refresher::threshold_for(cfg.max_age_days);
+    info!(
+        "refresh-on-hit on: objects older than {} h are refreshed when read",
+        threshold.as_secs() / 3600
+    );
+    Some(Arc::new(Refresher::new(
+        client,
+        r2.bucket.clone(),
+        threshold,
+        stats.clone(),
     )))
 }
 
@@ -496,6 +526,9 @@ async fn shutdown_work_within(
     if snapshot.put_errors > 0 {
         extra_lines.push(format!("Upload errors: {}", snapshot.put_errors));
     }
+    if snapshot.refreshed > 0 {
+        extra_lines.push(format!("Refreshed: {} objects", snapshot.refreshed));
+    }
     if snapshot.rate_limited > 0 {
         extra_lines.push(format!(
             "Rate limited: {} uploads skipped",
@@ -632,6 +665,35 @@ mod tests {
             md.ends_with("Storage: github · Rate limited: 3 uploads skipped\n"),
             "{md}"
         );
+    }
+
+    #[tokio::test]
+    async fn summary_reports_refreshed_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.fs_root = dir.path().join("store");
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Store::new(build_operator(&cfg).unwrap());
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+            write_behind: None,
+        };
+        let stats = Stats::default();
+        shutdown_work(&cfg, cache, &stats, "Storage: r2", vec![]).await;
+        assert!(
+            !std::fs::read_to_string(&summary)
+                .unwrap()
+                .contains("Refreshed")
+        );
+        stats
+            .refreshed
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        shutdown_work(&cfg, cache, &stats, "Storage: r2", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(md.ends_with("Storage: r2 · Refreshed: 2 objects\n"), "{md}");
     }
 
     #[tokio::test]

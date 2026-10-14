@@ -17,6 +17,7 @@ use hoard::r2::lifecycle::{
     LifecycleError, LifecycleStatus, ensure_lifecycle, fix_command, r2_client, rule_id,
 };
 use hoard::r2::prune::{marker_key, prune};
+use hoard::r2::refresh::{Refresher, refresh_object};
 use hoard::store::{Store, build_operator};
 use std::process::{Command, Stdio};
 
@@ -1054,5 +1055,323 @@ fn prune_command_fails_on_failed_deletes() {
         );
         assert!(stderr.contains("3 delete(s) failed"), "{stderr}");
         assert!(!stderr.contains(&secret), "secret leaked: {stderr}");
+    })
+}
+
+// ---- refresh-on-hit (spec §7.3) ----
+
+fn hrd1(body: &[u8]) -> Vec<u8> {
+    let h = hoard::envelope::Header {
+        v: 1,
+        duration_ms: Some(5),
+        tag: None,
+        size: body.len() as u64,
+    };
+    let mut out = hoard::envelope::encode_header(&h);
+    out.extend_from_slice(body);
+    out
+}
+
+async fn last_modified(c: &aws_sdk_s3::Client, bucket: &str, key: &str) -> std::time::SystemTime {
+    let head = c
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .unwrap();
+    std::time::UNIX_EPOCH
+        + std::time::Duration::from_millis(head.last_modified().unwrap().to_millis().unwrap() as u64)
+}
+
+/// A self-copy resets the object's age and leaves the body (a full envelope) untouched.
+#[test]
+fn refresh_object_resets_age_and_keeps_body() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let c = client(&b);
+        let key = "cache/turbo/v1/aa bb+c";
+        let blob = hrd1(b"artifact body");
+        c.put_object()
+            .bucket(&b.bucket)
+            .key(key)
+            .body(blob.clone().into())
+            .send()
+            .await
+            .unwrap();
+        let before = last_modified(&c, &b.bucket, key).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        refresh_object(&c, &b.bucket, key).await.unwrap();
+        let after = last_modified(&c, &b.bucket, key).await;
+        assert!(after > before, "{after:?} should be newer than {before:?}");
+        let got = c
+            .get_object()
+            .bucket(&b.bucket)
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(got.body.collect().await.unwrap().to_vec(), blob);
+        // And through the store: the envelope still decodes.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(build_operator(&r2_config(dir.path(), &b)).unwrap());
+        match store.get(key).await.unwrap() {
+            hoard::store::GetOutcome::Hit(h, _) => assert_eq!(h.size, 13),
+            _ => panic!("expected a hit after the refresh"),
+        }
+    })
+}
+
+#[test]
+fn refresh_object_missing_key_is_an_error() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let err = refresh_object(&client(&b), &b.bucket, "cache/turbo/v1/nope")
+            .await
+            .unwrap_err();
+        assert!(!format!("{err:#}").is_empty());
+    })
+}
+
+struct RefreshFixture {
+    t: common::TestServer,
+    log: common::lifecycle_proxy::RequestLog,
+    b: MinioBucket,
+    http: reqwest::Client,
+}
+
+impl RefreshFixture {
+    /// A server over the proxied bucket whose refresher treats objects older than `threshold`
+    /// as old; `None` = refresh off.
+    async fn new(b: &MinioBucket, threshold: Option<std::time::Duration>) -> Self {
+        let (pb, _, log) = common::proxied_with_log(b).await;
+        let stats = std::sync::Arc::new(hoard::stats::Stats::default());
+        let refresher = threshold.map(|th| {
+            std::sync::Arc::new(Refresher::new(
+                client(&pb),
+                pb.bucket.clone(),
+                th,
+                stats.clone(),
+            ))
+        });
+        let t = common::spawn_refresh_server(
+            bucket_store(&pb),
+            refresher,
+            stats,
+            tempfile::tempdir().unwrap(),
+        )
+        .await;
+        Self {
+            t,
+            log,
+            b: b.clone(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    async fn put(&self, hash: &str) {
+        let url = format!("{}/v8/artifacts/{hash}", self.t.base_url);
+        let r = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.t.token)
+            .body("data")
+            .send()
+            .await;
+        assert_eq!(r.unwrap().status(), 200);
+        self.log.take();
+    }
+
+    async fn get(&self, hash: &str) -> reqwest::StatusCode {
+        let url = format!("{}/v8/artifacts/{hash}", self.t.base_url);
+        let r = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.t.token)
+            .send()
+            .await
+            .unwrap();
+        let status = r.status();
+        assert_eq!(r.bytes().await.unwrap().as_ref(), b"data");
+        status
+    }
+
+    /// Requests seen since the last call, after letting background work settle.
+    async fn settled_log(&self) -> Vec<String> {
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        self.log.take()
+    }
+
+    fn key(&self, hash: &str) -> String {
+        format!("/{}/cache/turbo/v1/{hash}", self.b.bucket)
+    }
+}
+
+/// Three GET hits on an old object refresh it exactly once (one HEAD, one copy).
+#[test]
+fn get_hit_refreshes_old_object_once_per_run() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let f = RefreshFixture::new(&b, Some(std::time::Duration::ZERO)).await;
+        f.put("aa").await;
+        for _ in 0..3 {
+            assert_eq!(f.get("aa").await, 200);
+        }
+        let log = f.settled_log().await;
+        let key = f.key("aa");
+        let count = |m: &str| log.iter().filter(|l| **l == format!("{m} {key}")).count();
+        assert_eq!(count("HEAD"), 1, "{log:?}");
+        assert_eq!(count("PUT"), 1, "{log:?}");
+        assert_eq!(f.t.stats.snapshot().refreshed, 1);
+        // A later hit in the same run does not refresh again.
+        assert_eq!(f.get("aa").await, 200);
+        assert!(f.settled_log().await.iter().all(|l| !l.starts_with("PUT")));
+        assert_eq!(f.t.stats.snapshot().refreshed, 1);
+    })
+}
+
+/// An object younger than the threshold is checked once and not copied.
+#[test]
+fn get_hit_leaves_young_object_alone() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let f = RefreshFixture::new(&b, Some(std::time::Duration::from_secs(3600))).await;
+        f.put("aa").await;
+        for _ in 0..3 {
+            assert_eq!(f.get("aa").await, 200);
+        }
+        let log = f.settled_log().await;
+        let key = f.key("aa");
+        assert_eq!(
+            log.iter().filter(|l| **l == format!("HEAD {key}")).count(),
+            1,
+            "{log:?}"
+        );
+        assert!(log.iter().all(|l| !l.starts_with("PUT")), "{log:?}");
+        assert_eq!(f.t.stats.snapshot().refreshed, 0);
+    })
+}
+
+/// With refresh off a hit costs no extra request.
+#[test]
+fn get_hit_without_refresh_makes_no_copy() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let f = RefreshFixture::new(&b, None).await;
+        f.put("aa").await;
+        assert_eq!(f.get("aa").await, 200);
+        let key = f.key("aa");
+        assert_eq!(f.settled_log().await, vec![format!("GET {key}")]);
+        assert_eq!(f.t.stats.snapshot().refreshed, 0);
+    })
+}
+
+/// The GET answers while the refresh is stuck on an endpoint that never replies, and a
+/// failing refresh changes neither the response nor the counters.
+#[test]
+fn get_hit_does_not_wait_for_the_refresh() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hole = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let stats = std::sync::Arc::new(hoard::stats::Stats::default());
+        let refresher = std::sync::Arc::new(Refresher::new(
+            r2_client(&hole, &b.key_id, &b.secret),
+            b.bucket.clone(),
+            std::time::Duration::ZERO,
+            stats.clone(),
+        ));
+        let t = common::spawn_refresh_server(
+            bucket_store(&b),
+            Some(refresher),
+            stats,
+            tempfile::tempdir().unwrap(),
+        )
+        .await;
+        let http = reqwest::Client::new();
+        let url = format!("{}/v8/artifacts/aa", t.base_url);
+        let put = http
+            .put(&url)
+            .bearer_auth(&t.token)
+            .body("data")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put.status(), 200);
+        let start = std::time::Instant::now();
+        let got = http.get(&url).bearer_auth(&t.token).send().await.unwrap();
+        assert_eq!(got.status(), 200);
+        assert_eq!(got.bytes().await.unwrap().as_ref(), b"data");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(t.stats.snapshot().refreshed, 0);
+    })
+}
+
+/// By hand against a real R2 bucket (spec §7.3): does a self-copy reset the object's age?
+/// `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=...
+/// HOARD_TEST_R2_SECRET=... HOARD_TEST_R2_BUCKET=... cargo test --test r2 -- --ignored refresh_real_r2`
+#[test]
+#[ignore = "needs a real R2 bucket"]
+fn refresh_real_r2() {
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+    let (endpoint, key_id, secret, bucket) = (
+        var("HOARD_TEST_R2_ENDPOINT"),
+        var("HOARD_TEST_R2_KEY"),
+        var("HOARD_TEST_R2_SECRET"),
+        var("HOARD_TEST_R2_BUCKET"),
+    );
+    rt().block_on(async {
+        let c = r2_client(&endpoint, &key_id, &secret);
+        let key = format!("hoard-refresh-check/{}", rand::random::<u32>());
+        let blob = hrd1(b"artifact body");
+        c.put_object()
+            .bucket(&bucket)
+            .key(&key)
+            .body(blob.clone().into())
+            .send()
+            .await
+            .unwrap();
+        let before = last_modified(&c, &bucket, &key).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let copied = refresh_object(&c, &bucket, &key).await;
+        let after = last_modified(&c, &bucket, &key).await;
+        let got = c
+            .get_object()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await
+            .unwrap();
+        let body = got.body.collect().await.unwrap().to_vec();
+        let _ = c.delete_object().bucket(&bucket).key(&key).send().await;
+        copied.unwrap();
+        eprintln!("last_modified before={before:?} after={after:?}");
+        assert!(
+            after > before,
+            "R2 self-copy did not reset last_modified: re-PUT instead (spec §7.3)"
+        );
+        assert_eq!(body, blob);
     })
 }

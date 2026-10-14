@@ -74,6 +74,7 @@ pub fn fs_config(root: impl AsRef<std::path::Path>) -> Config {
         max_age_days: 7,
         max_size: 1 << 30,
         write_behind: false,
+        refresh_on_hit: false,
     }
 }
 
@@ -164,12 +165,26 @@ pub async fn spawn_write_behind_server(
     spawn_server(parts, Mode::ReadWrite, false, dir).await
 }
 
+/// A read-write server over `store` that refreshes R2 objects on a GET hit through `refresher`.
+pub async fn spawn_refresh_server(
+    store: Store,
+    refresher: Option<Arc<hoard::r2::refresh::Refresher>>,
+    stats: Arc<Stats>,
+    dir: tempfile::TempDir,
+) -> TestServer {
+    let mut parts = ServerParts::new(Arc::new(store));
+    parts.stats = stats;
+    parts.refresh = refresher;
+    spawn_server(parts, Mode::ReadWrite, false, dir).await
+}
+
 /// The shared pieces of a test server's state.
 struct ServerParts {
     store: Arc<Store>,
     stats: Arc<Stats>,
     rate_gate: Arc<RateGate>,
     write_behind: Option<Arc<WriteBehind>>,
+    refresh: Option<Arc<hoard::r2::refresh::Refresher>>,
 }
 
 impl ServerParts {
@@ -179,6 +194,7 @@ impl ServerParts {
             stats: Arc::default(),
             rate_gate: Arc::default(),
             write_behind: None,
+            refresh: None,
         }
     }
 }
@@ -204,6 +220,7 @@ async fn spawn_server(
         prefix: "cache/".into(),
         cache_version: "v1".into(),
         write_behind: parts.write_behind.clone(),
+        refresh: parts.refresh.clone(),
         shutdown: tx,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

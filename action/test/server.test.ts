@@ -25,6 +25,7 @@ const baseSettings: Settings = {
   r2Lifecycle: "auto",
   maxAgeDays: 7,
   maxSize: "5GB",
+  refreshOnHit: false,
   version: "0.0.0-dev",
   warnings: [],
 };
@@ -257,6 +258,13 @@ describe("serveEnv", () => {
       {},
     );
     expect(env).not.toHaveProperty("HOARD_R2_ACCOUNT_ID");
+  });
+
+  test("refresh-on-hit is passed as HOARD_REFRESH_ON_HIT; an inherited value is not trusted", () => {
+    const on = serveEnv({ ...baseSettings, refreshOnHit: true }, {});
+    expect(on.HOARD_REFRESH_ON_HIT).toBe("true");
+    const off = serveEnv(baseSettings, { HOARD_REFRESH_ON_HIT: "true" });
+    expect(off).not.toHaveProperty("HOARD_REFRESH_ON_HIT");
   });
 
   test("github storage passes the environment through, without HOARD_TOKEN", () => {

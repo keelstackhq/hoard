@@ -164,7 +164,8 @@ pub async fn get_artifact(State(s): State<AppState>, Path(hash): Path<String>) -
     if s.no_reads {
         return miss();
     }
-    let (h, body) = match s.store.get(&s.turbo_key(&hash)).await {
+    let key = s.turbo_key(&hash);
+    let (h, body) = match s.store.get(&key).await {
         Ok(GetOutcome::Hit(h, body)) => (h, body),
         Ok(GetOutcome::Miss) => return miss(),
         Ok(GetOutcome::Corrupt) => {
@@ -188,7 +189,12 @@ pub async fn get_artifact(State(s): State<AppState>, Path(hash): Path<String>) -
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    (StatusCode::OK, headers, Body::from_stream(stream)).into_response()
+    let response = (StatusCode::OK, headers, Body::from_stream(stream)).into_response();
+    // Background and non-blocking: the response above never waits for it.
+    if let Some(refresh) = &s.refresh {
+        refresh.on_hit(&key);
+    }
+    response
 }
 
 pub async fn put_artifact(

@@ -49,6 +49,10 @@ inputs:
     description: "Size cap for the R2 prefix, e.g. 5GB; the oldest objects are pruned above it (r2)."
     required: false
     default: 5GB
+  refresh-on-hit:
+    description: "R2 only: when a cache hit reads an object older than max-age-days / 2, copy it onto itself so the lifecycle rule does not expire what is still in use (true or false)."
+    required: false
+    default: "false"
   vp-max-size:
     description: "Vite+ only: skip saving the task cache when it is larger than this, e.g. 2GB (then run `vp cache clean`)."
     required: false

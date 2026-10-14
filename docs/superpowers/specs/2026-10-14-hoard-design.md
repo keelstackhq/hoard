@@ -107,6 +107,7 @@ secrets as `""`).
 | `max-size` | `5GB` | R2 size cap; accepts `KB`, `MB`, `GB`, `TB` (powers of 1000) |
 | `vp-max-size` | `2GB` | `vp save` only: when the regular files of the task-cache directory add up to more, the save is skipped with a hint to run `vp cache clean` (hoard never edits Vite+'s SQLite cache). Same units as `max-size` |
 | `workspace`, `os-arch`, `run-key` | `.`, this machine, run id | `vp restore` / `vp save` only (§4.1) |
+| `refresh-on-hit` | off | Boolean flag (`HOARD_REFRESH_ON_HIT=true`, also `yes`/`no`, `1`/`0`; action input of the same name): `storage=r2` with `mode=read-write` only, ignored elsewhere with one info log (§7.3) |
 | `write-behind` | `auto` | `auto` \| `on` \| `off`; `auto` = on for `storage=github`, off for `r2`/`fs`. PUTs are answered once spooled to disk and uploaded in the background (§5) |
 
 R2 endpoint: `https://<account_id>.r2.cloudflarestorage.com` unless `r2-endpoint` overrides it,
@@ -316,11 +317,30 @@ something was deleted, `Prune: failed (reason)` on an error or timeout, nothing 
 The size cap counts everything under `{prefix}`, so do not nest prefixes in one bucket
 (`cache/` and `cache/team/`): a prune of the outer prefix deletes the inner one's objects.
 
-### 7.3 Layer 3 — refresh-on-hit (optional, milestone 3)
+### 7.3 Layer 3 — refresh-on-hit (optional)
 
-`refresh-on-hit: true`: on a GET hit of an object older than `max-age-days / 2`, re-write it once
-per run (copy to itself or re-PUT) so popular artifacts never expire. Must be validated against R2
-first (does a same-key copy reset the age?).
+`refresh-on-hit` (off by default; `storage=r2`, `mode=read-write`): the lifecycle rule counts an
+object's age from its last write, so an artifact that is read daily would still expire. On a
+GET hit, once per object per run, hoard checks the object's age and, when it is older than
+`max-age-days / 2`, copies it onto itself (`CopyObject`, source = destination,
+`MetadataDirective=REPLACE`; envelopes carry no user metadata, so only `Last-Modified`
+changes). Details:
+
+- Background only: the task is spawned after the response is built; the response never waits
+  for it, and any error is logged (redacted) and ignored.
+- Cost per object per run: one `HEAD` (read `Last-Modified`) and, when old, one `CopyObject`.
+  A per-run set of keys makes later hits free; a key whose check was skipped because all 4
+  refresh slots were busy is not added to the set and may be tried on a later hit.
+- Success counts `refreshed` (§9); the summary says `Refreshed: N objects` when `N > 0`.
+- Needs `s3:GetObject` and `s3:PutObject` on the prefix (`CopyObject`), which `hoard` already
+  needs for writes.
+
+**Unverified on real R2.** The self-copy is tested on MinIO (last-modified moves forward, the
+body is unchanged). Whether Cloudflare R2 resets the age with a self-copy has not been checked
+yet; run once by hand:
+`HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=… HOARD_TEST_R2_BUCKET=… cargo test --test r2 -- --ignored refresh_real_r2`.
+If R2 does not move `Last-Modified`, switch `refresh_object` to a re-PUT of the same envelope
+and record the finding here.
 
 ## 8. Modes and trust
 
@@ -334,10 +354,11 @@ first (does a same-key copy reset the age?).
 ## 9. Stats and job summary
 
 `Stats { hits, misses, puts, put_skipped_existing, put_errors, rate_limited, corrupt,
-bytes_down, bytes_up, time_saved_ms }` — `time_saved_ms` sums `duration_ms` of every hit.
+bytes_down, bytes_up, time_saved_ms, refreshed }` — `time_saved_ms` sums `duration_ms` of every hit;
+`refreshed` counts R2 objects renewed by refresh-on-hit (§7.3).
 The storage line is `Storage: github`, `Storage: r2 (<bucket>/<prefix>)` or `Storage: fs (<root>)`;
 when `put_errors > 0` the line ends with `Upload errors: N` (so a broken storage never looks like
-a cold cache), then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`. When the
+a cold cache), then, when `refreshed > 0`, with `Refreshed: N objects`, then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`. When the
 write-behind drain timed out, `Upload queue: N dropped at shutdown` comes right after the
 startup lines (before the prune line); the dropped uploads are also in `Upload errors`.
 

@@ -175,6 +175,10 @@ pub struct ServeArgs {
     /// Upload PUTs in the background after spooling them to disk (auto: on for github).
     #[arg(long, env = "HOARD_WRITE_BEHIND", value_enum, default_value = "auto")]
     pub write_behind: WriteBehindMode,
+    /// R2 only: on a GET hit, copy objects older than max-age-days / 2 onto themselves so the
+    /// lifecycle rule does not expire what is still in use (at most once per object per run).
+    #[arg(long, env = "HOARD_REFRESH_ON_HIT", value_parser = clap::builder::BoolishValueParser::new())]
+    pub refresh_on_hit: bool,
 }
 
 fn redact<T>(v: &Option<T>) -> Option<&'static str> {
@@ -203,6 +207,7 @@ impl fmt::Debug for ServeArgs {
             .field("max_age_days", &self.max_age_days)
             .field("max_size", &self.max_size)
             .field("write_behind", &self.write_behind)
+            .field("refresh_on_hit", &self.refresh_on_hit)
             .finish()
     }
 }
@@ -282,6 +287,8 @@ pub struct Config {
     pub max_size: u64,
     /// PUTs are spooled and uploaded in the background (`write-behind`, `auto` resolved).
     pub write_behind: bool,
+    /// `refresh-on-hit` as set; only `storage=r2` acts on it.
+    pub refresh_on_hit: bool,
 }
 
 impl fmt::Debug for Config {
@@ -302,6 +309,7 @@ impl fmt::Debug for Config {
             .field("max_age_days", &self.max_age_days)
             .field("max_size", &self.max_size)
             .field("write_behind", &self.write_behind)
+            .field("refresh_on_hit", &self.refresh_on_hit)
             .finish()
     }
 }
@@ -384,6 +392,7 @@ impl TryFrom<ServeArgs> for Config {
                 WriteBehindMode::On => true,
                 WriteBehindMode::Off => false,
             },
+            refresh_on_hit: a.refresh_on_hit,
         })
     }
 }
@@ -679,6 +688,16 @@ mod tests {
             let a = ServeArgs::parse_from(["serve", "--storage", "fs", "--max-age-days", ok]);
             assert!(Config::try_from(a).is_ok());
         }
+    }
+    #[test]
+    fn refresh_on_hit_flag() {
+        let parse = |args: &[&str]| {
+            Config::try_from(ServeArgs::parse_from(args.iter().copied()))
+                .unwrap()
+                .refresh_on_hit
+        };
+        assert!(!parse(&["serve", "--storage", "fs"]));
+        assert!(parse(&["serve", "--storage", "fs", "--refresh-on-hit"]));
     }
     #[test]
     fn no_reads_flag() {

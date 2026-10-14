@@ -17,6 +17,8 @@ pub struct Stats {
     pub bytes_down: AtomicU64,
     pub bytes_up: AtomicU64,
     pub time_saved_ms: AtomicU64,
+    /// R2 objects whose age was reset by refresh-on-hit.
+    pub refreshed: AtomicU64,
 }
 
 /// Point-in-time copy of [`Stats`].
@@ -32,6 +34,7 @@ pub struct StatsSnapshot {
     pub bytes_down: u64,
     pub bytes_up: u64,
     pub time_saved_ms: u64,
+    pub refreshed: u64,
 }
 
 impl Stats {
@@ -48,6 +51,7 @@ impl Stats {
             bytes_down: load(&self.bytes_down),
             bytes_up: load(&self.bytes_up),
             time_saved_ms: load(&self.time_saved_ms),
+            refreshed: load(&self.refreshed),
         }
     }
 }
@@ -176,6 +180,7 @@ mod tests {
         st.put_errors.fetch_add(1, Ordering::Relaxed);
         st.time_saved_ms.fetch_add(950, Ordering::Relaxed);
         st.bytes_up.fetch_add(7, Ordering::Relaxed);
+        st.refreshed.fetch_add(3, Ordering::Relaxed);
         let snap = st.snapshot();
         assert_eq!(
             snap,
@@ -184,6 +189,7 @@ mod tests {
                 put_errors: 1,
                 time_saved_ms: 950,
                 bytes_up: 7,
+                refreshed: 3,
                 ..Default::default()
             }
         );
@@ -198,7 +204,7 @@ mod tests {
         .unwrap();
         assert_eq!(json["hits"], 5);
         assert_eq!(json["put_skipped_existing"], 0);
-        assert_eq!(json.as_object().unwrap().len(), 10);
+        assert_eq!(json.as_object().unwrap().len(), 11);
     }
 
     #[test]

@@ -52,6 +52,7 @@ test("defaults", () => {
     r2Lifecycle: "auto",
     maxAgeDays: 7,
     maxSize: "5GB",
+    refreshOnHit: false,
     vpMaxSize: "2GB",
     version: VERSION,
     warnings: [],
@@ -146,6 +147,23 @@ describe("validation", () => {
       {},
     );
     expect(s).toMatchObject({ maxSize: "20GB", cacheVersion: "v2", vpMaxSize: "500MB" });
+  });
+});
+
+describe("refresh-on-hit", () => {
+  test("accepts yes/no spellings; default false", () => {
+    expect(resolveSettings({}, {}).refreshOnHit).toBe(false);
+    for (const v of ["true", "TRUE", "yes", "on", "1"]) {
+      expect(resolveSettings({ "refresh-on-hit": v }, {}).refreshOnHit).toBe(true);
+    }
+    for (const v of ["false", "no", "off", "0", ""]) {
+      expect(resolveSettings({ "refresh-on-hit": v }, {}).refreshOnHit).toBe(false);
+    }
+  });
+  test("anything else is refused", () => {
+    expect(() => resolveSettings({ "refresh-on-hit": "maybe" }, {})).toThrow(
+      /invalid refresh-on-hit "maybe": use true or false/,
+    );
   });
 });
 

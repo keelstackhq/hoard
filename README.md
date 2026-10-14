@@ -49,6 +49,7 @@ All inputs are optional. Inputs marked (r2) are used only with `storage: r2`.
 | `r2-lifecycle` | `auto` | `auto` (set the bucket's expiry rule), `verify` (fail if it is missing) or `manual` (r2). |
 | `max-age-days` | `7` | Delete R2 objects this many days after their last write, 1–36500 (r2). |
 | `max-size` | `5GB` | Size cap for the R2 prefix; the oldest objects are pruned above it (r2). |
+| `refresh-on-hit` | `false` | R2 only: reset the age of objects older than `max-age-days / 2` when a cache hit reads them (once per object per run), so artifacts in use never expire. |
 | `vp-max-size` | `2GB` | Vite+ only: skip saving the task cache when it is larger than this (then run `vp cache clean`). |
 | `version` | empty | hoard binary version. Empty: this action's own release, the only one it can verify. |
 
@@ -143,5 +144,11 @@ The full list with defaults is the table in
 `--write-behind auto|on|off` (`HOARD_WRITE_BEHIND`, default `auto`: on for `storage=github`,
 off for `r2` and `fs`) answers each PUT once the artifact is spooled to disk and uploads it in
 the background; shutdown waits up to 120 s for the queue.
+
+`--refresh-on-hit` (`HOARD_REFRESH_ON_HIT=true`; R2 only) copies an object onto itself in the
+background when a cache hit reads it and it is older than `max-age-days / 2`, so artifacts in
+use do not expire. It is verified on MinIO; see
+[spec §7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-optional)
+for the one manual check against real R2.
 
 License: MIT.

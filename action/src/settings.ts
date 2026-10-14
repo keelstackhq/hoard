@@ -21,6 +21,8 @@ export interface Settings {
   r2Lifecycle: "auto" | "verify" | "manual";
   maxAgeDays: number;
   maxSize: string;
+  /** R2 only: refresh objects older than max-age-days / 2 when they are read (§7.3). */
+  refreshOnHit: boolean;
   /** `vp save` skips a Vite+ task cache larger than this (§4.2). */
   vpMaxSize: string;
   /** The hoard binary version; always the action's own release (the only verified one). */
@@ -60,6 +62,14 @@ function maxAgeDays(value: string): number {
     );
   }
   return n;
+}
+
+/** A yes/no input: true, false, yes, no, on, off, 1 or 0 (any case). */
+function bool(name: string, value: string): boolean {
+  const v = value.toLowerCase();
+  if (["true", "yes", "on", "1"].includes(v)) return true;
+  if (["false", "no", "off", "0"].includes(v)) return false;
+  throw new Error(`invalid ${name} ${JSON.stringify(value)}: use true or false`);
 }
 
 /** A size as the binary parses it: digits and an optional B, KB, MB, GB or TB (any case). */
@@ -125,6 +135,7 @@ export function resolveSettings(inputs: Record<string, string>, env: NodeJS.Proc
     r2Lifecycle: oneOf("r2-lifecycle", input("r2-lifecycle", "auto"), LIFECYCLES),
     maxAgeDays: maxAgeDays(input("max-age-days", "7")),
     maxSize: input("max-size", "5GB"),
+    refreshOnHit: bool("refresh-on-hit", input("refresh-on-hit", "false")),
     vpMaxSize: size("vp-max-size", input("vp-max-size", "2GB")),
     version,
     warnings,

@@ -76,11 +76,14 @@ export function serveArgs(s: Settings, runnerTemp: string, id = ""): string[] {
 
 /**
  * The child's environment: the full runner env (the GitHub cache storage needs it, §6.4) plus
- * the R2 account ID and keys. An inherited HOARD_TOKEN is dropped so nothing outside can choose the token.
+ * the R2 account ID and keys and `refresh-on-hit`. An inherited HOARD_TOKEN is dropped so nothing outside can choose the token.
  */
 export function serveEnv(s: Settings, baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.HOARD_TOKEN;
+  // An inherited value must not turn the option on behind the input's back.
+  if (s.refreshOnHit) env.HOARD_REFRESH_ON_HIT = "true";
+  else delete env.HOARD_REFRESH_ON_HIT;
   if (s.r2) {
     if (s.r2.accountId) env.HOARD_R2_ACCOUNT_ID = s.r2.accountId;
     env.HOARD_R2_ACCESS_KEY_ID = s.r2.accessKeyId;
