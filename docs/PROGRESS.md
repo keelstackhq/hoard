@@ -25,6 +25,10 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   --r2-account-id <id> --r2-bucket <bucket>` once, stop it, then `hoard doctor --storage r2 --r2-account-id <id>
   --r2-bucket <bucket>` — it must print `✓ lifecycle rule hoard-cache- (7 days)`. If it says the rule differs, report
   the output of `npx wrangler r2 bucket lifecycle list <bucket>`.
+  In the same session, check immutable keys for large artifacts on R2: run `STORAGE=r2 tests/e2e/turbo.sh` is not
+  enough (MinIO); instead PUT the same >8 MiB artifact twice through `hoard serve --storage r2` (e.g. two parallel
+  `curl -X PUT --data-binary @big.bin` against `/v8/artifacts/abc`) and confirm the object is unchanged
+  (`If-None-Match: *` on CompleteMultipartUpload must be honoured by R2).
 - **01-core-r2 CI — workflow never run on GitHub.** `.github/workflows/ci.yml` (jobs `rust`, `e2e`) triggers only
   on pushes to `main` and on pull requests, so it has not run yet; everything it does passes locally. Action: open a
   PR from `claude/admiring-ride-kl6qd9` (or push to `main`) and check both jobs go green; if `pnpm/action-setup` or
