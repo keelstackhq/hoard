@@ -29,10 +29,13 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Validate version input
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "$GITHUB_REF_TYPE" != "branch" ]; then
             echo "::error::run this workflow from a branch (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); the release commit is pushed back to it"
@@ -47,7 +50,7 @@ jobs:
             echo "::error::version input '$VERSION' does not match Cargo.toml version '$cargo_version': bump Cargo.toml (and Cargo.lock) on this branch first"
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" --silent 2>/dev/null; then
             echo "::error::tag v$VERSION already exists: pick a new version"
             exit 1
           fi
@@ -83,19 +86,19 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
+      # No build cache here: release binaries are built from a clean slate.
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
       # aws-lc-sys (rustls' crypto provider) compiles C; on Linux zig cc is the C compiler and
       # linker for musl. Its pregenerated bindings cover all five targets, so no cmake/bindgen.
       - if: matrix.zigbuild
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
       - if: matrix.zigbuild
@@ -105,7 +108,7 @@ jobs:
       # aws-lc-sys assembles its x86_64 Windows code with NASM; install it rather than use the
       # crate's prebuilt NASM objects.
       - if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
       - name: Build
         run: |
           if [ "${{ matrix.zigbuild }}" = "true" ]; then
@@ -126,7 +129,7 @@ jobs:
           tar -czf "dist-assets/hoard-${{ matrix.target }}.tar.gz" \
             -C "target/${{ matrix.target }}/release" "hoard${{ matrix.exe }}"
           tar -tzf "dist-assets/hoard-${{ matrix.target }}.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hoard-${{ matrix.target }}
           path: dist-assets/hoard-${{ matrix.target }}.tar.gz
@@ -139,16 +142,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.28.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: hoard-*
           path: dist-assets
@@ -169,8 +172,6 @@ jobs:
             exit 1
           fi
       - name: Commit and tag
-        env:
-          DRAFT: ${{ inputs.draft }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -178,14 +179,6 @@ jobs:
           git commit -m "chore(release): v$VERSION"
           git tag -a "v$VERSION" -m "v$VERSION"
           git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/v$VERSION"
-          # Move the major tag (v1 → this release) so `uses: …@v1` picks it up. Only for stable,
-          # non-draft releases; this is the only tag ever force-pushed.
-          case "$VERSION" in *-*) prerelease=true ;; *) prerelease=false ;; esac
-          if [ "$prerelease" = "false" ] && [ "$DRAFT" != "true" ]; then
-            major="v${VERSION%%.*}"
-            git tag -f -a "$major" -m "$major → v$VERSION"
-            git push --force origin "refs/tags/$major"
-          fi
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -196,3 +189,36 @@ jobs:
           case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
           gh release create "v$VERSION" dist-assets/hoard-*.tar.gz \
             --verify-tag --title "v$VERSION" --generate-notes "${flags[@]}"
+      - name: Verify release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          expected=$(find dist-assets -maxdepth 1 -name 'hoard-*.tar.gz' -printf '%f\n' | sort)
+          actual=$(gh release view "v$VERSION" --json assets -q '.assets[].name' | grep -E '^hoard-.*\.tar\.gz$' | sort)
+          echo "$actual"
+          if [ "$(echo "$expected" | wc -l)" -ne 5 ] || [ "$expected" != "$actual" ]; then
+            echo "::error::release v$VERSION does not have exactly the five hoard-<target>.tar.gz assets; v-major tag not moved. See docs/RELEASING.md (cleanup after a partial failure)"
+            exit 1
+          fi
+      # Last step, only after the release and its assets exist. Moves v<major> (e.g. v1) so
+      # `uses: …@v1` picks up this release: only for stable, non-draft releases, and only forward
+      # (a backport release below the newest v<major>.* stable tag leaves it alone). This is the
+      # only tag ever force-pushed.
+      - name: Move major tag
+        env:
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          case "$VERSION" in *-*) echo "pre-release: v-major tag not moved"; exit 0 ;; esac
+          if [ "$DRAFT" = "true" ]; then
+            echo "draft: v-major tag not moved; see docs/RELEASING.md after publishing the draft"
+            exit 0
+          fi
+          major="v${VERSION%%.*}"
+          newest=$(git ls-remote --tags --refs origin "refs/tags/$major.*" | sed 's#.*refs/tags/##' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+          if [ "$newest" != "v$VERSION" ]; then
+            echo "newest stable $major.* tag is $newest, not v$VERSION: $major not moved (backport)"
+            exit 0
+          fi
+          git tag -f -a "$major" -m "$major -> v$VERSION" "v$VERSION^{commit}"
+          git push --force origin "refs/tags/$major"

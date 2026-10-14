@@ -304,7 +304,8 @@ main:
 1. Resolve `mode`/`storage` (§8) and the tool (`turbo.json` present → turbo; `vite.config.*` with
    `vite-plus` in the root `package.json` → vp; both allowed).
 2. Download `hoard-<target>.tar.gz` from the GitHub release of `version`, verify its SHA-256
-   against `checksums.json` baked into `dist/` at release time, cache it with `@actions/tool-cache`.
+   against `action/src/checksums.generated.ts` (written at release time, bundled into `dist/`),
+   cache it with `@actions/tool-cache`.
 3. Spawn `hoard serve` detached (`stdio` to `$RUNNER_TEMP/hoard.log`, `unref()`), passing the
    full environment (includes `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL`).
 4. Poll `/_hoard/health` every 100 ms up to 10 s; on timeout print the log and fail.
@@ -316,6 +317,12 @@ post: `POST /_hoard/shutdown`, append the summary to `$GITHUB_STEP_SUMMARY`, set
 
 Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`,
 `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
+
+Release (`.github/workflows/release.yml`, `workflow_dispatch` with `version` and `draft`; see
+`docs/RELEASING.md`): build the five targets, write the checksums file, rebuild `dist/`, commit
+`chore(release): vX.Y.Z` and push it with tag `vX.Y.Z` → create the GitHub release → verify it has
+exactly the five assets → only then move `vX` to it. `vX` moves only for stable, non-draft releases
+and only forward (never below the newest stable `vX.*` tag, so a backport leaves it alone).
 
 ## 11. Testing
 
