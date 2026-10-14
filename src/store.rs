@@ -1,6 +1,6 @@
 //! Object store over an OpenDAL `Operator`. Every object is one HRD1 blob (see `envelope`).
 //!
-//! Backends: fs now; S3/R2 and GitHub cache arrive in later tasks.
+//! Backends: fs and S3/R2; the GitHub cache arrives in a later milestone.
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -12,6 +12,11 @@ use crate::envelope::{Header, MAX_HEADER_LEN, PREFIX_LEN, decode_header, encode_
 
 /// Scratch directory (inside the fs root) for in-flight writes.
 const FS_TMP_DIR: &str = ".hoard-tmp";
+
+/// S3 multipart part size. Incoming HTTP frames are small; buffering them into parts of at
+/// least 5 MiB (the S3 minimum) keeps multipart completion valid. Bodies smaller than this
+/// go up in one conditional PUT.
+const S3_CHUNK: usize = 8 * 1024 * 1024;
 
 /// Bytes read to decode a header: fixed prefix plus the largest accepted JSON header.
 const HEAD_READ_LEN: u64 = (PREFIX_LEN + MAX_HEADER_LEN) as u64;
@@ -76,7 +81,19 @@ pub fn build_operator(cfg: &Config) -> anyhow::Result<Operator> {
             let fs = services::Fs::default().root(root).atomic_write_dir(tmp);
             Ok(Operator::new(fs)?)
         }
-        Storage::R2 => anyhow::bail!("storage=r2 is not yet supported in this build"),
+        Storage::R2 => {
+            let r2 = cfg
+                .r2
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("storage=r2 needs the r2-* settings"))?;
+            crate::r2::s3_operator(
+                &r2.endpoint(),
+                crate::r2::R2_REGION,
+                &r2.bucket,
+                &r2.access_key_id,
+                &r2.secret_access_key,
+            )
+        }
         Storage::Github => anyhow::bail!("storage=github is not yet supported in this build"),
     }
 }
@@ -84,6 +101,10 @@ pub fn build_operator(cfg: &Config) -> anyhow::Result<Operator> {
 #[derive(Clone)]
 pub struct Store {
     pub op: Operator,
+    /// fs backend: hide the scratch dir from `list`.
+    is_fs: bool,
+    /// Writer chunk size (S3 only).
+    chunk: Option<usize>,
 }
 
 fn is_condition_failed(e: &opendal::Error) -> bool {
@@ -95,15 +116,27 @@ fn is_condition_failed(e: &opendal::Error) -> bool {
 
 impl Store {
     pub fn new(op: Operator) -> Self {
-        Self { op }
+        let scheme = op.info().scheme();
+        Self {
+            is_fs: scheme == "fs",
+            chunk: (scheme == "s3").then_some(S3_CHUNK),
+            op,
+        }
     }
 
     /// Reads the first `PREFIX_LEN + MAX_HEADER_LEN` bytes (never the body). Objects shorter
-    /// than that are fine: a range past EOF is clamped using the object's size.
+    /// than that are fine: a range past EOF is clamped using the object's size. fs reports
+    /// such a range as `RangeNotSatisfied`; S3 answers with fewer bytes, which OpenDAL
+    /// reports as `Unexpected` (short read). Keys are immutable, so re-reading is safe.
     async fn read_prefix(&self, reader: &Reader, key: &str) -> Result<Bytes, StoreError> {
         match reader.read(0..HEAD_READ_LEN).await {
             Ok(b) => Ok(b.to_bytes()),
-            Err(e) if e.kind() == ErrorKind::RangeNotSatisfied => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::RangeNotSatisfied | ErrorKind::Unexpected
+                ) =>
+            {
                 let size = self.op.stat(key).await?.content_length().min(HEAD_READ_LEN);
                 if size == 0 {
                     return Ok(Bytes::new());
@@ -159,7 +192,11 @@ impl Store {
                 Err(e) => return Err(e.into()),
             }
         }
-        let mut writer = match self.op.writer_with(key).if_not_exists(conditional).await {
+        let mut fut = self.op.writer_with(key).if_not_exists(conditional);
+        if let Some(chunk) = self.chunk {
+            fut = fut.chunk(chunk);
+        }
+        let mut writer = match fut.await {
             Ok(w) => w,
             Err(e) if conditional && is_condition_failed(&e) => {
                 return Ok(PutOutcome::AlreadyExists);
@@ -185,8 +222,15 @@ impl Store {
         }
         match writer.close().await {
             Ok(_) => Ok(PutOutcome::Created),
-            Err(e) if conditional && is_condition_failed(&e) => Ok(PutOutcome::AlreadyExists),
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                // A rejected or failed completion leaves S3 multipart parts behind; drop them.
+                let _ = writer.abort().await;
+                if conditional && is_condition_failed(&e) {
+                    Ok(PutOutcome::AlreadyExists)
+                } else {
+                    Err(e.into())
+                }
+            }
         }
     }
 
@@ -203,7 +247,7 @@ impl Store {
                 continue;
             }
             let key = entry.path().to_string();
-            if key.starts_with(&format!("{FS_TMP_DIR}/")) {
+            if self.is_fs && key.starts_with(&format!("{FS_TMP_DIR}/")) {
                 continue; // in-flight fs write
             }
             let mut meta = entry.metadata().clone();

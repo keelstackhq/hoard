@@ -50,7 +50,7 @@ fn unsupported_backends_fail_clearly() {
         build_operator(&cfg)
             .unwrap_err()
             .to_string()
-            .contains("not yet supported")
+            .contains("r2-* settings")
     );
     cfg.storage = Storage::Github;
     assert!(
@@ -65,4 +65,20 @@ fn unsupported_backends_fail_clearly() {
 async fn fs_list_hides_scratch_files() {
     let (s, _d) = fs_store();
     c::check_list_hides_scratch_files(&s).await;
+}
+
+#[tokio::test]
+async fn fs_large_body_in_small_chunks() {
+    let (s, _d) = fs_store();
+    c::check_large_body_in_small_chunks(&s).await;
+}
+#[tokio::test]
+async fn fs_put_existing_large_keeps_original() {
+    let (s, _d) = fs_store();
+    c::check_put_existing_large_keeps_original(&s).await;
+}
+#[tokio::test]
+async fn fs_failed_large_body_leaves_no_object() {
+    let (s, _d) = fs_store();
+    c::check_failed_large_body_leaves_no_object(&s).await;
 }

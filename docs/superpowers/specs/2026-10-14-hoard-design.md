@@ -96,12 +96,15 @@ secrets as `""`).
 | `summary-file` | none | Markdown summary written on shutdown |
 | `fs-root` | `./.hoard/store` | `fs` storage only (tests, local use) |
 | `r2-account-id`, `r2-access-key-id`, `r2-secret-access-key`, `r2-bucket` | — | required for `r2` |
+| `r2-endpoint` | — | Optional S3 endpoint URL override (e.g. MinIO for tests and local use); when set, `r2-account-id` is not required |
 | `r2-prefix` | `cache/` | must end with `/` |
 | `r2-lifecycle` | `auto` | `auto` \| `verify` \| `manual`; see §7.1 |
 | `max-age-days` | `7` | R2 lifecycle expiry |
 | `max-size` | `5GB` | R2 size cap; accepts `KB`, `MB`, `GB`, `TB` (powers of 1000) |
 
-R2 endpoint: `https://<account_id>.r2.cloudflarestorage.com`, region `auto`.
+R2 endpoint: `https://<account_id>.r2.cloudflarestorage.com` unless `r2-endpoint` overrides it,
+region `auto`, path-style addressing. Only the configured keys are used: credentials and config
+from `AWS_*` env vars, `~/.aws` and instance metadata are ignored.
 
 ## 5. HTTP API (Turborepo)
 

@@ -3,7 +3,7 @@
 
 pub mod store_checks;
 
-use hoard::config::{Config, LifecycleMode, Mode, Storage};
+use hoard::config::{Config, LifecycleMode, Mode, R2Config, Storage};
 
 /// Config for the fs backend rooted under `root`: port 0, and the port, token and summary
 /// files inside `root`.
@@ -91,4 +91,71 @@ pub async fn wait_for_file(path: &std::path::Path) -> String {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("{} did not appear", path.display());
+}
+
+/// A fresh, empty bucket on the MinIO server named by `HOARD_TEST_S3_ENDPOINT`.
+#[derive(Debug, Clone)]
+pub struct MinioBucket {
+    pub endpoint: String,
+    pub bucket: String,
+    pub key_id: String,
+    pub secret: String,
+}
+
+/// Creates a uniquely named bucket for one test. `None` (with a note on stderr) when
+/// `HOARD_TEST_S3_ENDPOINT` is unset; CI always sets it. Credentials come from
+/// `HOARD_TEST_S3_KEY` / `HOARD_TEST_S3_SECRET`, defaulting to MinIO's `minio` / `minio123`.
+pub async fn minio_bucket() -> Option<MinioBucket> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let Some(endpoint) = var("HOARD_TEST_S3_ENDPOINT") else {
+        eprintln!("skipping: HOARD_TEST_S3_ENDPOINT unset");
+        return None;
+    };
+    let key_id = var("HOARD_TEST_S3_KEY").unwrap_or_else(|| "minio".into());
+    let secret = var("HOARD_TEST_S3_SECRET").unwrap_or_else(|| "minio123".into());
+    let suffix: String = rand::random::<[u8; 8]>()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let bucket = format!("hoard-test-{suffix}");
+    s3_client(&endpoint, &key_id, &secret)
+        .create_bucket()
+        .bucket(&bucket)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("cannot create bucket {bucket} on {endpoint}: {e:?}"));
+    Some(MinioBucket {
+        endpoint,
+        bucket,
+        key_id,
+        secret,
+    })
+}
+
+/// An aws-sdk-s3 client for MinIO with static credentials and path-style addressing.
+pub fn s3_client(endpoint: &str, key_id: &str, secret: &str) -> aws_sdk_s3::Client {
+    use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+    let conf = aws_sdk_s3::Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .endpoint_url(endpoint)
+        .region(Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(key_id, secret, None, None, "hoard-test"))
+        .force_path_style(true)
+        .build();
+    aws_sdk_s3::Client::from_conf(conf)
+}
+
+/// Config for the R2 backend pointed at `b` through the `r2-endpoint` override.
+pub fn r2_config(root: impl AsRef<std::path::Path>, b: &MinioBucket) -> Config {
+    let mut cfg = fs_config(root);
+    cfg.storage = Storage::R2;
+    cfg.r2 = Some(R2Config {
+        account_id: None,
+        endpoint: Some(b.endpoint.clone()),
+        access_key_id: b.key_id.clone(),
+        secret_access_key: b.secret.clone(),
+        bucket: b.bucket.clone(),
+        prefix: "cache/".into(),
+    });
+    cfg
 }

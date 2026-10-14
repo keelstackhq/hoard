@@ -109,6 +109,9 @@ pub struct ServeArgs {
     pub fs_root: PathBuf,
     #[arg(long, env = "HOARD_R2_ACCOUNT_ID")]
     pub r2_account_id: Option<String>,
+    /// S3 endpoint URL override (e.g. MinIO); when set, r2-account-id is not needed.
+    #[arg(long, env = "HOARD_R2_ENDPOINT")]
+    pub r2_endpoint: Option<String>,
     #[arg(long, env = "HOARD_R2_ACCESS_KEY_ID")]
     pub r2_access_key_id: Option<String>,
     #[arg(long, env = "HOARD_R2_SECRET_ACCESS_KEY")]
@@ -142,6 +145,7 @@ impl fmt::Debug for ServeArgs {
             .field("summary_file", &self.summary_file)
             .field("fs_root", &self.fs_root)
             .field("r2_account_id", &self.r2_account_id)
+            .field("r2_endpoint", &self.r2_endpoint)
             .field("r2_access_key_id", &redact(&self.r2_access_key_id))
             .field("r2_secret_access_key", &redact(&self.r2_secret_access_key))
             .field("r2_bucket", &self.r2_bucket)
@@ -173,7 +177,10 @@ pub fn drop_empty_hoard_env() {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct R2Config {
-    pub account_id: String,
+    /// `None` only when `endpoint` overrides the R2 endpoint.
+    pub account_id: Option<String>,
+    /// Endpoint override (`r2-endpoint`), e.g. a MinIO URL.
+    pub endpoint: Option<String>,
     pub access_key_id: String,
     pub secret_access_key: String,
     pub bucket: String,
@@ -181,8 +188,15 @@ pub struct R2Config {
 }
 
 impl R2Config {
+    /// The `r2-endpoint` override if set, else `https://<account_id>.r2.cloudflarestorage.com`.
     pub fn endpoint(&self) -> String {
-        format!("https://{}.r2.cloudflarestorage.com", self.account_id)
+        match (&self.endpoint, &self.account_id) {
+            (Some(e), _) => e.trim_end_matches('/').to_string(),
+            (None, a) => format!(
+                "https://{}.r2.cloudflarestorage.com",
+                a.as_deref().unwrap_or_default()
+            ),
+        }
     }
 }
 
@@ -190,6 +204,7 @@ impl fmt::Debug for R2Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("R2Config")
             .field("account_id", &self.account_id)
+            .field("endpoint", &self.endpoint)
             .field("access_key_id", &"<redacted>")
             .field("secret_access_key", &"<redacted>")
             .field("bucket", &self.bucket)
@@ -245,20 +260,22 @@ impl TryFrom<ServeArgs> for Config {
         let max_size = parse_size(&a.max_size)?;
         let r2 = if a.storage == Storage::R2 {
             let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
+            let endpoint = non_empty(a.r2_endpoint);
             let (account_id, access_key_id, secret_access_key, bucket) = (
                 non_empty(a.r2_account_id),
                 non_empty(a.r2_access_key_id),
                 non_empty(a.r2_secret_access_key),
                 non_empty(a.r2_bucket),
             );
-            let (Some(account_id), Some(access_key_id), Some(secret_access_key), Some(bucket)) = (
-                account_id.clone(),
+            let account_ok = account_id.is_some() || endpoint.is_some();
+            let (true, Some(access_key_id), Some(secret_access_key), Some(bucket)) = (
+                account_ok,
                 access_key_id.clone(),
                 secret_access_key.clone(),
                 bucket.clone(),
             ) else {
                 let missing = [
-                    ("r2-account-id", account_id.is_none()),
+                    ("r2-account-id (or r2-endpoint)", !account_ok),
                     ("r2-access-key-id", access_key_id.is_none()),
                     ("r2-secret-access-key", secret_access_key.is_none()),
                     ("r2-bucket", bucket.is_none()),
@@ -274,6 +291,7 @@ impl TryFrom<ServeArgs> for Config {
             }
             Some(R2Config {
                 account_id,
+                endpoint,
                 access_key_id,
                 secret_access_key,
                 bucket,
@@ -421,6 +439,83 @@ mod tests {
             empty_hoard_keys(vars),
             vec!["HOARD_PORT", "HOARD_R2_BUCKET"]
         );
+    }
+    #[test]
+    fn r2_endpoint_defaults_to_account() {
+        let c = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-account-id",
+            "acc123",
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+        ]))
+        .unwrap();
+        assert_eq!(
+            c.r2.unwrap().endpoint(),
+            "https://acc123.r2.cloudflarestorage.com"
+        );
+    }
+    #[test]
+    fn r2_endpoint_override_replaces_account_id() {
+        let c = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-endpoint",
+            "http://127.0.0.1:9000",
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+        ]))
+        .unwrap();
+        let r2 = c.r2.unwrap();
+        assert_eq!(r2.endpoint(), "http://127.0.0.1:9000");
+        assert!(format!("{r2:?}").contains("http://127.0.0.1:9000"));
+        // Without the override the account id is still required.
+        let err = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("r2-account-id"), "{err}");
+    }
+    #[test]
+    fn r2_endpoint_override_debug_redacts_secrets() {
+        let c = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-endpoint",
+            "http://127.0.0.1:9000",
+            "--r2-access-key-id",
+            "akid-xyz",
+            "--r2-secret-access-key",
+            "topsecret",
+            "--r2-bucket",
+            "b",
+        ]))
+        .unwrap();
+        let dbg = format!("{c:?}");
+        for s in ["topsecret", "akid-xyz"] {
+            assert!(!dbg.contains(s), "{s} leaked");
+        }
     }
     #[test]
     fn defaults() {

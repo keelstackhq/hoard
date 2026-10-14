@@ -132,3 +132,83 @@ pub async fn check_list_hides_scratch_files(s: &Store) {
         .collect();
     assert_eq!(keys, ["p/a"]);
 }
+
+/// Deterministic, non-repeating-looking bytes so misordered chunks are caught.
+fn pattern(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i * 31 + i / 997) as u8).collect()
+}
+
+/// `data` delivered as `chunk`-byte frames, the way HTTP bodies arrive.
+fn chunked(
+    data: &[u8],
+    chunk: usize,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send + use<> {
+    let frames: Vec<_> = data
+        .chunks(chunk)
+        .map(|c| Ok(Bytes::copy_from_slice(c)))
+        .collect();
+    stream::iter(frames)
+}
+
+/// A ~20 MiB body in 64 KiB frames round-trips byte for byte (S3: multipart with parts
+/// of at least 5 MiB).
+pub async fn check_large_body_in_small_chunks(s: &Store) {
+    let data = pattern(20 * 1024 * 1024 + 12345);
+    let h = header(data.len() as u64);
+    assert_eq!(
+        s.put("big/bb", &h, chunked(&data, 64 * 1024))
+            .await
+            .unwrap(),
+        PutOutcome::Created
+    );
+    let back = body_of(s, "big/bb").await;
+    assert_eq!(back.len(), data.len());
+    assert!(back == data, "body differs after round trip");
+}
+
+/// A large second write to an existing key is `AlreadyExists` and leaves the original.
+pub async fn check_put_existing_large_keeps_original(s: &Store) {
+    s.put("k/cc", &header(1), body(b"A")).await.unwrap();
+    let data = pattern(12 * 1024 * 1024);
+    assert_eq!(
+        s.put(
+            "k/cc",
+            &header(data.len() as u64),
+            chunked(&data, 64 * 1024)
+        )
+        .await
+        .unwrap(),
+        PutOutcome::AlreadyExists
+    );
+    assert_eq!(body_of(s, "k/cc").await, b"A");
+}
+
+/// A body that fails after several MiB (S3: after parts were uploaded) leaves no object.
+pub async fn check_failed_large_body_leaves_no_object(s: &Store) {
+    let mut frames: Vec<Result<Bytes, std::io::Error>> = (0..160)
+        .map(|_| Ok(Bytes::from(vec![9u8; 64 * 1024])))
+        .collect();
+    frames.push(Err(std::io::Error::other("boom")));
+    assert!(
+        s.put("f/bb", &header(20 << 20), stream::iter(frames))
+            .await
+            .is_err()
+    );
+    assert!(matches!(s.get("f/bb").await.unwrap(), GetOutcome::Miss));
+    assert!(s.list("").await.unwrap().is_empty());
+}
+
+/// On object stores `.hoard-tmp/` is an ordinary key prefix and is listed.
+pub async fn check_list_keeps_hoard_tmp_prefix(s: &Store) {
+    s.put(".hoard-tmp/aa", &header(1), body(b"x"))
+        .await
+        .unwrap();
+    let keys: Vec<_> = s
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert_eq!(keys, [".hoard-tmp/aa"]);
+}
