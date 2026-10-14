@@ -18,13 +18,14 @@ fn body(b: &[u8]) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 
     stream::iter(vec![Ok(Bytes::copy_from_slice(b))])
 }
 
-async fn read_from(reader: opendal::Reader, off: u64) -> Vec<u8> {
-    reader.read(off..).await.unwrap().to_vec()
+async fn read_body(body: hoard::store::BodyStream) -> Vec<u8> {
+    use futures::TryStreamExt;
+    body.try_collect::<Vec<Bytes>>().await.unwrap().concat()
 }
 
 async fn body_of(s: &Store, key: &str) -> Vec<u8> {
     match s.get(key).await.unwrap() {
-        GetOutcome::Hit(_, r, off) => read_from(r, off).await,
+        GetOutcome::Hit(_, body) => read_body(body).await,
         other => panic!("{other:?}"),
     }
 }
@@ -38,9 +39,9 @@ pub async fn check_put_get_roundtrip(s: &Store) {
         PutOutcome::Created
     );
     match s.get("cache/turbo/v1/aa").await.unwrap() {
-        GetOutcome::Hit(back, reader, off) => {
+        GetOutcome::Hit(back, body) => {
             assert_eq!(back, h);
-            assert_eq!(read_from(reader, off).await, b"0123456789");
+            assert_eq!(read_body(body).await, b"0123456789");
         }
         other => panic!("{other:?}"),
     }
@@ -69,6 +70,18 @@ pub async fn check_missing_and_corrupt(s: &Store) {
         s.get("k/tiny").await.unwrap(),
         GetOutcome::Corrupt
     ));
+    // An empty object, and one that ends inside its JSON header.
+    s.op.write("k/empty", Vec::<u8>::new()).await.unwrap();
+    assert!(matches!(
+        s.get("k/empty").await.unwrap(),
+        GetOutcome::Corrupt
+    ));
+    assert_eq!(s.head("k/empty").await.unwrap(), None);
+    let mut cut = encode_header(&header(3));
+    cut.truncate(cut.len() - 2);
+    s.op.write("k/cut", cut).await.unwrap();
+    assert!(matches!(s.get("k/cut").await.unwrap(), GetOutcome::Corrupt));
+    assert_eq!(s.head("k/cut").await.unwrap(), None);
 }
 
 pub async fn check_head_does_not_read_body(s: &Store) {

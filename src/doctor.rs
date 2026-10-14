@@ -2,6 +2,7 @@
 
 use anyhow::bail;
 use bytes::Bytes;
+use futures::TryStreamExt;
 
 use crate::config::{Config, LifecycleMode, Storage};
 use crate::envelope::Header;
@@ -59,7 +60,7 @@ async fn round_trip(cfg: &Config, key: &str) -> anyhow::Result<()> {
         bail!("write was not stored (another doctor running?)");
     }
     let got = match store.get(key).await? {
-        GetOutcome::Hit(_, reader, off) => reader.read(off..).await?.to_vec(),
+        GetOutcome::Hit(_, body) => body.try_collect::<Vec<Bytes>>().await?.concat(),
         GetOutcome::Miss => bail!("object missing right after the write"),
         GetOutcome::Corrupt => bail!("object corrupt right after the write"),
     };

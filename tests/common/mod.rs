@@ -194,10 +194,22 @@ pub async fn proxied(b: &MinioBucket) -> MinioBucket {
 
 /// [`proxied`], plus the proxy's lifecycle store (to seed or inspect the raw XML).
 pub async fn proxied_with_store(b: &MinioBucket) -> (MinioBucket, lifecycle_proxy::Lifecycles) {
-    let (endpoint, store) = lifecycle_proxy::spawn(&b.endpoint).await;
+    let (b, store, _) = proxied_with_log(b).await;
+    (b, store)
+}
+
+/// [`proxied_with_store`], plus the log of every request the proxy received.
+pub async fn proxied_with_log(
+    b: &MinioBucket,
+) -> (
+    MinioBucket,
+    lifecycle_proxy::Lifecycles,
+    lifecycle_proxy::RequestLog,
+) {
+    let (endpoint, store, log) = lifecycle_proxy::spawn(&b.endpoint).await;
     let b = MinioBucket {
         endpoint,
         ..b.clone()
     };
-    (b, store)
+    (b, store, log)
 }

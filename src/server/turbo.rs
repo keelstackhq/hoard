@@ -141,8 +141,8 @@ pub async fn get_artifact(State(s): State<AppState>, Path(hash): Path<String>) -
         inc(&s.stats.misses, 1);
         StatusCode::NOT_FOUND.into_response()
     };
-    let (h, reader, offset) = match s.store.get(&s.turbo_key(&hash)).await {
-        Ok(GetOutcome::Hit(h, reader, offset)) => (h, reader, offset),
+    let (h, body) = match s.store.get(&s.turbo_key(&hash)).await {
+        Ok(GetOutcome::Hit(h, body)) => (h, body),
         Ok(GetOutcome::Miss) => return miss(),
         Ok(GetOutcome::Corrupt) => {
             warn!(%hash, "GET: stored object is not a valid HRD1 blob, treating as miss");
@@ -154,13 +154,9 @@ pub async fn get_artifact(State(s): State<AppState>, Path(hash): Path<String>) -
             return miss();
         }
     };
-    let stream = match reader.into_bytes_stream(offset..offset + h.size).await {
-        Ok(st) => st,
-        Err(e) => {
-            warn!(%hash, error = %redacted(&e), "GET: cannot open body stream, treating as miss");
-            return miss();
-        }
-    };
+    // The header's size is the body length: a stored body of another length ends the response
+    // with an error instead of sending bytes that do not match Content-Length.
+    let stream = ExactLength::new(body, h.size);
     inc(&s.stats.hits, 1);
     inc(&s.stats.bytes_down, h.size);
     inc(&s.stats.time_saved_ms, h.duration_ms.unwrap_or(0));

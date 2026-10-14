@@ -4,11 +4,15 @@
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{Stream, StreamExt};
-use opendal::{ErrorKind, Operator, Reader, services};
+use std::pin::Pin;
+
+use futures::{Stream, StreamExt, TryStreamExt};
+use opendal::{BufferStream, BytesRange, ErrorKind, Operator, services};
 
 use crate::config::{Config, Storage};
-use crate::envelope::{Header, MAX_HEADER_LEN, PREFIX_LEN, decode_header, encode_header};
+use crate::envelope::{
+    EnvelopeError, Header, MAX_HEADER_LEN, PREFIX_LEN, decode_header, encode_header,
+};
 
 /// Scratch directory (inside the fs root) for in-flight writes.
 const FS_TMP_DIR: &str = ".hoard-tmp";
@@ -18,7 +22,7 @@ const FS_TMP_DIR: &str = ".hoard-tmp";
 /// go up in one conditional PUT.
 const S3_CHUNK: usize = 8 * 1024 * 1024;
 
-/// Bytes read to decode a header: fixed prefix plus the largest accepted JSON header.
+/// Bytes read by HEAD to decode a header: fixed prefix plus the largest accepted JSON header.
 const HEAD_READ_LEN: u64 = (PREFIX_LEN + MAX_HEADER_LEN) as u64;
 
 /// Errors from the storage backend. Messages never contain secrets.
@@ -36,9 +40,13 @@ pub enum StoreError {
     BadPrefix(String),
 }
 
+/// An artifact body: the bytes after the envelope header, streamed from the one storage read.
+pub type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+
 pub enum GetOutcome {
-    /// Header, a reader over the whole blob, and the offset where the artifact body starts.
-    Hit(Header, Reader, u64),
+    /// Header and the artifact body (everything after the header, as stored; the caller holds
+    /// it to `header.size`).
+    Hit(Header, BodyStream),
     Miss,
     /// The object exists but is not a valid HRD1 blob.
     Corrupt,
@@ -47,11 +55,19 @@ pub enum GetOutcome {
 impl std::fmt::Debug for GetOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Hit(h, _, off) => f.debug_tuple("Hit").field(h).field(off).finish(),
+            Self::Hit(h, _) => f.debug_tuple("Hit").field(h).finish(),
             Self::Miss => f.write_str("Miss"),
             Self::Corrupt => f.write_str("Corrupt"),
         }
     }
+}
+
+/// A read whose envelope header has been parsed: the header, the bytes of the last frame that
+/// follow it, and the rest of the same read.
+enum Opened {
+    Hit(Header, Vec<Bytes>, Box<BufferStream>),
+    Miss,
+    Corrupt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,55 +146,95 @@ impl Store {
         }
     }
 
-    /// Reads the first `PREFIX_LEN + MAX_HEADER_LEN` bytes (never the body). Objects shorter
-    /// than that are fine: a range past EOF is clamped using the object's size. fs reports
-    /// such a range as `RangeNotSatisfied`; S3 answers with fewer bytes, which OpenDAL
-    /// reports as a permanent `Unexpected` (short read; timeouts and network errors are
-    /// temporary and propagate). Keys are immutable, so re-reading is safe.
-    async fn read_prefix(&self, reader: &Reader, key: &str) -> Result<Bytes, StoreError> {
-        match reader.read(0..HEAD_READ_LEN).await {
-            Ok(b) => Ok(b.to_bytes()),
-            Err(e)
-                if e.kind() == ErrorKind::RangeNotSatisfied
-                    || (e.kind() == ErrorKind::Unexpected && !e.is_temporary()) =>
-            {
-                let size = self.op.stat(key).await?.content_length().min(HEAD_READ_LEN);
-                if size == 0 {
-                    return Ok(Bytes::new());
-                }
-                Ok(reader.read(0..size).await?.to_bytes())
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Header of `key` via a bounded range read. Missing or corrupt objects both yield `None`
-    /// (a corrupt object is a miss); use [`Store::get`] to tell them apart.
-    pub async fn head(&self, key: &str) -> Result<Option<Header>, StoreError> {
-        match self.get(key).await? {
-            GetOutcome::Hit(h, _, _) => Ok(Some(h)),
-            GetOutcome::Miss | GetOutcome::Corrupt => Ok(None),
-        }
-    }
-
-    /// Reads and validates the header only; the caller streams the body from the returned offset.
-    pub async fn get(&self, key: &str) -> Result<GetOutcome, StoreError> {
+    /// Opens one streaming read of `key` over `range` and parses the envelope header from its
+    /// first bytes. At most `PREFIX_LEN + MAX_HEADER_LEN` bytes are copied into the header
+    /// buffer; the rest of the frame and of the read are handed back untouched.
+    ///
+    /// A short object is fine as long as the header is complete: the header is parsed before
+    /// the stream reaches its end. An object that ends inside the header is corrupt; with a
+    /// bounded `range` OpenDAL reports that end as a permanent `Unexpected` ("too little data",
+    /// S3) or `RangeNotSatisfied` (an empty object), so both count as corrupt here. Timeouts
+    /// and network errors are temporary and propagate.
+    async fn open(&self, key: &str, range: BytesRange) -> Result<Opened, StoreError> {
+        let bounded = range.size().is_some();
         let reader = match self.op.reader(key).await {
             Ok(r) => r,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(GetOutcome::Miss),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Opened::Miss),
             Err(e) => return Err(e.into()),
         };
-        let prefix = match self.read_prefix(&reader, key).await {
-            Ok(p) => p,
-            Err(StoreError::Storage(e)) if e.kind() == ErrorKind::NotFound => {
-                return Ok(GetOutcome::Miss);
-            }
-            Err(e) => return Err(e),
+        let mut stream = match reader.into_stream(range).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Opened::Miss),
+            Err(e) => return Err(e.into()),
         };
-        match decode_header(&prefix) {
-            Ok((h, off)) => Ok(GetOutcome::Hit(h, reader, off as u64)),
-            Err(_) => Ok(GetOutcome::Corrupt),
+        let mut head: Vec<u8> = Vec::with_capacity(PREFIX_LEN);
+        let mut need = PREFIX_LEN;
+        loop {
+            let buf = match stream.next().await {
+                Some(Ok(buf)) => buf,
+                Some(Err(e)) if e.kind() == ErrorKind::NotFound => return Ok(Opened::Miss),
+                Some(Err(e))
+                    if e.kind() == ErrorKind::RangeNotSatisfied
+                        || (bounded && e.kind() == ErrorKind::Unexpected && !e.is_temporary()) =>
+                {
+                    return Ok(Opened::Corrupt);
+                }
+                Some(Err(e)) => return Err(e.into()),
+                None => return Ok(Opened::Corrupt), // ended inside the header
+            };
+            // `Buffer` is both an iterator and a stream of its `Bytes` parts; use the iterator.
+            let mut frames = buf;
+            while let Some(mut bytes) = Iterator::next(&mut frames) {
+                while !bytes.is_empty() {
+                    let n = (need - head.len()).min(bytes.len());
+                    head.extend_from_slice(&bytes.split_to(n));
+                    if head.len() < need {
+                        continue;
+                    }
+                    match decode_header(&head) {
+                        Ok((h, _)) => {
+                            let mut rest = vec![bytes];
+                            rest.extend(frames);
+                            rest.retain(|b| !b.is_empty());
+                            return Ok(Opened::Hit(h, rest, Box::new(stream)));
+                        }
+                        // The fixed prefix is complete and valid: now read the JSON header
+                        // (its length is at most MAX_HEADER_LEN, checked by decode_header).
+                        Err(EnvelopeError::Incomplete) if need == PREFIX_LEN => {
+                            let len = u32::from_be_bytes([head[4], head[5], head[6], head[7]]);
+                            need = PREFIX_LEN + len as usize;
+                        }
+                        Err(_) => return Ok(Opened::Corrupt),
+                    }
+                }
+            }
         }
+    }
+
+    /// Header of `key` via one bounded range read (never the body). Missing or corrupt
+    /// objects both yield `None` (a corrupt object is a miss); use [`Store::get`] to tell them
+    /// apart.
+    pub async fn head(&self, key: &str) -> Result<Option<Header>, StoreError> {
+        match self.open(key, (0..HEAD_READ_LEN).into()).await? {
+            Opened::Hit(h, _, _) => Ok(Some(h)),
+            Opened::Miss | Opened::Corrupt => Ok(None),
+        }
+    }
+
+    /// One streaming read of the whole object: the header is parsed from its first bytes and
+    /// the body is the rest of the same read, so a hit costs exactly one storage request.
+    pub async fn get(&self, key: &str) -> Result<GetOutcome, StoreError> {
+        let (h, rest, stream) = match self.open(key, (0..).into()).await? {
+            Opened::Hit(h, rest, stream) => (h, rest, stream),
+            Opened::Miss => return Ok(GetOutcome::Miss),
+            Opened::Corrupt => return Ok(GetOutcome::Corrupt),
+        };
+        let tail = (*stream)
+            .map_ok(|buf| futures::stream::iter(Iterator::map(buf, Ok::<_, opendal::Error>)))
+            .try_flatten()
+            .map_err(std::io::Error::other);
+        let body = futures::stream::iter(rest.into_iter().map(Ok)).chain(tail);
+        Ok(GetOutcome::Hit(h, Box::pin(body)))
     }
 
     /// Writes header then streams the body. Keys are immutable: an existing key is

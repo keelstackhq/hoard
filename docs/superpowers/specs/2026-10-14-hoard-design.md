@@ -161,6 +161,10 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
 - `put` uses `write_with(...).if_not_exists(true)` when the operator's capability
   `write_with_if_not_exists` is true; otherwise `stat` first and skip if present. An existing key is
   success (`PutOutcome::AlreadyExists`).
+- `get` is one streaming read of the whole object: the header is parsed from its first bytes
+  and the body is the rest of the same read, so a hit costs one storage request (this matters
+  under GitHub's download rate limit). `head` (HEAD and the batch query) is one bounded range
+  read of the first 4104 bytes and never reads the body.
 - `list` and `delete` are only needed for R2 cleanup; `ghac` does not support them (GitHub evicts).
 - S3/R2 requests are time-bounded (60 s per operation, 15 s per read/write IO step); a timeout is a
   storage error like any other (GET/HEAD miss, PUT counts `put_errors`), so a hung connection never

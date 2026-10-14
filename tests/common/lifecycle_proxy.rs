@@ -33,27 +33,42 @@ impl Lifecycles {
     }
 }
 
+/// Every request the proxy received, as `METHOD /path` (query left out), in arrival order.
+#[derive(Clone, Default)]
+pub struct RequestLog(Arc<Mutex<Vec<String>>>);
+
+impl RequestLog {
+    /// The requests logged since the last call, clearing the log.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
 #[derive(Clone)]
 struct Proxy {
     upstream: String,
     client: reqwest::Client,
     lifecycles: Lifecycles,
+    log: RequestLog,
 }
 
 /// Starts the proxy for `upstream` (e.g. `http://127.0.0.1:9000`) on the current runtime and
-/// returns its base URL and its lifecycle store. Call it inside `s3_runtime().block_on(..)`.
-pub async fn spawn(upstream: &str) -> (String, Lifecycles) {
+/// returns its base URL, its lifecycle store and its request log. Call it inside
+/// `s3_runtime().block_on(..)`.
+pub async fn spawn(upstream: &str) -> (String, Lifecycles, RequestLog) {
     let lifecycles = Lifecycles::default();
+    let log = RequestLog::default();
     let proxy = Proxy {
         upstream: upstream.trim_end_matches('/').to_string(),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         lifecycles: lifecycles.clone(),
+        log: log.clone(),
     };
     let app = axum::Router::new().fallback(handle).with_state(proxy);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}"), lifecycles)
+    (format!("http://{addr}"), lifecycles, log)
 }
 
 /// Hop-by-hop and length headers the HTTP stacks set themselves.
@@ -73,6 +88,11 @@ fn is_lifecycle(req: &Request) -> Option<String> {
 }
 
 async fn handle(State(p): State<Proxy>, req: Request) -> Response {
+    p.log
+        .0
+        .lock()
+        .unwrap()
+        .push(format!("{} {}", req.method(), req.uri().path()));
     if let Some(bucket) = is_lifecycle(&req) {
         return lifecycle(&p, &bucket, req).await;
     }

@@ -793,6 +793,48 @@ fn bucket_store(b: &MinioBucket) -> Store {
     Store::new(build_operator(&r2_config(dir.path(), b)).unwrap())
 }
 
+/// A GET hit costs exactly one storage request (one streaming read; header and body come from
+/// the same response), for an artifact smaller than the header read and for a larger one.
+/// HEAD stays a single bounded read too.
+#[test]
+fn get_hit_is_one_storage_read() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let (pb, _, log) = common::proxied_with_log(&b).await;
+        let dir = tempfile::tempdir().unwrap();
+        let t =
+            common::spawn_test_server_with(bucket_store(&pb), hoard::config::Mode::ReadWrite, dir)
+                .await;
+        let http = reqwest::Client::new();
+        for (hash, size) in [("aa", 100usize), ("bb", 10_000)] {
+            let body: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let url = format!("{}/v8/artifacts/{hash}", t.base_url);
+            let put = http
+                .put(&url)
+                .bearer_auth(&t.token)
+                .body(body.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(put.status(), 200);
+            assert_eq!(t.stats.snapshot().put_errors, 0);
+            log.take();
+
+            let got = http.get(&url).bearer_auth(&t.token).send().await.unwrap();
+            assert_eq!(got.status(), 200);
+            assert_eq!(got.bytes().await.unwrap().as_ref(), body.as_slice());
+            let key = format!("/{}/cache/turbo/v1/{hash}", b.bucket);
+            assert_eq!(log.take(), vec![format!("GET {key}")], "{size} B artifact");
+
+            let head = http.head(&url).bearer_auth(&t.token).send().await.unwrap();
+            assert_eq!(head.status(), 200);
+            assert_eq!(log.take(), vec![format!("GET {key}")], "{size} B HEAD");
+        }
+    })
+}
+
 /// `serve` with a tiny cap deletes the oldest objects on shutdown and reports it.
 #[test]
 fn serve_prunes_on_shutdown() {
