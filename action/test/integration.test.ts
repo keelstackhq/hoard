@@ -190,7 +190,9 @@ test.skipIf(!bin)(
       expect(
         await readFile(join(second.ws, "node_modules/.vite/task-cache/cache.db"), "utf8"),
       ).toBe("task results v1");
-      expect(second.post).toMatch(/hoard vp save: saved cache\/vp\/v1\/.+\/4242-2-[0-9a-f]{8} \(/);
+      // Nothing ran in the second job, so the restored cache is not uploaded again.
+      expect(second.post).toContain("hoard vp save: skipped: unchanged since restore");
+      expect(second.summary).toContain("· save: skipped: unchanged since restore");
     } finally {
       for (const p of pids) {
         try {
