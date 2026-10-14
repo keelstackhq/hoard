@@ -110,6 +110,10 @@ jobs:
       - if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
       - name: Build
+        env:
+          # Static MSVC CRT, so minimal Windows runners need no VC++ redistributable. This
+          # variable applies to the Windows target only.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
         run: |
           if [ "${{ matrix.zigbuild }}" = "true" ]; then
             cargo zigbuild --locked --release --target "${{ matrix.target }}"
@@ -124,6 +128,8 @@ jobs:
         if: matrix.smoke
         run: '"target/${{ matrix.target }}/release/hoard${{ matrix.exe }}" --help'
       - name: Package
+        env:
+          COPYFILE_DISABLE: "1" # macOS tar: no AppleDouble (._hoard) or xattr entries
         run: |
           mkdir -p dist-assets
           tar -czf "dist-assets/hoard-${{ matrix.target }}.tar.gz" \
