@@ -385,6 +385,7 @@ async fn upload(res: Reservation, header: Header) {
             // Not counted as `rate_limited` (that counts PUTs skipped by the handler): the item
             // is retried, and one that never gets through ends as dropped (`put_errors`).
             Err(StoreError::RateLimited { retry_after }) => {
+                stats.throttled.fetch_add(1, Ordering::Relaxed);
                 inner.gate.on_rate_limited(Instant::now(), retry_after);
                 continue;
             }

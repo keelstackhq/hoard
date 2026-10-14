@@ -13,6 +13,9 @@ pub struct Stats {
     pub put_skipped_existing: AtomicU64,
     pub put_errors: AtomicU64,
     pub rate_limited: AtomicU64,
+    /// 429 responses received from storage (synchronous or background upload). Unlike
+    /// `rate_limited` (PUTs skipped), a background 429 is retried, but is still counted here.
+    pub throttled: AtomicU64,
     pub corrupt: AtomicU64,
     pub bytes_down: AtomicU64,
     pub bytes_up: AtomicU64,
@@ -30,6 +33,7 @@ pub struct StatsSnapshot {
     pub put_skipped_existing: u64,
     pub put_errors: u64,
     pub rate_limited: u64,
+    pub throttled: u64,
     pub corrupt: u64,
     pub bytes_down: u64,
     pub bytes_up: u64,
@@ -47,6 +51,7 @@ impl Stats {
             put_skipped_existing: load(&self.put_skipped_existing),
             put_errors: load(&self.put_errors),
             rate_limited: load(&self.rate_limited),
+            throttled: load(&self.throttled),
             corrupt: load(&self.corrupt),
             bytes_down: load(&self.bytes_down),
             bytes_up: load(&self.bytes_up),
@@ -204,7 +209,8 @@ mod tests {
         .unwrap();
         assert_eq!(json["hits"], 5);
         assert_eq!(json["put_skipped_existing"], 0);
-        assert_eq!(json.as_object().unwrap().len(), 11);
+        assert_eq!(json["throttled"], 0);
+        assert_eq!(json.as_object().unwrap().len(), 12);
     }
 
     #[test]

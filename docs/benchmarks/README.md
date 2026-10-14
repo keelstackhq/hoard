@@ -3,7 +3,7 @@
 ## GitHub cache upload rate limits
 
 Question (spec §6.4, §12): does a cold build with hundreds of packages hit GitHub's
-200 uploads/min limit, so that artifacts must be packed (one pack + index per job)?
+200 uploads/min limit (`throttled > 0`), so that artifacts must be packed (one pack + index per job)?
 
 ### Run it
 
@@ -20,11 +20,13 @@ repository, so it leaves up to N entries behind; they expire under GitHub's norm
 
 Reading the numbers:
 
-- `rate_limited` counts PUTs the server skipped during a 429 pause (synchronous uploads).
-- With write-behind, a 429 pauses the queue and retries the upload; it is not counted in
-  `rate_limited`. It shows up as a long `drain` (time the uploads kept running after the build)
-  and, if the 120 s shutdown drain runs out, as `put_errors`. Judge write-behind runs by `drain`
-  and `put_errors` as well as `rate_limited`.
+- `throttled` counts every 429 response received from GitHub, for synchronous and background
+  uploads. It is the decisive number: `throttled > 0` at 400 packages or fewer means packing is
+  needed (spec §12).
+- `rate_limited` counts only PUTs skipped during a pause. With write-behind a 429 pauses the
+  queue and the upload is retried, so `rate_limited` can stay 0; the cost shows up as a long
+  `drain` (time uploads kept running after the build; `timeout` if they had not finished after
+  900 s) and, if the 120 s shutdown drain runs out, as `put_errors`.
 - `hits` on the warm run should equal `packages`.
 
 ### Record the results
@@ -35,9 +37,9 @@ the template below) and add the run URL and date. Do not round or estimate.
 ```markdown
 # Rate-limit benchmark, October 2026
 
-| packages | write-behind | cold wall (s) | drain (s) | puts | rate_limited | put_errors | warm wall (s) | hits |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |  |  |
+| packages | write-behind | cold wall (s) | drain (s) | puts | rate_limited | throttled | put_errors | warm wall (s) | hits |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |  |  |
 
 Runs: <links>
 Decision: packing needed / not needed (see spec §12).

@@ -252,7 +252,10 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   `Retry-After` seconds (default 60, at most 600; a pause is only ever extended), count `rate_limited`, keep
   serving reads. One warning is logged when the pause starts, not one per skipped upload.
   With write-behind (§5) a background upload that gets a `429` closes the same pause and is
-  retried after it, without counting `rate_limited`.
+  retried after it, without counting `rate_limited`. Every `429` actually received from storage,
+  on a synchronous or a background upload, is counted in `throttled`; a PUT skipped because the
+  pause is already on is not (it is `rate_limited`). `throttled > 0` is the signal that the
+  upload limit was reached, whatever the write-behind mode.
 - A `ghac` upload that fails after `CreateCacheEntry` (an error mid-upload, or aborted by the
   shutdown drain) leaves an unfinalized reservation for that key. A later attempt in the same
   run gets `ok: false`, which reads as `AlreadyExists`, so that hash is not cached this run.
@@ -353,12 +356,12 @@ and record the finding here.
 
 ## 9. Stats and job summary
 
-`Stats { hits, misses, puts, put_skipped_existing, put_errors, rate_limited, corrupt,
+`Stats { hits, misses, puts, put_skipped_existing, put_errors, rate_limited, throttled, corrupt,
 bytes_down, bytes_up, time_saved_ms, refreshed }` — `time_saved_ms` sums `duration_ms` of every hit;
 `refreshed` counts R2 objects renewed by refresh-on-hit (§7.3).
 The storage line is `Storage: github`, `Storage: r2 (<bucket>/<prefix>)` or `Storage: fs (<root>)`;
 when `put_errors > 0` the line ends with `Upload errors: N` (so a broken storage never looks like
-a cold cache), then, when `refreshed > 0`, with `Refreshed: N objects`, then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`. When the
+a cold cache), then, when `refreshed > 0`, with `Refreshed: N objects`, then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`, then, when `throttled > 0`, with `Throttled: N responses (429)`. When the
 write-behind drain timed out, `Upload queue: N dropped at shutdown` comes right after the
 startup lines (before the prune line); the dropped uploads are also in `Upload errors`.
 
@@ -501,7 +504,8 @@ and only forward (never below the newest stable `vX.*` tag, so a backport leaves
 
 - Vite+ remote protocol adapter (`/fetch`, `/blob/{id}`, `/store`, CBOR) once released upstream.
 - Packing many small artifacts into one GitHub cache entry per job if large repos hit 200
-  uploads/min (milestone 3, gated by a benchmark).
+  uploads/min (milestone 3, gated by a benchmark: needed if `throttled > 0` at 400 packages or
+  fewer, see `docs/benchmarks/`).
 - Nx adapter.
 
 ## 13. Milestones

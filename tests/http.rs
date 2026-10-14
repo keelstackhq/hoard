@@ -786,6 +786,7 @@ async fn rate_limited_put_is_200_and_counted() {
     assert_eq!(r.json::<Value>().await.unwrap(), json!({"urls": []}));
     let s = t.stats.snapshot();
     assert_eq!((s.rate_limited, s.put_errors, s.puts), (1, 0, 0));
+    assert_eq!(s.throttled, 1, "the 429 response was received");
     assert_eq!(calls.write.load(std::sync::atomic::Ordering::SeqCst), 1);
     let before = calls.total();
 
@@ -800,6 +801,10 @@ async fn rate_limited_put_is_200_and_counted() {
     );
     let s = t.stats.snapshot();
     assert_eq!((s.rate_limited, s.put_errors, s.puts), (2, 0, 0));
+    assert_eq!(
+        s.throttled, 1,
+        "a PUT skipped by the closed gate is not a 429"
+    );
 
     // Reads are never gated.
     assert_eq!(get_artifact(&t, "aa").await.status(), 404);

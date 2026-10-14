@@ -3,9 +3,10 @@
 // (.github/workflows/bench.yml). Usage: node generate-monorepo.mjs <outDir> <packages>
 //
 // Every package has a portable `build` (a node script, no shell) that writes dist/out.txt:
-// its name plus a fixed, run-independent payload of about 2 KB (about 1 KB once zstd-compressed). Same inputs on every job, so
-// task hashes are identical between the cold and warm jobs. There are no inter-package
-// dependencies, so turbo can start every upload at once.
+// its name plus a fixed, run-independent payload of about 2 KB (about 1 KB once
+// zstd-compressed). The inputs are the same on every job, so task hashes are identical
+// between the cold and warm jobs. There are no inter-package dependencies, so turbo can
+// start every upload at once.
 //
 // No lockfile is generated: turbo is the only dependency, and the workflow installs with
 // `pnpm install --no-frozen-lockfile`. A lockfile would pin one resolution but its content
@@ -26,7 +27,8 @@ const BUILD_SCRIPT = `// Writes dist/out.txt: the package name plus a determinis
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 const { name } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
-// A sha256 chain seeded by the name: high-entropy hex, so the zstd artifact stays near 1 KB.
+// A sha256 chain seeded by the name: high-entropy hex, so the zstd
+// artifact stays near 1 KB.
 const lines = [name];
 let h = name;
 for (let i = 0; i < 24; i++) {

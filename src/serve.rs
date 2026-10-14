@@ -535,6 +535,9 @@ async fn shutdown_work_within(
             snapshot.rate_limited
         ));
     }
+    if snapshot.throttled > 0 {
+        extra_lines.push(format!("Throttled: {} responses (429)", snapshot.throttled));
+    }
     if let Some(path) = &cfg.summary_file {
         let md = render_summary(&snapshot, storage_line, &extra_lines);
         if let Err(e) = write_atomic(path, &md, false) {
@@ -663,6 +666,16 @@ mod tests {
         let md = std::fs::read_to_string(&summary).unwrap();
         assert!(
             md.ends_with("Storage: github · Rate limited: 3 uploads skipped\n"),
+            "{md}"
+        );
+
+        stats
+            .throttled
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.ends_with("Rate limited: 3 uploads skipped · Throttled: 2 responses (429)\n"),
             "{md}"
         );
     }

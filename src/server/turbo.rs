@@ -268,6 +268,7 @@ pub async fn put_artifact(
         Err(StoreError::RateLimited { retry_after }) => {
             s.rate_gate.on_rate_limited(Instant::now(), retry_after);
             inc(&s.stats.rate_limited, 1);
+            inc(&s.stats.throttled, 1);
         }
         Err(e) => {
             warn!(%hash, error = %redacted(&e), "PUT: storage error, not cached");

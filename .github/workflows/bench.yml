@@ -36,6 +36,7 @@ jobs:
       packages: ${{ steps.gen.outputs.packages }}
       puts: ${{ steps.stats.outputs.puts }}
       rate-limited: ${{ steps.stats.outputs.rate-limited }}
+      throttled: ${{ steps.stats.outputs.throttled }}
       put-errors: ${{ steps.stats.outputs.put-errors }}
       wall-seconds: ${{ steps.build.outputs.wall-seconds }}
       drain-seconds: ${{ steps.stats.outputs.drain-seconds }}
@@ -85,20 +86,22 @@ jobs:
           # With write-behind the PUTs were answered before they were uploaded: wait until every
           # package is accounted for (uploaded, already there, failed or skipped as rate limited)
           # so the counters are final. A 429 under write-behind pauses and retries the upload (not
-          # counted as rate_limited), so it shows up as a long drain instead.
+          # counted as rate_limited), so `throttled` is the decisive number and a long drain its
+          # cost. 900 s is under the hoard shutdown drain budget plus slack; the 45 min job limit
+          # covers a build, a drain and a slow runner without letting a hang run for 6 hours.
           start=$(date +%s)
           while :; do
             s="$(stats)"
             done_count="$(jq '.puts + .put_skipped_existing + .put_errors + .rate_limited' <<<"$s")"
-            [ "$done_count" -ge "$PACKAGES" ] && break
-            [ $(( $(date +%s) - start )) -ge 900 ] && { echo "::warning::uploads still pending after 900 s; the counters are not final"; break; }
+            [ "$done_count" -ge "$PACKAGES" ] && { drain=$(( $(date +%s) - start )); break; }
+            [ $(( $(date +%s) - start )) -ge 900 ] && { drain=timeout; echo "::warning::uploads still pending after 900 s; the counters are not final"; break; }
             sleep 2
           done
-          drain=$(( $(date +%s) - start ))
           echo "$s"
           {
             echo "puts=$(jq .puts <<<"$s")"
             echo "rate-limited=$(jq .rate_limited <<<"$s")"
+            echo "throttled=$(jq .throttled <<<"$s")"
             echo "put-errors=$(jq .put_errors <<<"$s")"
             echo "drain-seconds=$drain"
           } >> "$GITHUB_OUTPUT"
@@ -111,6 +114,7 @@ jobs:
             echo "| upload drain seconds after build | $drain |"
             echo "| puts | $(jq .puts <<<"$s") |"
             echo "| rate_limited | $(jq .rate_limited <<<"$s") |"
+            echo "| throttled (429 responses) | $(jq .throttled <<<"$s") |"
             echo "| put_errors | $(jq .put_errors <<<"$s") |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -163,6 +167,7 @@ jobs:
         run: |
           s="$(curl -fsS -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/stats")"
           echo "$s"
+          [ "$(jq .hits <<<"$s")" -eq "$PACKAGES" ] || echo "::warning::expected $PACKAGES hits on the warm run, got $(jq .hits <<<"$s")"
           echo "hits=$(jq .hits <<<"$s")" >> "$GITHUB_OUTPUT"
           echo "misses=$(jq .misses <<<"$s")" >> "$GITHUB_OUTPUT"
           {
@@ -189,7 +194,7 @@ jobs:
           {
             echo "### Rate-limit benchmark (copy into docs/benchmarks/2026-10-rate-limit.md)"
             echo
-            echo "| packages | write-behind | cold wall (s) | drain (s) | puts | rate_limited | put_errors | warm wall (s) | hits |"
-            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-            echo "| $(c packages) | $WRITE_BEHIND | $(c wall-seconds) | $(c drain-seconds) | $(c puts) | $(c rate-limited) | $(c put-errors) | $(w wall-seconds) | $(w hits) |"
+            echo "| packages | write-behind | cold wall (s) | drain (s) | puts | rate_limited | throttled | put_errors | warm wall (s) | hits |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            echo "| $(c packages) | $WRITE_BEHIND | $(c wall-seconds) | $(c drain-seconds) | $(c puts) | $(c rate-limited) | $(c throttled) | $(c put-errors) | $(w wall-seconds) | $(w hits) |"
           } | tee -a "$GITHUB_STEP_SUMMARY"

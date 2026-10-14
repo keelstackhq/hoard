@@ -337,6 +337,7 @@ async fn rate_limited_upload_is_retried_after_the_pause() {
     assert_eq!(calls.write.load(Ordering::SeqCst), 2);
     let s = q.stats.snapshot();
     assert_eq!((s.rate_limited, s.puts, s.put_errors), (0, 1, 0));
+    assert_eq!(s.throttled, 1, "the background 429 is counted as throttled");
     assert!(!q.gate.allow_upload(start), "the 429 closed the gate");
     assert!(exists(&q.store, "i1").await);
 }
