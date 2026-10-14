@@ -58,9 +58,9 @@
 **Interfaces:**
 - Produces: `struct WriteBehind` with `fn new(store: Arc<Store>, spool_dir: PathBuf, concurrency: usize) -> Self`, `async fn enqueue(&self, key: String, header: Header, body: impl Stream<…>) -> Result<()>` (spools to a temp file, returns when spooled), `async fn drain(&self, timeout: Duration) -> DrainReport { uploaded, dropped }`
 
-- [ ] **Step 1: Write failing tests** — with a store that sleeps 500 ms per put, PUT responds in < 100 ms; `drain` waits until uploaded; with a 50 ms drain timeout and a slow store, `dropped > 0` and counted as `put_errors`; a spool file is deleted after upload; killing the worker mid-upload leaves no object at the key (fs store, Review Focus 3).
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement.**  **Step 4: Run — PASS.**
-- [ ] **Step 5: Commit** — `feat: write-behind uploads drained on shutdown`
+- [x] **Step 1: Write failing tests** — with a store that sleeps 500 ms per put, PUT responds in < 100 ms; `drain` waits until uploaded; with a 50 ms drain timeout and a slow store, `dropped > 0` and counted as `put_errors`; a spool file is deleted after upload; killing the worker mid-upload leaves no object at the key (fs store, Review Focus 3).
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement.**  **Step 4: Run — PASS.**
+- [x] **Step 5: Commit** — `feat: write-behind uploads drained on shutdown`
 
 ---
 

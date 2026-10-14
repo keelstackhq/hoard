@@ -22,6 +22,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 02-github-action/Task 5 steps 1, 3 (self-test workflow) · cf7d876, 4b932ff · actionlint clean; e2e fs + r2 PASS with the portable fixture · Step 2 (run on GitHub runners) BLOCKED
 - 2026-10-14 · **Milestone 2 reviewed** · whole-branch review cd87105..49fff6b (0 Critical, 5 Important, 11 Minor) → fix wave b6a48b4..890ff79 + follow-ups c218546, 2ab55c1 (90 s download cap, explicit exit), re-reviews clean · cargo 175 pass; action 115 pass incl. real-binary integration; dist 151 KB fresh; actionlint clean; e2e fs PASS
 - 2026-10-14 · 03-vite-plus-throughput/Task 1 vp restore/save · f468989, 7d04344, 2072973, e20d525 · cargo all green (96 unit, 37 vp on fs/MinIO/GitHub mock); action 141/141 incl. real binary; dist 157.8 KB; e2e fs + r2 PASS; real Vite+ 1.2.0 round-trip checked by hand · GitHub cache service only mock-tested (self-test leg pending)
+- 2026-10-14 · 03-vite-plus-throughput/Task 2 write-behind uploads · b064ff2, 3885bd5 · cargo all green (18 write-behind, 100 lib); 150 MB stream on+off; e2e fs, fs+write-behind, r2 PASS; action 145/145; dist 158 KB
 
 ## Blocked
 
