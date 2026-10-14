@@ -5,7 +5,11 @@ mod common;
 use std::time::Duration;
 
 use bytes::Bytes;
-use common::{TestServer, fs_config, spawn_test_server, wait_for_file};
+use common::failing_layer::FailingWrites;
+use common::{
+    TestServer, fs_config, layered_fs_store, spawn_no_reads_server, spawn_test_server,
+    spawn_test_server_with, wait_for_file,
+};
 use hoard::config::Mode;
 use hoard::key::artifact_key;
 use hoard::serve::{env_lines, run_serve};
@@ -677,17 +681,6 @@ async fn serve_token_file_is_private() {
 }
 
 #[tokio::test]
-async fn serve_github_storage_fails_with_hint() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut cfg = fs_config(&dir);
-    cfg.storage = hoard::config::Storage::Github;
-    let err = format!("{:#}", run_serve(cfg.clone()).await.unwrap_err());
-    assert!(err.contains("GitHub Action"), "{err}");
-    assert!(err.contains("--storage fs"), "{err}");
-    assert!(!cfg.port_file.exists());
-}
-
-#[tokio::test]
 async fn serve_summary_write_failure_does_not_fail_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = fs_config(&dir);
@@ -712,4 +705,90 @@ async fn serve_port_file_failure_removes_token_file() {
     cfg.port_file = blocker.join("port");
     assert!(run_serve(cfg.clone()).await.is_err());
     assert!(!cfg.token_file.exists());
+}
+
+#[tokio::test]
+async fn no_reads_always_misses() {
+    let t = spawn_no_reads_server().await;
+    let r = put(&t, "ab12", b"artifact", &[("x-artifact-duration", "5")]).await;
+    assert_eq!(r.status(), 200);
+    assert!(exists(&t, "ab12").await, "PUTs still store");
+    assert_eq!(get_artifact(&t, "ab12").await.status(), 404);
+    assert_eq!(head(&t, "ab12").await.status(), 404);
+    let q: Value = authed(&t, Method::POST, "/v8/artifacts")
+        .json(&json!({"hashes": ["ab12"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(q, json!({}));
+    let s = t.stats.snapshot();
+    assert_eq!((s.puts, s.hits, s.misses), (1, 0, 2));
+    // Invalid hashes are still rejected first.
+    assert_eq!(get_artifact(&t, "zz").await.status(), 400);
+}
+
+#[tokio::test]
+async fn no_reads_never_touches_the_store_on_reads() {
+    // A store whose writes fail still serves stat/read; count that GET/HEAD never call it.
+    let layer = FailingWrites::new(opendal::ErrorKind::Unexpected);
+    let calls = layer.calls.clone();
+    let (store, dir) = layered_fs_store(layer);
+    let t = common::spawn_test_server_opts(store, Mode::ReadWrite, true, dir).await;
+    assert_eq!(get_artifact(&t, "ab").await.status(), 404);
+    assert_eq!(head(&t, "ab").await.status(), 404);
+    assert_eq!(calls.total(), 0);
+}
+
+#[tokio::test]
+async fn rate_limited_put_is_200_and_counted() {
+    let mut layer = FailingWrites::new(opendal::ErrorKind::RateLimited);
+    layer.response =
+        Some(r#"Parts { status: 429, version: HTTP/1.1, headers: {"retry-after": "120"} }"#.into());
+    let calls = layer.calls.clone();
+    let (store, dir) = layered_fs_store(layer);
+    let t = spawn_test_server_with(store, Mode::ReadWrite, dir).await;
+
+    let r = put(&t, "aa", b"one", &[]).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({"urls": []}));
+    let s = t.stats.snapshot();
+    assert_eq!((s.rate_limited, s.put_errors, s.puts), (1, 0, 0));
+    assert_eq!(calls.write.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let before = calls.total();
+
+    // The gate is closed: the next PUT is skipped without reaching the store.
+    let r = put(&t, "bb", b"two", &[]).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({"urls": []}));
+    assert_eq!(
+        calls.total(),
+        before,
+        "a paused PUT must not call the store"
+    );
+    let s = t.stats.snapshot();
+    assert_eq!((s.rate_limited, s.put_errors, s.puts), (2, 0, 0));
+
+    // Reads are never gated.
+    assert_eq!(get_artifact(&t, "aa").await.status(), 404);
+    assert_eq!(t.stats.snapshot().misses, 1);
+    assert!(calls.total() > before, "GET still reads the store");
+}
+
+#[tokio::test]
+async fn rate_limited_put_checks_auth_hash_and_mode_first() {
+    let layer = FailingWrites::new(opendal::ErrorKind::RateLimited);
+    let (store, dir) = layered_fs_store(layer);
+    let t = spawn_test_server_with(store, Mode::ReadWrite, dir).await;
+    assert_eq!(put(&t, "aa", b"one", &[]).await.status(), 200);
+    assert_eq!(put(&t, "not-hex", b"x", &[]).await.status(), 400);
+    let r = req(&t, Method::PUT, "/v8/artifacts/aa", None)
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(t.stats.snapshot().rate_limited, 1);
 }

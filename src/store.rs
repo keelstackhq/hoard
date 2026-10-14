@@ -1,10 +1,11 @@
 //! Object store over an OpenDAL `Operator`. Every object is one HRD1 blob (see `envelope`).
 //!
-//! Backends: fs and S3/R2; the GitHub cache arrives in a later milestone.
+//! Backends: fs, S3/R2 and the GitHub Actions cache (`ghac`).
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::pin::Pin;
+use std::time::Duration;
 
 use futures::{Stream, StreamExt, TryStreamExt};
 use opendal::{BufferStream, BytesRange, ErrorKind, Operator, services};
@@ -17,10 +18,14 @@ use crate::envelope::{
 /// Scratch directory (inside the fs root) for in-flight writes.
 const FS_TMP_DIR: &str = ".hoard-tmp";
 
-/// S3 multipart part size. Incoming HTTP frames are small; buffering them into parts of at
-/// least 5 MiB (the S3 minimum) keeps multipart completion valid. Bodies smaller than this
-/// go up in one conditional PUT.
-const S3_CHUNK: usize = 8 * 1024 * 1024;
+/// Upload chunk size (S3 multipart part, GitHub cache block). Incoming HTTP frames are small;
+/// buffering them into parts of at least 5 MiB (the S3 minimum) keeps multipart completion
+/// valid, and on the GitHub cache it keeps one block upload per 8 MiB instead of one per
+/// frame. Bodies smaller than this go up in one request.
+const UPLOAD_CHUNK: usize = 8 * 1024 * 1024;
+
+/// Fix shown when the GitHub Actions cache environment is incomplete.
+const GHAC_HINT: &str = "run hoard through the GitHub Action, or use --storage r2|fs";
 
 /// Bytes read by HEAD to decode a header: fixed prefix plus the largest accepted JSON header.
 const HEAD_READ_LEN: u64 = (PREFIX_LEN + MAX_HEADER_LEN) as u64;
@@ -38,6 +43,63 @@ pub enum StoreError {
         "refusing key prefix {0:?}: it must be non-empty, end with / and be in normal form (for example cache/)"
     )]
     BadPrefix(String),
+    /// The backend rate-limited a write (GitHub cache: HTTP 429). `retry_after` is the
+    /// response's `Retry-After` in seconds, when it had one.
+    #[error("storage rate limit hit (retry after {retry_after:?})")]
+    RateLimited { retry_after: Option<Duration> },
+}
+
+/// `Retry-After` (delta-seconds) of the HTTP response an OpenDAL error came from. OpenDAL
+/// keeps the response only as `response: Parts { .. headers: {"retry-after": "30", ..} }` in
+/// the error's display text; an HTTP-date or a missing header yields `None`.
+pub fn retry_after(e: &opendal::Error) -> Option<Duration> {
+    const NEEDLE: &str = "\"retry-after\": \"";
+    let text = e.to_string();
+    let start = text.find(NEEDLE)? + NEEDLE.len();
+    let rest = &text[start..];
+    let value = &rest[..rest.find('"')?];
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// `RateLimited` for an OpenDAL rate-limit error; anything else unchanged.
+fn rate_limited(e: StoreError) -> StoreError {
+    match e {
+        StoreError::Storage(o) if o.kind() == ErrorKind::RateLimited => StoreError::RateLimited {
+            retry_after: retry_after(&o),
+        },
+        e => e,
+    }
+}
+
+/// The GitHub Actions cache operator, configured from the process environment (empty values
+/// count as unset). See [`ghac_operator_from`].
+pub fn ghac_operator(cache_version: &str) -> anyhow::Result<Operator> {
+    ghac_operator_from(cache_version, |k| std::env::var(k).ok())
+}
+
+/// The GitHub Actions cache operator, with environment variables read through `lookup`.
+/// `ACTIONS_RESULTS_URL` and `ACTIONS_RUNTIME_TOKEN` must be set (only JavaScript actions get
+/// them; the action passes them on). Entries are versioned `hoard-{cache_version}`, so
+/// different cache versions never collide.
+pub fn ghac_operator_from(
+    cache_version: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Operator> {
+    let var = |k: &str| lookup(k).filter(|v| !v.is_empty());
+    let need = |k: &str| var(k).ok_or_else(|| anyhow::anyhow!("{k} is not set: {GHAC_HINT}"));
+    let results_url = need("ACTIONS_RESULTS_URL")?;
+    let token = need("ACTIONS_RUNTIME_TOKEN")?;
+    opendal::install_default();
+    let mut ghac = services::Ghac::default()
+        .version(&format!("hoard-{cache_version}"))
+        .runtime_token(&token);
+    // OpenDAL picks the endpoint itself: `ACTIONS_CACHE_URL`, then `ACTIONS_RESULTS_URL`, on
+    // the v1 cache service (GHES), and `ACTIONS_RESULTS_URL` on v2. Without
+    // `ACTIONS_CACHE_URL` both choices are the results URL, so pass it explicitly.
+    if var("ACTIONS_CACHE_URL").is_none() {
+        ghac = ghac.endpoint(&results_url);
+    }
+    Ok(Operator::new(ghac)?.layer(crate::r2::Timeouts::DEFAULT.layer()))
 }
 
 /// An artifact body: the bytes after the envelope header, streamed from the one storage read.
@@ -116,7 +178,7 @@ pub fn build_operator(cfg: &Config) -> anyhow::Result<Operator> {
                 &r2.secret_access_key,
             )
         }
-        Storage::Github => anyhow::bail!("storage=github is not yet supported in this build"),
+        Storage::Github => ghac_operator(&cfg.cache_version),
     }
 }
 
@@ -125,8 +187,11 @@ pub struct Store {
     pub op: Operator,
     /// fs backend: hide the scratch dir from `list`.
     is_fs: bool,
-    /// Writer chunk size (S3 only).
+    /// Writer chunk size (S3 and GitHub cache).
     chunk: Option<usize>,
+    /// Abort a failed write. Not on the GitHub cache: its abort is a no-op that first creates
+    /// the cache entry if the failed write had not, one more request against the rate limit.
+    abort_failed: bool,
 }
 
 fn is_condition_failed(e: &opendal::Error) -> bool {
@@ -141,7 +206,8 @@ impl Store {
         let scheme = op.info().scheme();
         Self {
             is_fs: scheme == "fs",
-            chunk: (scheme == "s3").then_some(S3_CHUNK),
+            chunk: matches!(scheme, "s3" | "ghac").then_some(UPLOAD_CHUNK),
+            abort_failed: scheme != "ghac",
             op,
         }
     }
@@ -238,8 +304,27 @@ impl Store {
     }
 
     /// Writes header then streams the body. Keys are immutable: an existing key is
-    /// `AlreadyExists`. A failing body stream aborts the write so no partial object remains.
+    /// `AlreadyExists`, also when a backend without conditional writes (the GitHub cache)
+    /// rejects a second create. A failing body stream aborts the write so no partial object
+    /// remains. A backend rate limit is [`StoreError::RateLimited`].
     pub async fn put(
+        &self,
+        key: &str,
+        header: &Header,
+        body: impl Stream<Item = Result<Bytes, std::io::Error>> + Send,
+    ) -> Result<PutOutcome, StoreError> {
+        self.put_inner(key, header, body)
+            .await
+            .map_err(rate_limited)
+    }
+
+    async fn abort(&self, writer: &mut opendal::Writer) {
+        if self.abort_failed {
+            let _ = writer.abort().await;
+        }
+    }
+
+    async fn put_inner(
         &self,
         key: &str,
         header: &Header,
@@ -257,11 +342,11 @@ impl Store {
         if let Some(chunk) = self.chunk {
             fut = fut.chunk(chunk);
         }
+        // A condition or "already exists" failure means the key exists: with if-not-exists
+        // that is the condition, without it the backend refused a second create.
         let mut writer = match fut.await {
             Ok(w) => w,
-            Err(e) if conditional && is_condition_failed(&e) => {
-                return Ok(PutOutcome::AlreadyExists);
-            }
+            Err(e) if is_condition_failed(&e) => return Ok(PutOutcome::AlreadyExists),
             Err(e) => return Err(e.into()),
         };
         let streamed: Result<(), StoreError> = async {
@@ -274,19 +359,18 @@ impl Store {
         }
         .await;
         if let Err(e) = streamed {
-            if conditional && matches!(&e, StoreError::Storage(o) if is_condition_failed(o)) {
-                let _ = writer.abort().await;
+            self.abort(&mut writer).await;
+            if matches!(&e, StoreError::Storage(o) if is_condition_failed(o)) {
                 return Ok(PutOutcome::AlreadyExists);
             }
-            let _ = writer.abort().await;
             return Err(e);
         }
         match writer.close().await {
             Ok(_) => Ok(PutOutcome::Created),
             Err(e) => {
                 // A rejected or failed completion leaves S3 multipart parts behind; drop them.
-                let _ = writer.abort().await;
-                if conditional && is_condition_failed(&e) {
+                self.abort(&mut writer).await;
+                if is_condition_failed(&e) {
                     Ok(PutOutcome::AlreadyExists)
                 } else {
                     Err(e.into())
@@ -330,5 +414,95 @@ impl Store {
     /// Deletes `key`; deleting a missing key succeeds.
     pub async fn delete(&self, key: &str) -> Result<(), StoreError> {
         Ok(self.op.delete(key).await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            vars.iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn github_storage_requires_results_url() {
+        for vars in [
+            &[][..],
+            &[("ACTIONS_RUNTIME_TOKEN", "tok")][..],
+            &[
+                ("ACTIONS_RESULTS_URL", ""),
+                ("ACTIONS_RUNTIME_TOKEN", "tok"),
+            ][..],
+        ] {
+            let err = ghac_operator_from("v1", env(vars)).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                "ACTIONS_RESULTS_URL is not set: run hoard through the GitHub Action, or use --storage r2|fs"
+            );
+        }
+    }
+
+    #[test]
+    fn github_storage_requires_runtime_token() {
+        for vars in [
+            &[("ACTIONS_RESULTS_URL", "https://results.example/")][..],
+            &[
+                ("ACTIONS_RESULTS_URL", "https://results.example/"),
+                ("ACTIONS_RUNTIME_TOKEN", ""),
+            ][..],
+        ] {
+            let err = ghac_operator_from("v1", env(vars)).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                "ACTIONS_RUNTIME_TOKEN is not set: run hoard through the GitHub Action, or use --storage r2|fs"
+            );
+        }
+    }
+
+    #[test]
+    fn github_operator_is_versioned_per_cache_version() {
+        let vars = [
+            ("ACTIONS_RESULTS_URL", "https://results.example/"),
+            ("ACTIONS_RUNTIME_TOKEN", "secret-runtime-token"),
+        ];
+        let op = ghac_operator_from("v7", env(&vars)).unwrap();
+        assert_eq!(op.info().scheme(), "ghac");
+        // OpenDAL names the operator after the cache version; the v2 cache service hashes it.
+        let name = op.info().name().to_string();
+        let hashed: String = {
+            use sha2::Digest;
+            sha2::Sha256::digest(b"hoard-v7")
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        assert!(name == "hoard-v7" || name == hashed, "{name}");
+        assert!(!format!("{op:?}").contains("secret-runtime-token"));
+        // Keys are immutable on GitHub: no conditional writes, so `put` stats first.
+        assert!(!op.info().capability().write_with_if_not_exists);
+    }
+
+    #[test]
+    fn retry_after_comes_from_the_response_headers() {
+        let err = |ctx: &str| {
+            opendal::Error::new(ErrorKind::RateLimited, "slow down").with_context("response", ctx)
+        };
+        let parts = r#"Parts { status: 429, version: HTTP/1.1, headers: {"content-length": "0", "retry-after": "30"} }"#;
+        assert_eq!(
+            retry_after(&err(parts)),
+            Some(std::time::Duration::from_secs(30))
+        );
+        let date =
+            r#"Parts { status: 429, headers: {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"} }"#;
+        assert_eq!(retry_after(&err(date)), None);
+        assert_eq!(
+            retry_after(&err("Parts { status: 429, headers: {} }")),
+            None
+        );
     }
 }

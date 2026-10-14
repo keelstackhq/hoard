@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, fix_command, r2_client, rule_id};
 use crate::r2::prune::prune;
+use crate::ratelimit::RateGate;
 use crate::redact::redacted;
 use crate::server::{AppState, router};
 use crate::stats::{Stats, human_bytes, render_summary};
@@ -22,6 +23,9 @@ use crate::store::{Store, StoreError, build_operator};
 
 /// Key prefix used by the fs backend.
 const FS_PREFIX: &str = "cache/";
+
+/// Key prefix used by the GitHub cache backend (spec §6.1).
+const GITHUB_PREFIX: &str = "hoard/";
 
 /// Upper bound for the shutdown prune: a slow bucket must not hold the CI job hostage. The
 /// marker is only written on completion, so an interrupted prune runs again next time.
@@ -89,10 +93,7 @@ pub(crate) fn storage_layout(cfg: &Config) -> anyhow::Result<(String, String)> {
                 format!("Storage: r2 ({}/{})", r2.bucket, r2.prefix),
             ))
         }
-        Storage::Github => bail!(
-            "the GitHub cache backend comes with the GitHub Action (milestone 2); \
-             use --storage fs|r2 for now"
-        ),
+        Storage::Github => Ok((GITHUB_PREFIX.to_string(), "Storage: github".to_string())),
     }
 }
 
@@ -199,6 +200,8 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         stats: stats.clone(),
         token: token.clone(),
         mode: cfg.mode,
+        no_reads: cfg.no_reads,
+        rate_gate: Arc::new(RateGate::default()),
         prefix: prefix.clone(),
         cache_version: cfg.cache_version.clone(),
         shutdown: shutdown_tx,
@@ -387,6 +390,7 @@ fn short_reason(e: &StoreError) -> String {
         StoreError::Storage(e) => e.kind().to_string(),
         StoreError::Body(e) => e.kind().to_string(),
         StoreError::BadPrefix(_) => "bad prefix".into(),
+        StoreError::RateLimited { .. } => "rate limited".into(),
     }
 }
 
@@ -403,8 +407,15 @@ async fn shutdown_work(
 ) {
     let mut extra_lines = startup_lines;
     extra_lines.extend(prune_on_shutdown(cfg, cache).await);
+    let snapshot = stats.snapshot();
+    if snapshot.rate_limited > 0 {
+        extra_lines.push(format!(
+            "Rate limited: {} uploads skipped",
+            snapshot.rate_limited
+        ));
+    }
     if let Some(path) = &cfg.summary_file {
-        let md = render_summary(&stats.snapshot(), storage_line, &extra_lines);
+        let md = render_summary(&snapshot, storage_line, &extra_lines);
         if let Err(e) = write_atomic(path, &md, false) {
             warn!(path = %path.display(), error = format!("{e:#}"), "cannot write summary file");
         }
@@ -501,6 +512,46 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn summary_reports_rate_limited_uploads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.fs_root = dir.path().join("store");
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Store::new(build_operator(&cfg).unwrap());
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+        };
+        let stats = Stats::default();
+        shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(md.ends_with("|\nStorage: github\n"), "{md}");
+
+        stats
+            .rate_limited
+            .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.ends_with("Storage: github · Rate limited: 3 uploads skipped\n"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn github_layout() {
+        let cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "github"])).unwrap();
+        let (prefix, line) = storage_layout(&cfg).unwrap();
+        assert_eq!(
+            (prefix.as_str(), line.as_str()),
+            ("hoard/", "Storage: github")
+        );
     }
 
     #[tokio::test]

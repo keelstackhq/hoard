@@ -9,7 +9,7 @@ use opendal::ErrorKind;
 use opendal::raw::normalize_path;
 use tracing::warn;
 
-use crate::config::Config;
+use crate::config::{Config, Storage};
 use crate::redact::redacted;
 use crate::serve::storage_layout;
 use crate::stats::human_bytes;
@@ -165,6 +165,9 @@ pub async fn prune(
 /// `hoard prune [--force]` (spec §4.1): prunes the configured storage now and prints one
 /// line. Fails on a listing, marker or delete error.
 pub async fn run_prune(cfg: &Config, force: bool) -> anyhow::Result<()> {
+    if cfg.storage == Storage::Github {
+        bail!("prune is only for r2/fs storage; GitHub evicts old cache entries itself");
+    }
     let (prefix, _) = storage_layout(cfg)?;
     let store = Store::new(build_operator(cfg)?);
     let r = prune(&store, &prefix, cfg.max_size, Utc::now(), force).await?;

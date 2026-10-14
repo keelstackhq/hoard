@@ -1,6 +1,7 @@
 //! Helpers shared by integration tests.
 #![allow(dead_code)]
 
+pub mod failing_layer;
 pub mod lifecycle_proxy;
 pub mod store_checks;
 
@@ -59,6 +60,7 @@ pub fn fs_config(root: impl AsRef<std::path::Path>) -> Config {
     Config {
         storage: Storage::Fs,
         mode: Mode::ReadWrite,
+        no_reads: false,
         cache_version: "v1".into(),
         port: 0,
         port_file: root.join("port"),
@@ -75,6 +77,7 @@ pub fn fs_config(root: impl AsRef<std::path::Path>) -> Config {
 
 use std::sync::Arc;
 
+use hoard::ratelimit::RateGate;
 use hoard::server::{AppState, router};
 use hoard::stats::Stats;
 use hoard::store::{Store, build_operator};
@@ -105,6 +108,30 @@ pub async fn spawn_test_server_with(
     mode: Mode,
     dir: tempfile::TempDir,
 ) -> TestServer {
+    spawn_test_server_opts(store, mode, false, dir).await
+}
+
+/// An fs-backed server with `no_reads` set.
+pub async fn spawn_no_reads_server() -> TestServer {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(build_operator(&fs_config(dir.path())).unwrap());
+    spawn_test_server_opts(store, Mode::ReadWrite, true, dir).await
+}
+
+/// An fs store in a fresh tempdir with `layer` on top.
+pub fn layered_fs_store(layer: impl opendal::raw::Layer) -> (Store, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let op = build_operator(&fs_config(dir.path())).unwrap().layer(layer);
+    (Store::new(op), dir)
+}
+
+/// [`spawn_test_server_with`] with every server option.
+pub async fn spawn_test_server_opts(
+    store: Store,
+    mode: Mode,
+    no_reads: bool,
+    dir: tempfile::TempDir,
+) -> TestServer {
     let store = Arc::new(store);
     let stats = Arc::new(Stats::default());
     let token: String = rand::random::<[u8; 16]>()
@@ -117,6 +144,8 @@ pub async fn spawn_test_server_with(
         stats: stats.clone(),
         token: token.clone(),
         mode,
+        no_reads,
+        rate_gate: Arc::new(RateGate::default()),
         prefix: "cache/".into(),
         cache_version: "v1".into(),
         shutdown: tx,

@@ -77,8 +77,8 @@ One Rust crate (`hoard`, lib + bin) and one small TypeScript action in `action/`
 |---|---|
 | `hoard serve` | Run the cache server until shutdown. |
 | `hoard env` | Print `export` lines for a running server (reads the port file and token file). |
-| `hoard prune` | Enforce `max-size` on R2 (or fs) now (ignores the 24 h throttle with `--force`); prints `pruned N of M objects, freed X, Y remain (max Z)` or `skipped: last prune < 24 h ago (use --force)`. |
-| `hoard doctor` | Check storage credentials, bucket access and the R2 lifecycle rule; print fixes. The access check writes, reads and deletes `{prefix}_hoard/doctor`, also with `mode=read`. |
+| `hoard prune` | Enforce `max-size` on R2 (or fs) now (ignores the 24 h throttle with `--force`); prints `pruned N of M objects, freed X, Y remain (max Z)` or `skipped: last prune < 24 h ago (use --force)`. With `storage=github` it fails: `prune is only for r2/fs storage; GitHub evicts old cache entries itself`. |
+| `hoard doctor` | Check storage credentials, bucket access and the R2 lifecycle rule; print fixes. The access check writes, reads and deletes `{prefix}_hoard/doctor`, also with `mode=read`. With `storage=github` it only checks that the GitHub Actions cache environment is complete and prints `✓ GitHub cache environment`; it never writes (entries are immutable and count against the quota). |
 | `hoard vp restore` / `vp save` | Restore or save the Vite+ task-cache directory (milestone 3). |
 
 ### 4.2 Configuration
@@ -91,6 +91,7 @@ secrets as `""`).
 |---|---|---|
 | `storage` | `github` | `github` \| `r2` \| `fs` |
 | `mode` | `read-write` | `read-write` \| `read` \| `off`; see §8 |
+| `no-reads` | off | Boolean flag (`HOARD_NO_READS=true` or `1`): GET/HEAD miss and the batch query finds nothing, without reading the store; PUTs are unaffected (§6.4, `write-only`) |
 | `cache-version` | `v1` | Part of every key; bump to purge. One segment of `[A-Za-z0-9._-]` (not `.` or `..`, no `/`) |
 | `port` | `0` | `0` = pick a free port; actual port written to `--port-file` |
 | `port-file` | `$RUNNER_TEMP/hoard.port` or `./.hoard/port` | |
@@ -117,11 +118,11 @@ Bound to `127.0.0.1` only. Every route except `/_hoard/health` requires
 | Route | Behaviour |
 |---|---|
 | `GET /v8/artifacts/status` | `200 {"status":"enabled"}` (`"disabled"` when `mode=off`) |
-| `HEAD /v8/artifacts/{hash}` | `200` + `Content-Length` and `x-artifact-duration`/`x-artifact-tag` headers if present, else `404`. Must not download the body. Counts misses only (the following GET counts the hit). |
-| `GET /v8/artifacts/{hash}` | `200` streaming body (`application/octet-stream`, `Content-Length`, artifact headers) or `404` |
-| `PUT /v8/artifacts/{hash}` | Stream body to the store; `200 {"urls":[]}`. Existing key → also `200`. `mode=read`/`off` → `403` with `{"error":{"code":"read_only","message":"hoard is in read-only mode"}}` (code `off`, message `hoard is off (mode=off)` for `off`), the error shape Turborepo prints. The code is never `forbidden` or `remote_caching_*`: Turborepo answers those by disabling the remote cache for the whole run, reads included. Needs `Content-Length` (becomes the envelope `size`); missing, a body of a different length, or a header over 4096 bytes → not stored, `200`, counted as `put_errors`. |
+| `HEAD /v8/artifacts/{hash}` | `200` + `Content-Length` and `x-artifact-duration`/`x-artifact-tag` headers if present, else `404`. Must not download the body. Counts misses only (the following GET counts the hit). With `no-reads`: always `404`, counted as a miss, store not read. |
+| `GET /v8/artifacts/{hash}` | `200` streaming body (`application/octet-stream`, `Content-Length`, artifact headers) or `404`. With `no-reads`: always `404`, counted as a miss, store not read. |
+| `PUT /v8/artifacts/{hash}` | Stream body to the store; `200 {"urls":[]}`. Existing key → also `200`. `mode=read`/`off` → `403` with `{"error":{"code":"read_only","message":"hoard is in read-only mode"}}` (code `off`, message `hoard is off (mode=off)` for `off`), the error shape Turborepo prints. The code is never `forbidden` or `remote_caching_*`: Turborepo answers those by disabling the remote cache for the whole run, reads included. Needs `Content-Length` (becomes the envelope `size`); missing, a body of a different length, or a header over 4096 bytes → not stored, `200`, counted as `put_errors`. A backend rate limit → `200`, counted as `rate_limited`, and uploads pause (§6.4): while paused, a PUT (after the auth, hash and mode checks) is answered `200` and counted as `rate_limited` without touching the store or reading the body. |
 | `POST /v8/artifacts/events` | Accept (body ignored); `200` |
-| `POST /v8/artifacts` | Body `{"hashes":[…]}` → `200` JSON object mapping each found hash to `{"size":<u64>,"taskDurationMs":<u64\|null>}`; missing hashes are left out |
+| `POST /v8/artifacts` | Body `{"hashes":[…]}` → `200` JSON object mapping each found hash to `{"size":<u64>,"taskDurationMs":<u64\|null>}`; missing hashes are left out (`{}` with `mode=off` or `no-reads`) |
 | `GET /_hoard/health` | `200 ok` (no auth) |
 | `GET /_hoard/stats` | `200` JSON `Stats` (§9) |
 | `POST /_hoard/shutdown` | Flush pending work, run prune (R2), write summary, respond `200`, exit 0 |
@@ -163,25 +164,36 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
 
 - `put` uses `write_with(...).if_not_exists(true)` when the operator's capability
   `write_with_if_not_exists` is true; otherwise `stat` first and skip if present. An existing key is
-  success (`PutOutcome::AlreadyExists`).
+  success (`PutOutcome::AlreadyExists`), also when a backend without conditional writes rejects a
+  second create with "already exists" (`ghac` answers `409` when another job created the key
+  between the `stat` and the write). A rate-limit error (`ErrorKind::RateLimited`, HTTP `429`) is
+  `StoreError::RateLimited { retry_after }`, with `Retry-After` in seconds when the response had one.
 - `get` is one streaming read of the whole object: the header is parsed from its first bytes
   and the body is the rest of the same read, so a hit costs one storage request (this matters
   under GitHub's download rate limit). `head` (HEAD and the batch query) is one bounded range
   read of the first 4104 bytes and never reads the body.
 - `list` and `delete` are only needed for R2 cleanup; `ghac` does not support them (GitHub evicts).
 - Memory per request is bounded: S3 uploads buffer at most one 8 MiB multipart part (an artifact
-  smaller than that is one part), fs and GET paths stream; nothing is buffered beyond that bound.
-- S3/R2 requests are time-bounded (60 s per operation, 15 s per read/write IO step); a timeout is a
+  smaller than that is one part); `ghac` uploads go up in 8 MiB blocks (OpenDAL keeps up to 4 in
+  flight); fs and GET paths stream; nothing is buffered beyond that bound.
+- S3/R2 and `ghac` requests are time-bounded (60 s per operation, 15 s per read/write IO step); a timeout is a
   storage error like any other (GET/HEAD miss, PUT counts `put_errors`), so a hung connection never
   stalls the build.
 
 ### 6.4 GitHub cache backend specifics
 
 - Needs `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_RESULTS_URL` (only present in JS-action processes;
-  the action passes them to the child). If missing, `serve --storage github` **fails at startup**
-  with a clear message — never a silent fallback to disk.
+  the action passes them to the child; an empty value counts as unset). If missing,
+  `serve --storage github` **fails at startup**, before it listens, with
+  `ACTIONS_RESULTS_URL is not set: run hoard through the GitHub Action, or use --storage r2|fs`
+  (`ACTIONS_RESULTS_URL` is checked first, then `ACTIONS_RUNTIME_TOKEN`) — never a silent
+  fallback to disk. OpenDAL picks the cache service version (v2 when `ACTIONS_CACHE_SERVICE_V2` is set and
+  the server is not GHES, else v1) and the endpoint (v2: `ACTIONS_RESULTS_URL`; v1:
+  `ACTIONS_CACHE_URL`, else `ACTIONS_RESULTS_URL`).
+- Cache entries are versioned `hoard-{cache_version}`, so different cache versions never collide.
 - Rate limits: 200 uploads/min, 1,500 downloads/min per repo. On `429`, pause all uploads for
-  `Retry-After` seconds (default 60), count `rate_limited`, keep serving reads.
+  `Retry-After` seconds (default 60; a pause is only ever extended), count `rate_limited`, keep
+  serving reads. One warning is logged when the pause starts, not one per skipped upload.
 - Respect `ACTIONS_CACHE_MODE`: the action maps it to `--mode` (`read` → `read`, `none` → `off`,
   `write-only` → `read-write` with reads disabled via `--no-reads`); the binary only reads `--mode`
   and `--no-reads`.
@@ -261,6 +273,8 @@ first (does a same-key copy reset the age?).
 
 `Stats { hits, misses, puts, put_skipped_existing, put_errors, rate_limited, corrupt,
 bytes_down, bytes_up, time_saved_ms }` — `time_saved_ms` sums `duration_ms` of every hit.
+The storage line is `Storage: github`, `Storage: r2 (<bucket>/<prefix>)` or `Storage: fs (<root>)`;
+when `rate_limited > 0` the line ends with `Rate limited: N uploads skipped`.
 
 Summary markdown (written to `summary-file`, appended by the action to `$GITHUB_STEP_SUMMARY`):
 

@@ -124,6 +124,9 @@ pub struct ServeArgs {
     pub storage: Storage,
     #[arg(long, env = "HOARD_MODE", value_enum, default_value = "read-write")]
     pub mode: Mode,
+    /// Every GET/HEAD is a miss (the store is never read); uploads still happen.
+    #[arg(long, env = "HOARD_NO_READS", value_parser = clap::builder::BoolishValueParser::new())]
+    pub no_reads: bool,
     /// Part of every key; bump to purge.
     #[arg(long, env = "HOARD_CACHE_VERSION", default_value = "v1")]
     pub cache_version: String,
@@ -171,6 +174,7 @@ impl fmt::Debug for ServeArgs {
         f.debug_struct("ServeArgs")
             .field("storage", &self.storage)
             .field("mode", &self.mode)
+            .field("no_reads", &self.no_reads)
             .field("cache_version", &self.cache_version)
             .field("port", &self.port)
             .field("paths", &self.paths)
@@ -250,6 +254,8 @@ impl fmt::Debug for R2Config {
 pub struct Config {
     pub storage: Storage,
     pub mode: Mode,
+    /// GET/HEAD and the batch query always miss without reading the store.
+    pub no_reads: bool,
     pub cache_version: String,
     pub port: u16,
     pub port_file: PathBuf,
@@ -268,6 +274,7 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("storage", &self.storage)
             .field("mode", &self.mode)
+            .field("no_reads", &self.no_reads)
             .field("cache_version", &self.cache_version)
             .field("port", &self.port)
             .field("port_file", &self.port_file)
@@ -344,6 +351,7 @@ impl TryFrom<ServeArgs> for Config {
         Ok(Config {
             storage: a.storage,
             mode: a.mode,
+            no_reads: a.no_reads,
             cache_version: a.cache_version,
             port: a.port,
             port_file: a.paths.port_file.unwrap_or_else(default_port_file),
@@ -650,6 +658,16 @@ mod tests {
             let a = ServeArgs::parse_from(["serve", "--storage", "fs", "--max-age-days", ok]);
             assert!(Config::try_from(a).is_ok());
         }
+    }
+    #[test]
+    fn no_reads_flag() {
+        let parse = |args: &[&str]| {
+            Config::try_from(ServeArgs::parse_from(args.iter().copied()))
+                .unwrap()
+                .no_reads
+        };
+        assert!(!parse(&["serve", "--storage", "fs"]));
+        assert!(parse(&["serve", "--storage", "fs", "--no-reads"]));
     }
     #[test]
     fn defaults() {

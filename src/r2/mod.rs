@@ -25,8 +25,9 @@ pub fn s3_operator(
 }
 
 /// Request time bounds; a hung connection becomes an error (a miss), never a stalled build.
+/// Used for S3/R2 and the GitHub cache.
 #[derive(Debug, Clone, Copy)]
-struct Timeouts {
+pub(crate) struct Timeouts {
     /// Whole non-IO operation (stat, delete, list page, ...).
     op: Duration,
     /// Each IO step of a read or write (one chunk, one part).
@@ -35,10 +36,16 @@ struct Timeouts {
 
 impl Timeouts {
     // 60 s per operation, 15 s per IO step: generous for R2, short enough not to stall CI.
-    const DEFAULT: Self = Self {
+    pub(crate) const DEFAULT: Self = Self {
         op: Duration::from_secs(60),
         io: Duration::from_secs(15),
     };
+
+    pub(crate) fn layer(self) -> TimeoutLayer {
+        TimeoutLayer::new()
+            .with_timeout(self.op)
+            .with_io_timeout(self.io)
+    }
 }
 
 fn s3_operator_with(
@@ -62,8 +69,7 @@ fn s3_operator_with(
         .secret_access_key(secret)
         .disable_config_load()
         .disable_ec2_metadata();
-    let timeout = TimeoutLayer::new().with_timeout(t.op).with_io_timeout(t.io);
-    Ok(Operator::new(s3)?.layer(timeout))
+    Ok(Operator::new(s3)?.layer(t.layer()))
 }
 
 #[cfg(test)]

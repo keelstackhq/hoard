@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 
 use crate::config::Mode;
+use crate::ratelimit::RateGate;
 use crate::stats::{Stats, StatsSnapshot};
 use crate::store::Store;
 
@@ -20,6 +21,10 @@ pub struct AppState {
     pub stats: Arc<Stats>,
     pub token: String,
     pub mode: Mode,
+    /// GET/HEAD and the batch query miss without reading the store (`--no-reads`).
+    pub no_reads: bool,
+    /// Closed for a while after the backend rate-limits an upload.
+    pub rate_gate: Arc<RateGate>,
     pub prefix: String,
     pub cache_version: String,
     /// `POST /_hoard/shutdown` sends a reply channel here and answers once the shutdown work

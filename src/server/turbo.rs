@@ -1,8 +1,10 @@
 //! Turborepo remote-cache API (`/v8/artifacts`). Storage errors never fail the build:
-//! GET/HEAD become misses, PUT answers 200 and counts `put_errors`.
+//! GET/HEAD become misses, PUT answers 200 and counts `put_errors` (or `rate_limited`, when
+//! the backend rate-limits uploads; uploads then pause, reads continue).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use axum::Json;
 use axum::body::{Body, Bytes};
@@ -20,7 +22,7 @@ use crate::config::Mode;
 use crate::envelope::{Header, MAX_HEADER_LEN, PREFIX_LEN, encode_header};
 use crate::key::validate_hash;
 use crate::redact::redacted;
-use crate::store::{GetOutcome, PutOutcome};
+use crate::store::{GetOutcome, PutOutcome, StoreError};
 
 const DURATION: &str = "x-artifact-duration";
 const TAG: &str = "x-artifact-tag";
@@ -76,7 +78,7 @@ pub struct Found {
 
 /// Batch existence check. Invalid hashes and misses are left out; stats are unchanged.
 pub async fn query(State(s): State<AppState>, body: Bytes) -> Json<HashMap<String, Found>> {
-    if s.mode == Mode::Off {
+    if s.mode == Mode::Off || s.no_reads {
         return Json(HashMap::new());
     }
     let hashes = serde_json::from_slice::<Query>(&body)
@@ -129,6 +131,10 @@ pub async fn head_artifact(State(s): State<AppState>, Path(hash): Path<String>) 
     if s.mode == Mode::Off {
         return StatusCode::NOT_FOUND.into_response();
     }
+    if s.no_reads {
+        inc(&s.stats.misses, 1);
+        return StatusCode::NOT_FOUND.into_response();
+    }
     match s.store.head(&s.turbo_key(&hash)).await {
         Ok(Some(h)) => (StatusCode::OK, artifact_headers(&h)).into_response(),
         Ok(None) => {
@@ -154,6 +160,9 @@ pub async fn get_artifact(State(s): State<AppState>, Path(hash): Path<String>) -
         inc(&s.stats.misses, 1);
         StatusCode::NOT_FOUND.into_response()
     };
+    if s.no_reads {
+        return miss();
+    }
     let (h, body) = match s.store.get(&s.turbo_key(&hash)).await {
         Ok(GetOutcome::Hit(h, body)) => (h, body),
         Ok(GetOutcome::Miss) => return miss(),
@@ -193,6 +202,11 @@ pub async fn put_artifact(
     if s.mode != Mode::ReadWrite {
         return forbidden(s.mode);
     }
+    // Paused after a rate limit: skip without touching the store (the body is dropped unread).
+    if !s.rate_gate.allow_upload(Instant::now()) {
+        inc(&s.stats.rate_limited, 1);
+        return put_ok();
+    }
     let Some(size) = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
@@ -226,6 +240,10 @@ pub async fn put_artifact(
             inc(&s.stats.bytes_up, size);
         }
         Ok(PutOutcome::AlreadyExists) => inc(&s.stats.put_skipped_existing, 1),
+        Err(StoreError::RateLimited { retry_after }) => {
+            s.rate_gate.on_rate_limited(Instant::now(), retry_after);
+            inc(&s.stats.rate_limited, 1);
+        }
         Err(e) => {
             warn!(%hash, error = %redacted(&e), "PUT: storage error, not cached");
             inc(&s.stats.put_errors, 1);

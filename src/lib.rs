@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod envelope;
 pub mod key;
 pub mod r2;
+pub mod ratelimit;
 pub mod redact;
 pub mod serve;
 pub mod server;
