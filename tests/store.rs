@@ -42,23 +42,21 @@ async fn fs_failed_body_leaves_no_object() {
 }
 
 #[test]
-fn unsupported_backends_fail_clearly() {
+fn r2_without_settings_fails_clearly() {
     let d = tempfile::tempdir().unwrap();
     let mut cfg = fs_config(d.path());
     cfg.storage = Storage::R2;
-    assert!(
-        build_operator(&cfg)
-            .unwrap_err()
-            .to_string()
-            .contains("r2-* settings")
-    );
+    let err = build_operator(&cfg).unwrap_err().to_string();
+    assert!(err.contains("r2-* settings"), "{err}");
+}
+
+#[test]
+fn github_backend_not_yet_supported() {
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg = fs_config(d.path());
     cfg.storage = Storage::Github;
-    assert!(
-        build_operator(&cfg)
-            .unwrap_err()
-            .to_string()
-            .contains("not yet supported")
-    );
+    let err = build_operator(&cfg).unwrap_err().to_string();
+    assert!(err.contains("not yet supported"), "{err}");
 }
 
 #[tokio::test]

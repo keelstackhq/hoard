@@ -1659,6 +1659,7 @@ checksum = "3cbd193aec6d62efaff87611dfae52c132aed650bb3cb0c684c0a9394f09a42a"
 dependencies = [
  "opendal-core",
  "opendal-http-transport-reqwest",
+ "opendal-layer-timeout",
  "opendal-service-fs",
  "opendal-service-s3",
 ]
@@ -1701,6 +1702,16 @@ dependencies = [
  "http-body",
  "opendal-core",
  "reqwest",
+]
+
+[[package]]
+name = "opendal-layer-timeout"
+version = "0.59.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d11d53e67473e8914eacb2e14d586779ae57e1a84759ad25232ef339db77d8a"
+dependencies = [
+ "opendal-core",
+ "tokio",
 ]
 
 [[package]]

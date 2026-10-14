@@ -39,6 +39,10 @@ pub enum ConfigError {
     EmptyCacheVersion,
     #[error("r2-prefix {0:?} must end with / (for example cache/)")]
     BadPrefix(String),
+    #[error(
+        "r2-endpoint {0:?} must start with http:// or https:// (for example http://127.0.0.1:9000)"
+    )]
+    BadEndpoint(String),
 }
 
 /// Parse a size such as `5GB`, `750MB` or `1024` (powers of 1000).
@@ -286,6 +290,11 @@ impl TryFrom<ServeArgs> for Config {
                 .collect();
                 return Err(ConfigError::MissingR2(missing));
             };
+            if let Some(e) = &endpoint
+                && !(e.starts_with("http://") || e.starts_with("https://"))
+            {
+                return Err(ConfigError::BadEndpoint(e.clone()));
+            }
             if !a.r2_prefix.ends_with('/') {
                 return Err(ConfigError::BadPrefix(a.r2_prefix));
             }
@@ -495,6 +504,30 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("r2-account-id"), "{err}");
+    }
+    #[test]
+    fn r2_endpoint_must_be_http_url() {
+        for bad in ["127.0.0.1:9000", "ftp://x", "minio"] {
+            let err = Config::try_from(ServeArgs::parse_from([
+                "serve",
+                "--storage",
+                "r2",
+                "--r2-endpoint",
+                bad,
+                "--r2-access-key-id",
+                "k",
+                "--r2-secret-access-key",
+                "s",
+                "--r2-bucket",
+                "b",
+            ]))
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("r2-endpoint") && err.contains("http://127.0.0.1:9000"),
+                "{err}"
+            );
+        }
     }
     #[test]
     fn r2_endpoint_override_debug_redacts_secrets() {

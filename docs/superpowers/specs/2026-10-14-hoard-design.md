@@ -96,7 +96,7 @@ secrets as `""`).
 | `summary-file` | none | Markdown summary written on shutdown |
 | `fs-root` | `./.hoard/store` | `fs` storage only (tests, local use) |
 | `r2-account-id`, `r2-access-key-id`, `r2-secret-access-key`, `r2-bucket` | — | required for `r2` |
-| `r2-endpoint` | — | Optional S3 endpoint URL override (e.g. MinIO for tests and local use); when set, `r2-account-id` is not required |
+| `r2-endpoint` | — | Optional S3 endpoint URL override (e.g. MinIO for tests and local use), must start with `http://` or `https://`; when set, `r2-account-id` is not required |
 | `r2-prefix` | `cache/` | must end with `/` |
 | `r2-lifecycle` | `auto` | `auto` \| `verify` \| `manual`; see §7.1 |
 | `max-age-days` | `7` | R2 lifecycle expiry |
@@ -159,6 +159,9 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   `write_with_if_not_exists` is true; otherwise `stat` first and skip if present. An existing key is
   success (`PutOutcome::AlreadyExists`).
 - `list` and `delete` are only needed for R2 cleanup; `ghac` does not support them (GitHub evicts).
+- S3/R2 requests are time-bounded (60 s per operation, 15 s per read/write IO step); a timeout is a
+  storage error like any other (GET/HEAD miss, PUT counts `put_errors`), so a hung connection never
+  stalls the build.
 
 ### 6.4 GitHub cache backend specifics
 

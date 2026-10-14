@@ -3,22 +3,8 @@
 
 mod common;
 
-use common::{MinioBucket, minio_bucket, r2_config, store_checks as c};
+use common::{MinioBucket, minio_bucket, r2_config, s3_runtime as rt, store_checks as c};
 use hoard::store::{Store, build_operator};
-
-/// One runtime for every test in this file. OpenDAL's default HTTP client (and its
-/// connection pool) is process-wide; pooled connections die with the runtime that opened
-/// them, so per-test runtimes would hand later tests dead connections. The server runs on a
-/// single runtime, so this matches production.
-fn rt() -> &'static tokio::runtime::Runtime {
-    static RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-    });
-    &RT
-}
 
 struct S3Store {
     store: Store,

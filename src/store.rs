@@ -127,15 +127,14 @@ impl Store {
     /// Reads the first `PREFIX_LEN + MAX_HEADER_LEN` bytes (never the body). Objects shorter
     /// than that are fine: a range past EOF is clamped using the object's size. fs reports
     /// such a range as `RangeNotSatisfied`; S3 answers with fewer bytes, which OpenDAL
-    /// reports as `Unexpected` (short read). Keys are immutable, so re-reading is safe.
+    /// reports as a permanent `Unexpected` (short read; timeouts and network errors are
+    /// temporary and propagate). Keys are immutable, so re-reading is safe.
     async fn read_prefix(&self, reader: &Reader, key: &str) -> Result<Bytes, StoreError> {
         match reader.read(0..HEAD_READ_LEN).await {
             Ok(b) => Ok(b.to_bytes()),
             Err(e)
-                if matches!(
-                    e.kind(),
-                    ErrorKind::RangeNotSatisfied | ErrorKind::Unexpected
-                ) =>
+                if e.kind() == ErrorKind::RangeNotSatisfied
+                    || (e.kind() == ErrorKind::Unexpected && !e.is_temporary()) =>
             {
                 let size = self.op.stat(key).await?.content_length().min(HEAD_READ_LEN);
                 if size == 0 {

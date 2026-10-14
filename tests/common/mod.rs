@@ -93,6 +93,21 @@ pub async fn wait_for_file(path: &std::path::Path) -> String {
     panic!("{} did not appear", path.display());
 }
 
+/// The runtime every S3 test must run on (`s3_runtime().block_on(async { .. })`), instead of
+/// `#[tokio::test]`. OpenDAL's default HTTP client (reqwest, with its connection pool) is
+/// process-wide; pooled connections die with the runtime that opened them, so per-test
+/// runtimes hand later tests dead connections ("dispatch task is gone: runtime dropped the
+/// dispatch task"). The server runs on a single runtime, so this matches production.
+pub fn s3_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    });
+    &RT
+}
+
 /// A fresh, empty bucket on the MinIO server named by `HOARD_TEST_S3_ENDPOINT`.
 #[derive(Debug, Clone)]
 pub struct MinioBucket {
