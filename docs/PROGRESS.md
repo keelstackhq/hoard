@@ -24,6 +24,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 03-vite-plus-throughput/Task 1 vp restore/save · f468989, 7d04344, 2072973, e20d525 · cargo all green (96 unit, 37 vp on fs/MinIO/GitHub mock); action 141/141 incl. real binary; dist 157.8 KB; e2e fs + r2 PASS; real Vite+ 1.2.0 round-trip checked by hand · GitHub cache service only mock-tested (self-test leg pending)
 - 2026-10-14 · 03-vite-plus-throughput/Task 2 write-behind uploads · b064ff2, 3885bd5 · cargo all green (18 write-behind, 100 lib); 150 MB stream on+off; e2e fs, fs+write-behind, r2 PASS; action 145/145; dist 158 KB
 - 2026-10-14 · 03-vite-plus-throughput/Task 3 steps 2–5 (refresh-on-hit) · 2cc23f7 · cargo all green (45 r2 incl. 5 refresh on MinIO); action 148/148; e2e r2 with refresh PASS · Step 1's real-R2 check BLOCKED
+- 2026-10-14 · 03-vite-plus-throughput/Task 4 steps 1, 4 (benchmark generator + workflow, new `throttled` stat) · 0c54198, 4744fb2 · node:test 6/6; cargo all green; action 148/148; actionlint clean; local 50-package run: 50 puts then 50 hits · Steps 2–3 BLOCKED
 
 ## Blocked
 
@@ -65,6 +66,11 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=…
   HOARD_TEST_R2_BUCKET=… cargo test --test r2 -- --ignored refresh_real_r2`. If it fails, tell me: refresh then
   switches to a re-PUT of the same envelope and spec §7.3 records it. Until then refresh-on-hit stays off by default.
+- **03-vite-plus-throughput/Task 4 Steps 2–3 — run the rate-limit benchmark and decide on packing.** Action: in the
+  Actions tab run *bench* three times with `packages` = 100, 400 and 1000 (write-behind `auto`), copy the table from
+  each run's summary into `docs/benchmarks/2026-10-rate-limit.md` (template in docs/benchmarks/README.md). Rule: if
+  `throttled > 0` at ≤ 400 packages, packing is needed (tell me and I will write the spec section and plan);
+  otherwise add "packing not needed (bench 2026-10)" to spec §12.
 
 ## Status
 

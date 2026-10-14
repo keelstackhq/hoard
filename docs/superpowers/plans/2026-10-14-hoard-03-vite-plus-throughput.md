@@ -84,7 +84,7 @@
 **Files:**
 - Create: `scripts/bench/generate-monorepo.mjs` (N packages, each a trivial `build`), `.github/workflows/bench.yml` (`workflow_dispatch`, inputs `packages` default 400)
 
-- [ ] **Step 1: Write the generator and workflow** — cold run with `storage: github`, read `rate_limited` and wall time from the job outputs; warm run in a second job.
+- [x] **Step 1: Write the generator and workflow** — cold run with `storage: github`, read `rate_limited` and wall time from the job outputs; warm run in a second job.
 - [ ] **Step 2: Run with 100, 400 and 1000 packages; record the numbers in `docs/benchmarks/2026-xx-rate-limit.md`**
 - [ ] **Step 3: Decide** — if `throttled > 0` (429 responses received; `rate_limited` misses background 429s) at ≤ 400 packages, write a spec section and a new plan for packing (one pack + index per job, HTTP Range reads); otherwise record "packing not needed" in the spec §12.
-- [ ] **Step 4: Commit** — `bench: GitHub cache upload rate limits`
+- [x] **Step 4: Commit** — `bench: GitHub cache upload rate limits`
