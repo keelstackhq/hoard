@@ -176,7 +176,7 @@ test.skipIf(!bin)(
       const first = await job("first", "task results v1");
       expect(first.main).toContain("hoard vp restore: no cache found");
       expect(first.post).toMatch(
-        /hoard vp save: saved cache\/vp\/v1\/[a-z0-9]+-[a-z0-9]+\/4242-1 \(/,
+        /hoard vp save: saved cache\/vp\/v1\/[a-z0-9]+-[a-z0-9]+\/4242-1-[0-9a-f]{8} \(/,
       );
       expect(first.summary).toContain(
         "**Vite+ task cache:** restore: no cache found · save: saved",
@@ -184,11 +184,13 @@ test.skipIf(!bin)(
       expect(first.post).not.toContain("::warning::");
 
       const second = await job("second");
-      expect(second.main).toMatch(/hoard vp restore: restored cache\/vp\/v1\/.+\/4242-1 \(/);
+      expect(second.main).toMatch(
+        /hoard vp restore: restored cache\/vp\/v1\/.+\/4242-1-[0-9a-f]{8} \(/,
+      );
       expect(
         await readFile(join(second.ws, "node_modules/.vite/task-cache/cache.db"), "utf8"),
       ).toBe("task results v1");
-      expect(second.post).toMatch(/hoard vp save: saved cache\/vp\/v1\/.+\/4242-2 \(/);
+      expect(second.post).toMatch(/hoard vp save: saved cache\/vp\/v1\/.+\/4242-2-[0-9a-f]{8} \(/);
     } finally {
       for (const p of pids) {
         try {

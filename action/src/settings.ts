@@ -62,6 +62,14 @@ function maxAgeDays(value: string): number {
   return n;
 }
 
+/** A size as the binary parses it: digits and an optional B, KB, MB, GB or TB (any case). */
+function size(name: string, value: string): string {
+  if (/^\d+(B|KB|MB|GB|TB)?$/i.test(value)) return value;
+  throw new Error(
+    `invalid ${name} ${JSON.stringify(value)}: use a number with an optional KB, MB, GB or TB suffix, e.g. 2GB`,
+  );
+}
+
 export function resolveSettings(inputs: Record<string, string>, env: NodeJS.ProcessEnv): Settings {
   const input = (name: string, fallback = "") => inputs[name]?.trim() || fallback;
   const warnings: string[] = [];
@@ -117,7 +125,7 @@ export function resolveSettings(inputs: Record<string, string>, env: NodeJS.Proc
     r2Lifecycle: oneOf("r2-lifecycle", input("r2-lifecycle", "auto"), LIFECYCLES),
     maxAgeDays: maxAgeDays(input("max-age-days", "7")),
     maxSize: input("max-size", "5GB"),
-    vpMaxSize: input("vp-max-size", "2GB"),
+    vpMaxSize: size("vp-max-size", input("vp-max-size", "2GB")),
     version,
     warnings,
   };

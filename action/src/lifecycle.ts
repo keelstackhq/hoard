@@ -1,8 +1,10 @@
 // The main and post steps (spec §10). Dependencies are injected so the orchestration is tested
 // without a runner; src/main.ts and src/post.ts call these with the real ones.
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as actionsCore from "@actions/core";
 import { BinaryDownloadError, ensureBinary } from "./binary.js";
 import { CHECKSUMS } from "./checksums.generated.js";
@@ -187,6 +189,13 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     const workspace = env.GITHUB_WORKSPACE || process.cwd();
     let vp: VpState | undefined;
     if (d.detectTools(workspace).vp) {
+      if (!existsSync(join(workspace, "node_modules"))) {
+        const w =
+          "Vite+ found but node_modules is missing: put the hoard step after the dependency install, " +
+          "or the install may drop the restored task cache";
+        core.warning(w);
+        settings.warnings.push(w);
+      }
       const args = vpArgs(settings, files, workspace);
       const r = await d.runVp(bin, "restore", args, serveEnv(settings, env));
       if (r.ok) core.info(`hoard vp restore: ${r.line}`);

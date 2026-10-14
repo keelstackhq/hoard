@@ -80,7 +80,8 @@ summary.
 - **Storage errors never fail the build.** A failed read is a miss and a failed upload is
   skipped. If uploads failed, the action shows a warning (`hoard: N uploads failed`) and the job
   summary says `Upload errors: N`, so a broken cache does not look like a cold one.
-- **Vite+.** When the root `package.json` depends on `vite-plus`, main restores Vite Task's
+- **Vite+.** When the root `package.json` (at `GITHUB_WORKSPACE`, the checkout root; a
+  repository checked out with `actions/checkout`'s `path:` is not looked at) depends on `vite-plus`, main restores Vite Task's
   cache directory (`node_modules/.vite/task-cache`, or `VITE_CACHE_PATH` when absolute) from the
   newest archive saved on the same OS and architecture, and post saves it as a new archive for
   this run, before the server stops. Vite+ remote caching is not released yet, so this replaces
@@ -88,7 +89,18 @@ summary.
   than `vp-max-size` is not saved (run `vp cache clean`); restore and save problems are warnings
   and never fail the build. With Vite+, put the hoard step after the dependency install (as the
   Vite+ docs do for `actions/cache`): an install can recreate `node_modules` and drop the
-  restored cache.
+  restored cache. Matrix legs save one archive each; the next run restores the newest one, so
+  legs that run different tasks share only one leg's task cache.
+
+  ```yaml
+  - uses: actions/checkout@v5
+  - uses: pnpm/action-setup@v4
+  - uses: actions/setup-node@v5
+    with: { node-version: 24, cache: pnpm }
+  - run: pnpm install --frozen-lockfile
+  - uses: keelstack/hoard@v1     # after the install: restores node_modules/.vite/task-cache
+  - run: pnpm exec vp run build  # post step saves the task cache
+  ```
 - **Binary download failures never fail the build.** If the hoard binary cannot be downloaded
   (one retry, at most 90 s), the action shows a warning and the job runs without the remote cache. A
   checksum mismatch still fails the step.

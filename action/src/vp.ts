@@ -1,6 +1,6 @@
 // Runs `hoard vp restore` (main) and `hoard vp save` (post) for Vite+ repositories (spec §10).
 // Every problem is reported as a not-ok result, never thrown: the cache must not fail the build.
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { serverFiles } from "./server.js";
 import { storageArgs } from "./server.js";
 import type { Settings } from "./settings.js";
@@ -36,7 +36,13 @@ function seconds(ms: number): string {
   return `${ms / 1000}s`;
 }
 
-/** Runs `<bin> vp <cmd> <args>` with `env`, killed after `timeoutMs`. */
+/** Time between the SIGTERM at the timeout and the SIGKILL. */
+export const KILL_GRACE_MS = 5_000;
+
+/**
+ * Runs `<bin> vp <cmd> <args>` with `env`. At `timeoutMs` it sends SIGTERM (hoard then drops
+ * its spooled archive or half-extracted directory and exits), and SIGKILL `KILL_GRACE_MS` later.
+ */
 export function runVp(
   bin: string,
   cmd: "restore" | "save",
@@ -45,31 +51,57 @@ export function runVp(
   timeoutMs: number,
 ): Promise<VpResult> {
   return new Promise((resolve) => {
-    execFile(
-      bin,
-      ["vp", cmd, ...args],
-      { env, timeout: timeoutMs, killSignal: "SIGKILL", windowsHide: true, maxBuffer: 1 << 20 },
-      (error, stdout, stderr) => {
-        const out = lastLine(String(stdout));
-        if (!error) {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let done = false;
+    const timers: NodeJS.Timeout[] = [];
+    const finish = (r: VpResult) => {
+      if (done) return;
+      done = true;
+      for (const t of timers) clearTimeout(t);
+      resolve(r);
+    };
+    const child = spawn(bin, ["vp", cmd, ...args], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdout.on("data", (b: Buffer) => {
+      stdout = (stdout + b.toString()).slice(-(1 << 16));
+    });
+    child.stderr.on("data", (b: Buffer) => {
+      stderr = (stderr + b.toString()).slice(-(1 << 16));
+    });
+    child.once("error", (e) =>
+      finish({ ok: false, line: `hoard vp ${cmd} could not run: ${e.message}` }),
+    );
+    timers.push(
+      setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        timers.push(setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS));
+      }, timeoutMs),
+    );
+    // `exit`, not `close`: a grandchild holding the pipes open must not keep the step waiting.
+    child.once("exit", (code) => {
+      if (timedOut) {
+        finish({ ok: false, line: `hoard vp ${cmd} timed out after ${seconds(timeoutMs)}` });
+        return;
+      }
+      // Let the pipes drain what was written before the exit.
+      setImmediate(() => {
+        const out = lastLine(stdout);
+        if (code === 0) {
           // hoard exits 0 on storage errors and says so on its one line.
           const warning = out.startsWith("warning: ");
-          resolve({ ok: !warning, line: warning ? out.slice("warning: ".length) : out });
-          return;
-        }
-        const e = error as NodeJS.ErrnoException & { killed?: boolean; code?: unknown };
-        if (e.killed) {
-          resolve({ ok: false, line: `hoard vp ${cmd} timed out after ${seconds(timeoutMs)}` });
-        } else if (typeof e.code === "number") {
-          const why = lastLine(String(stderr));
-          resolve({
-            ok: false,
-            line: `hoard vp ${cmd} exited with code ${e.code}${why ? `: ${why}` : ""}`,
-          });
+          finish({ ok: !warning, line: warning ? out.slice("warning: ".length) : out });
         } else {
-          resolve({ ok: false, line: `hoard vp ${cmd} could not run: ${e.message}` });
+          const why = lastLine(stderr);
+          const how = code === null ? "was killed" : `exited with code ${code}`;
+          finish({ ok: false, line: `hoard vp ${cmd} ${how}${why ? `: ${why}` : ""}` });
         }
-      },
-    );
+      });
+    });
   });
 }

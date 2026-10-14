@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -96,6 +96,27 @@ describe.skipIf(process.platform === "win32")("runVp", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(r).toEqual({ ok: false, line: "hoard vp restore timed out after 0.3s" });
   });
+
+  test("the timeout sends SIGTERM first, so hoard can clean up", async () => {
+    const marker = join(dir, "cleaned");
+    const bin = await stub(
+      `trap 'echo cleaned > "${marker}"; exit 0' TERM\nwhile true; do sleep 0.05; done`,
+    );
+    const r = await runVp(bin, "save", [], {}, 300);
+    expect(r.ok).toBe(false);
+    expect(r.line).toBe("hoard vp save timed out after 0.3s");
+    await expect(readFile(marker, "utf8")).resolves.toBe("cleaned\n");
+  });
+
+  test("a child that ignores SIGTERM is killed 5 s later", async () => {
+    const bin = await stub("trap '' TERM\nwhile true; do sleep 0.05; done");
+    const started = Date.now();
+    const r = await runVp(bin, "save", [], {}, 200);
+    const took = Date.now() - started;
+    expect(took).toBeGreaterThanOrEqual(5_000);
+    expect(took).toBeLessThan(9_000);
+    expect(r.line).toBe("hoard vp save timed out after 0.2s");
+  }, 15_000);
 
   test("a missing binary is not ok", async () => {
     const r = await runVp(join(dir, "nope"), "restore", [], {}, 5_000);

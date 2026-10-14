@@ -130,6 +130,16 @@ describe("validation", () => {
       );
     }
   });
+  test("vp-max-size uses the binary's size syntax", () => {
+    for (const ok of ["2GB", "750mb", "1024", "1TB", "10B"]) {
+      expect(resolveSettings({ "vp-max-size": ok }, {}).vpMaxSize).toBe(ok);
+    }
+    for (const bad of ["2 GiB", "5 GB", "lots", "1.5GB", "-1GB", "GB", "2G"]) {
+      expect(() => resolveSettings({ "vp-max-size": bad }, {})).toThrow(
+        /invalid vp-max-size .*KB, MB, GB or TB.*2GB/,
+      );
+    }
+  });
   test("max-size and cache-version pass through", () => {
     const s = resolveSettings(
       { "max-size": "20GB", "cache-version": "v2", "vp-max-size": "500MB" },

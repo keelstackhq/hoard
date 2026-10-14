@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -345,15 +345,17 @@ describe("main", () => {
         return { ok: true, line: "restored cache/vp/v1/linux-x64/1-1 (2 KB)" };
       }),
     });
-    d.env.GITHUB_WORKSPACE = "/work/repo";
+    const ws = join(dir, "repo");
+    await mkdir(join(ws, "node_modules"), { recursive: true });
+    d.env.GITHUB_WORKSPACE = ws;
     await runMain(d);
 
     expect(f.of("setFailed")).toEqual([]);
-    expect(d.detectTools).toHaveBeenCalledWith("/work/repo");
+    expect(d.detectTools).toHaveBeenCalledWith(ws);
     const [bin, cmd, args, env] = vi.mocked(d.runVp).mock.calls[0] ?? [];
     expect([bin, cmd]).toEqual(["/opt/hoard", "restore"]);
     expect(args?.[args.indexOf("--fs-root") + 1]).toBe(join(dir, "hoard-__keelstack_hoard-store"));
-    expect(args?.[args.indexOf("--workspace") + 1]).toBe("/work/repo");
+    expect(args?.[args.indexOf("--workspace") + 1]).toBe(ws);
     expect(args?.[args.indexOf("--vp-max-size") + 1]).toBe("1GB");
     expect(env).not.toHaveProperty("HOARD_TOKEN");
     // After the server is healthy and TURBO_* are exported.
@@ -370,12 +372,29 @@ describe("main", () => {
     expect(f.of("warning")).toEqual([]);
   });
 
+  test("Vite+ without node_modules: warns to put hoard after the install, still restores", async () => {
+    const f = fakeCore();
+    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true })) });
+    d.env.GITHUB_WORKSPACE = join(dir, "no-install");
+    await runMain(d);
+    expect(f.of("setFailed")).toEqual([]);
+    expect(f.of("warning")).toEqual([
+      [
+        "Vite+ found but node_modules is missing: put the hoard step after the dependency install, " +
+          "or the install may drop the restored task cache",
+      ],
+    ]);
+    expect(d.runVp).toHaveBeenCalled();
+  });
+
   test("a failed Vite+ restore is a warning; main still succeeds", async () => {
     const f = fakeCore();
     const d = deps(f, {
       detectTools: vi.fn(() => ({ turbo: true, vp: true })),
       runVp: vi.fn(async () => ({ ok: false, line: "hoard vp restore timed out after 120s" })),
     });
+    await mkdir(join(dir, "node_modules"));
+    d.env.GITHUB_WORKSPACE = dir;
     await runMain(d);
     expect(f.of("setFailed")).toEqual([]);
     expect(f.of("warning")).toEqual([["hoard vp restore timed out after 120s"]]);
