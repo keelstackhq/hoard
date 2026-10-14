@@ -1,0 +1,67 @@
+//! axum router: Turborepo `/v8` API behind bearer auth, plus `/_hoard/*` routes.
+
+mod auth;
+mod body;
+mod turbo;
+
+use std::sync::Arc;
+
+use axum::extract::{DefaultBodyLimit, State};
+use axum::routing::{get, post};
+use axum::{Json, Router, middleware};
+
+use crate::config::Mode;
+use crate::stats::{Stats, StatsSnapshot};
+use crate::store::Store;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub store: Arc<Store>,
+    pub stats: Arc<Stats>,
+    pub token: String,
+    pub mode: Mode,
+    pub prefix: String,
+    pub cache_version: String,
+    /// Receives `()` on `POST /_hoard/shutdown`.
+    pub shutdown: tokio::sync::mpsc::Sender<()>,
+}
+
+impl AppState {
+    /// Storage key of a validated Turborepo hash.
+    fn turbo_key(&self, hash: &str) -> String {
+        crate::key::artifact_key(&self.prefix, "turbo", &self.cache_version, hash)
+    }
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/v8/artifacts/status", get(turbo::status))
+        .route("/v8/artifacts/events", post(turbo::events))
+        .route("/v8/artifacts", post(turbo::query))
+        .route(
+            "/v8/artifacts/{hash}",
+            get(turbo::get_artifact)
+                .head(turbo::head_artifact)
+                .put(turbo::put_artifact)
+                // Artifacts can be hundreds of MB; the body is streamed, never buffered.
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route("/_hoard/stats", get(stats))
+        .route("/_hoard/shutdown", post(shutdown))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ))
+        // Added after the auth layer, so it is the only unauthenticated route.
+        .route("/_hoard/health", get(|| async { "ok" }))
+        .with_state(state)
+}
+
+async fn stats(State(s): State<AppState>) -> Json<StatsSnapshot> {
+    Json(s.stats.snapshot())
+}
+
+async fn shutdown(State(s): State<AppState>) -> &'static str {
+    let _ = s.shutdown.try_send(());
+    "ok"
+}
