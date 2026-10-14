@@ -13,6 +13,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 01-core-r2/Task 7 R2 storage via S3 (MinIO) · e505f6f, 86d402d · 37 unit + 13 r2 (MinIO) + 28 http + 12 store + 5 CLI pass; fmt, clippy clean; no openssl/native-tls
 - 2026-10-14 · 01-core-r2/Task 8 R2 lifecycle rule + doctor · 1727e57, aa1fc62 · 44 unit + 28 r2 (MinIO + verbatim lifecycle proxy) + 28 http + 12 store + 7 CLI pass; fmt, clippy clean
 - 2026-10-14 · 01-core-r2/Task 9 R2 size cap + daily prune · 835631e, e2bc4b5 · 56 unit + 36 r2 (MinIO) + 28 http + 12 store + 8 CLI pass; fmt, clippy clean
+- 2026-10-14 · 01-core-r2/Task 10 e2e with real Turborepo 2.11.8 · e246728 · tests/e2e/turbo.sh PASS (fs) and STORAGE=r2 PASS (MinIO): run 2 FULL TURBO, 2 hits, 2 puts, Lifecycle ✓; cargo test all green
 
 ## Blocked
 
@@ -24,6 +25,10 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   --r2-account-id <id> --r2-bucket <bucket>` once, stop it, then `hoard doctor --storage r2 --r2-account-id <id>
   --r2-bucket <bucket>` — it must print `✓ lifecycle rule hoard-cache- (7 days)`. If it says the rule differs, report
   the output of `npx wrangler r2 bucket lifecycle list <bucket>`.
+- **01-core-r2 CI — workflow never run on GitHub.** `.github/workflows/ci.yml` (jobs `rust`, `e2e`) triggers only
+  on pushes to `main` and on pull requests, so it has not run yet; everything it does passes locally. Action: open a
+  PR from `claude/admiring-ride-kl6qd9` (or push to `main`) and check both jobs go green; if `pnpm/action-setup` or
+  the MinIO image pull fails, paste the job log.
 
 ## Status
 
