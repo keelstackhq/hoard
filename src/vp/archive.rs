@@ -224,7 +224,7 @@ fn is_safe_link_target(target: &Path) -> bool {
 }
 
 /// Defence in depth after extraction: every symlink under `dir` that resolves must resolve
-/// inside `dir`. A dangling link (nothing to resolve) is harmless.
+/// inside `dir`. A link that does not resolve (dangling, or a loop) is harmless.
 pub(crate) fn check_links_inside(dir: &Path) -> io::Result<()> {
     let root = dir.canonicalize()?;
     for e in walk(dir)? {
@@ -239,8 +239,9 @@ pub(crate) fn check_links_inside(dir: &Path) -> io::Result<()> {
                     e.rel.display()
                 )));
             }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
+            // Dangling, a loop (ELOOP) or otherwise unresolvable: there is nothing it points
+            // at, and its target passed the lexical check, so it cannot lead outside.
+            Err(_) => {}
         }
     }
     Ok(())
@@ -472,6 +473,27 @@ mod tests {
         std::os::unix::fs::symlink(root.path(), dst.join("d/up")).unwrap();
         let err = check_links_inside(&dst).unwrap_err();
         assert!(err.to_string().contains("outside"), "{err}");
+    }
+
+    /// A link loop cannot leave the directory (its targets passed the lexical check), so it
+    /// is as harmless as a dangling link and must not fail every restore of the archive.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_loops_round_trip() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("f"), b"x").unwrap();
+        std::os::unix::fs::symlink("self", src.path().join("self")).unwrap();
+        std::os::unix::fs::symlink("b", src.path().join("a")).unwrap();
+        std::os::unix::fs::symlink("a", src.path().join("b")).unwrap();
+        assert!(check_links_inside(src.path()).is_ok());
+        let bytes = archive_bytes(src.path()).await;
+        let dst = tempfile::tempdir().unwrap();
+        extract_archive(&bytes[..], dst.path()).await.unwrap();
+        assert_eq!(
+            std::fs::read_link(dst.path().join("self")).unwrap(),
+            Path::new("self")
+        );
+        assert_eq!(std::fs::read(dst.path().join("f")).unwrap(), b"x");
     }
 
     #[tokio::test]

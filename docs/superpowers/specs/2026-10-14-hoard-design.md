@@ -187,7 +187,8 @@ permission bits kept; regular files, directories and symlinks only), zstd level 
 checksum. A symlink is archived and restored only when its target is relative with no `..`
 component (it then always resolves inside the directory, however links chain); others are left
 out of the archive, and restore rejects them. After extraction every symlink that resolves must
-resolve inside the new directory. On Windows without symlink privilege a symlink entry cannot
+resolve inside the new directory (a dangling link or a link loop resolves to nothing and is
+kept as it is). On Windows without symlink privilege a symlink entry cannot
 be created, so such a restore fails with a warning (Vite+'s task cache holds plain files). `vp save` first sums the regular files' sizes against `vp-max-size`, then spools the
 archive to a temp file in `RUNNER_TEMP` (else the system temp dir; the runner empties it after
 the job) and uploads it from there (its size goes into the envelope). `vp restore` streams the
