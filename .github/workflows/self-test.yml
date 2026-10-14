@@ -2,7 +2,10 @@ name: self-test
 # Runs the action (`uses: ./`) on real runners against tests/fixtures/turbo-repo:
 #   warm  builds the fixture with an empty cache (misses, uploads);
 #   hit   rebuilds it in a fresh checkout and must replay everything from the cache.
-# Every run uses its own cache-version, so runs never see each other's entries.
+# The cache-version is run-<run_id>-<os>-<storage>: unique per run (runs never see each other) and
+# per matrix leg (task hashes are OS-independent here, so one leg's uploads must not satisfy
+# another leg's hit assertion). run_attempt is deliberately not part of it: re-running only the
+# failed `hit` jobs must find the entries `warm` wrote in the earlier attempt.
 on:
   workflow_dispatch:
   push:
@@ -23,9 +26,6 @@ permissions:
 concurrency:
   group: self-test-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  CACHE_VERSION: run-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   warm:
@@ -107,12 +107,11 @@ jobs:
           HOARD_ACTION_BINARY_PATH: ${{ matrix.binary == 'source' && steps.bin.outputs.path || '' }}
         with:
           storage: ${{ matrix.storage }}
-          cache-version: ${{ env.CACHE_VERSION }}
-          r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
-          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
-          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          r2-bucket: ${{ secrets.R2_BUCKET }}
-          r2-prefix: self-test/${{ github.run_id }}/
+          cache-version: run-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.storage }}
+          r2-account-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCOUNT_ID || '' }}
+          r2-access-key-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCESS_KEY_ID || '' }}
+          r2-secret-access-key: ${{ matrix.storage == 'r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
+          r2-bucket: ${{ matrix.storage == 'r2' && secrets.R2_BUCKET || '' }}
       - name: Build (cold cache)
         if: steps.gate.outputs.run == 'true'
         working-directory: tests/fixtures/turbo-repo
@@ -184,12 +183,11 @@ jobs:
           HOARD_ACTION_BINARY_PATH: ${{ matrix.binary == 'source' && steps.bin.outputs.path || '' }}
         with:
           storage: ${{ matrix.storage }}
-          cache-version: ${{ env.CACHE_VERSION }}
-          r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
-          r2-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
-          r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          r2-bucket: ${{ secrets.R2_BUCKET }}
-          r2-prefix: self-test/${{ github.run_id }}/
+          cache-version: run-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.storage }}
+          r2-account-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCOUNT_ID || '' }}
+          r2-access-key-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCESS_KEY_ID || '' }}
+          r2-secret-access-key: ${{ matrix.storage == 'r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
+          r2-bucket: ${{ matrix.storage == 'r2' && secrets.R2_BUCKET || '' }}
       - name: Build (warm cache)
         if: steps.gate.outputs.run == 'true'
         working-directory: tests/fixtures/turbo-repo
