@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(rustup:*)",
+      "Bash(pnpm:*)",
+      "Bash(npx turbo:*)",
+      "Bash(node:*)",
+      "Bash(docker compose:*)",
+      "Bash(tests/e2e/turbo.sh:*)",
+      "Bash(STORAGE=r2 tests/e2e/turbo.sh:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ]
+  }
+}
