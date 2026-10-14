@@ -19,6 +19,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 02-github-action/Task 2 steps 1, 2, 4 (release pipeline + write-checksums) · 8f58ac4, b6e4326 · action vitest 12/12, biome + tsc clean, actionlint clean; local x86_64-musl zigbuild static binary OK · Step 3 (GitHub dry run) BLOCKED
 - 2026-10-14 · 02-github-action/Task 3 action settings, platform, verified download · b6d2c04 · action vitest 51/51, biome + tsc clean, build reproducible (dist 20.9 KB), actionlint clean
 - 2026-10-14 · 02-github-action/Task 4 action main + post · 7d3fc69, bdc2438 · action vitest 95/95 incl. real-binary integration (main → PUT/GET → post: hits=1, summary); biome, tsc, actionlint clean; dist 148.9 KB, fresh
+- 2026-10-14 · 02-github-action/Task 5 steps 1, 3 (self-test workflow) · cf7d876, 4b932ff · actionlint clean; e2e fs + r2 PASS with the portable fixture · Step 2 (run on GitHub runners) BLOCKED
 
 ## Blocked
 
@@ -49,6 +50,12 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   `hoard-<target>.tar.gz` assets on the draft release; the `chore(release): v0.0.0-test` commit's
   `action/src/checksums.generated.ts` lists the same five SHA-256 values as `sha256sum` of the assets; `v0` was NOT
   moved. Afterwards delete the draft release, the `v0.0.0-test` tag and the branch (see docs/RELEASING.md).
+- **02-github-action/Task 5 Step 2 — self-test on real runners.** `.github/workflows/self-test.yml` (Linux x64/arm64,
+  macOS, Windows × GitHub cache, plus Linux × R2) has never run. Action: (optional, for the R2 leg) add repository
+  secrets `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (Settings → Secrets and variables →
+  Actions); then run it from the Actions tab (*self-test* → *Run workflow* on `claude/admiring-ride-kl6qd9`) or open a
+  PR. Expect every `hit` job to log `FULL TURBO` and `hits > 0`, and the job summary to show the hoard table. Paste the
+  log of any red job — Windows/macOS legs are the likeliest first failures.
 
 ## Status
 
