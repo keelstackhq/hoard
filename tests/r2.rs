@@ -582,6 +582,47 @@ fn serve_continues_when_lifecycle_unreachable() {
     })
 }
 
+/// A lifecycle endpoint that accepts connections and never answers: `serve` is ready (port
+/// file written) well inside the action's 10 s health budget, and the summary says why the
+/// rule was not checked.
+#[test]
+fn serve_ready_quickly_when_lifecycle_hangs() {
+    rt().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let b = MinioBucket {
+            endpoint: format!("http://{addr}"),
+            bucket: "nowhere".into(),
+            key_id: "k".into(),
+            secret: "s".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+        let mut child = r2_cmd("serve", &b, dir.path(), "k", "s").spawn().unwrap();
+        common::wait_for_file(&dir.path().join("port")).await;
+        let ready = start.elapsed();
+        assert!(
+            ready < std::time::Duration::from_secs(8),
+            "ready after {ready:?}"
+        );
+        shutdown(dir.path()).await;
+        let status = wait_exit(&mut child);
+        let (_, stderr) = output(child);
+        assert!(status.success(), "{stderr}");
+        let summary = std::fs::read_to_string(dir.path().join("summary.md")).unwrap();
+        assert!(
+            summary.contains("Lifecycle: not checked (timed out)"),
+            "{summary}"
+        );
+    })
+}
+
 /// `serve --r2-lifecycle manual` touches no rule and says so.
 #[test]
 fn serve_manual_mode_warns() {

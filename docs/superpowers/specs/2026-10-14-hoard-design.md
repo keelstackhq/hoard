@@ -193,7 +193,10 @@ On `serve` startup with `storage=r2`:
 
 Any other error while reading or writing the rules (network, timeout, 5xx) is transient: `serve`
 logs a warning and starts anyway (the size cap still bounds the bucket); the summary shows
-`Lifecycle: not checked (<reason>)`. Every lifecycle error message, transient ones included, contains the
+`Lifecycle: not checked (<reason>)`. The whole startup check (Get, maybe Put, retries) is
+bounded by 5 s, because it runs before the port file is written and the action waits 10 s for
+health; a slower check is a transient error with the summary line
+`Lifecycle: not checked (timed out)`. Every lifecycle error message, transient ones included, contains the
 fix command. `hoard doctor` always verifies (never writes) the rule.
 
 The fix message must contain the exact command:

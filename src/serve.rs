@@ -13,7 +13,7 @@ use tracing::{info, warn};
 use crate::config::{
     Config, LifecycleMode, Mode, Storage, TokenPaths, default_port_file, default_token_file,
 };
-use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, r2_client, rule_id};
+use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, fix_command, r2_client, rule_id};
 use crate::r2::prune::prune;
 use crate::server::{AppState, router};
 use crate::stats::{Stats, human_bytes, render_summary};
@@ -26,6 +26,12 @@ const FS_PREFIX: &str = "cache/";
 /// marker is only written on completion, so an interrupted prune runs again next time.
 /// Known limitation: if the LIST alone takes longer than this, the marker is never written.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Upper bound for the whole startup lifecycle check (Get, maybe Put, SDK retries included).
+/// It runs before the port file, the readiness signal, is written, and the GitHub Action fails
+/// the job if health is not up within 10 s. A slow R2 is a transient cache problem and must
+/// never fail the build, so a timeout is a warning and `Lifecycle: not checked (timed out)`.
+const LIFECYCLE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The three `export` lines that point Turborepo at a server.
 pub fn env_lines(port: u16, token: &str) -> String {
@@ -245,8 +251,14 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
 
 /// Startup step for `storage=r2` (spec §7.1): ensure or verify the lifecycle rule, and return
 /// the summary's `Lifecycle:` line. A missing rule (`verify`) or AccessDenied is a setup error;
-/// a transient error is only a warning, since the size cap still bounds the bucket.
+/// a transient error or a check slower than [`LIFECYCLE_STARTUP_TIMEOUT`] is only a warning,
+/// since the size cap still bounds the bucket.
 async fn lifecycle_startup(cfg: &Config) -> anyhow::Result<Option<String>> {
+    lifecycle_startup_within(cfg, LIFECYCLE_STARTUP_TIMEOUT).await
+}
+
+/// [`lifecycle_startup`] with the time bound as a parameter (tests).
+async fn lifecycle_startup_within(cfg: &Config, bound: Duration) -> anyhow::Result<Option<String>> {
     let Some(r2) = cfg.r2.as_ref().filter(|_| cfg.storage == Storage::R2) else {
         return Ok(None);
     };
@@ -256,7 +268,17 @@ async fn lifecycle_startup(cfg: &Config) -> anyhow::Result<Option<String>> {
     }
     let client = r2_client(&r2.endpoint(), &r2.access_key_id, &r2.secret_access_key);
     let days = cfg.max_age_days;
-    match ensure_lifecycle(&client, &r2.bucket, &r2.prefix, days, cfg.r2_lifecycle).await {
+    let check = ensure_lifecycle(&client, &r2.bucket, &r2.prefix, days, cfg.r2_lifecycle);
+    let Ok(result) = tokio::time::timeout(bound, check).await else {
+        warn!(
+            "the R2 lifecycle check did not finish within {}s; continuing (the size cap still \
+             bounds the bucket). `hoard doctor` checks the rule; a bucket admin can add it with:\n{}",
+            bound.as_secs_f32(),
+            fix_command(&r2.bucket, &r2.prefix, days)
+        );
+        return Ok(Some("Lifecycle: not checked (timed out)".into()));
+    };
+    match result {
         Ok(status) => {
             info!(rule = rule_id(&r2.prefix), ?status, "R2 lifecycle rule ok");
             Ok(Some(format!("Lifecycle: {days} days ✓")))
@@ -416,6 +438,49 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
+    }
+
+    /// A lifecycle endpoint that never answers: startup gives up within the bound and goes on.
+    #[tokio::test]
+    async fn startup_lifecycle_check_is_bounded() {
+        let endpoint = black_hole().await;
+        let cfg = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-endpoint",
+            &endpoint,
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+        ]))
+        .unwrap();
+        let start = std::time::Instant::now();
+        let line = lifecycle_startup_within(&cfg, Duration::from_millis(300))
+            .await
+            .unwrap();
+        assert_eq!(line.as_deref(), Some("Lifecycle: not checked (timed out)"));
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    /// An S3 endpoint that accepts connections and never answers.
+    async fn black_hole() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        format!("http://{addr}")
     }
 
     #[tokio::test]
