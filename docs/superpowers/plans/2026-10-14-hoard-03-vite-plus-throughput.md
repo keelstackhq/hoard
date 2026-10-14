@@ -44,9 +44,9 @@
   - `struct GhaTwirp` with `get_download_url(key: &str, restore_keys: &[String], version: &str) -> Result<Option<(String /*matched*/, String /*url*/)>>`, `create_entry`, `upload_blocks`, `finalize` (never logs URLs)
   - Action: `detectTools(root): { turbo: boolean; vp: boolean }` (`turbo.json` / `vite-plus` in root `package.json` dependencies)
 
-- [ ] **Step 1: Write failing tests** — archive round-trip keeps file bytes and mtimes; archive with `../evil` entry is rejected; `vp_restore` on an empty fs store → `NotFound`; save from `linux-x64` then restore for `darwin-arm64` → `NotFound`; two saves → restore returns the newer; dir larger than `max_size` → `SkippedTooLarge`; `detectTools` on fixtures.
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement** (R2/fs: pointer object; GitHub: `GhaTwirp` with `restore_keys`).  **Step 4: Run — PASS** (GitHub path covered by the self-test workflow with a Vite+ fixture added to `tests/fixtures/vp-repo/`).
-- [ ] **Step 5: Commit** — `feat: Vite+ task-cache restore and save`
+- [x] **Step 1: Write failing tests** — archive round-trip keeps file bytes and mtimes; archive with `../evil` entry is rejected; `vp_restore` on an empty fs store → `NotFound`; save from `linux-x64` then restore for `darwin-arm64` → `NotFound`; two saves → restore returns the newer; dir larger than `max_size` → `SkippedTooLarge`; `detectTools` on fixtures.
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement** (R2/fs: pointer object; GitHub: `GhaTwirp` with `restore_keys`).  **Step 4: Run — PASS** (GitHub path covered by the self-test workflow with a Vite+ fixture added to `tests/fixtures/vp-repo/`).
+- [x] **Step 5: Commit** — `feat: Vite+ task-cache restore and save`
 
 ---
 
