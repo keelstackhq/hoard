@@ -15,7 +15,7 @@
 - `action.yml` lives at the repo root (`runs.using: node24`, `main: action/dist/main.js`, `post: action/dist/post.js`, `post-if: always()`).
 - `action/dist/` is committed and must stay under 200 KB total (CI fails above).
 - Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. Asset name `hoard-<target>.tar.gz` containing `hoard` (`hoard.exe` on Windows).
-- The action never downloads a binary whose SHA-256 is not in the baked `checksums.json`.
+- The action never downloads a binary whose SHA-256 is not in the baked `action/src/checksums.generated.ts`.
 - Cache errors never fail the job; setup errors fail it loudly with a fix.
 - `TURBO_TOKEN` is passed to `core.setSecret` before it is exported.
 - `storage: r2` without all four R2 secrets → fall back to `github` with a warning (fork PRs); never fail.
@@ -100,10 +100,10 @@ scripts/write-checksums.mjs
 **Interfaces:**
 - Produces: GitHub release `vX.Y.Z` with five `hoard-<target>.tar.gz` assets; `action/src/checksums.generated.ts` exporting `export const VERSION = "X.Y.Z"; export const CHECKSUMS: Record<Target, string>`; commit `chore(release): vX.Y.Z` with rebuilt `action/dist/`; tags `vX.Y.Z` and moved major tag `vX`.
 
-- [ ] **Step 1: Write `scripts/write-checksums.mjs`** — input: directory of assets; output: the TS file above; exits non-zero unless exactly the five targets are present. Unit test it with vitest (`action/test/write-checksums.test.ts`): five fake files → file contains five 64-hex entries; four files → throws `"missing target aarch64-apple-darwin"`.
-- [ ] **Step 2: Write the workflow** — trigger `workflow_dispatch` with input `version`; matrix build (zigbuild for musl, native for darwin/windows), `strip`, tar.gz, upload artifacts; job `publish`: download all, run the script, `pnpm --dir action build`, check dist < 200 KB, commit, tag, create release with assets.
+- [x] **Step 1: Write `scripts/write-checksums.mjs`** — input: directory of assets; output: the TS file above; exits non-zero unless exactly the five targets are present. Unit test it with vitest (`action/test/write-checksums.test.ts`): five fake files → file contains five 64-hex entries; four files → throws `"missing target aarch64-apple-darwin"`.
+- [x] **Step 2: Write the workflow** — trigger `workflow_dispatch` with input `version`; matrix build (zigbuild for musl, native for darwin/windows), `strip`, tar.gz, upload artifacts; job `publish`: download all, run the script, `pnpm --dir action build`, check dist < 200 KB, commit, tag, create release with assets.
 - [ ] **Step 3: Dry run** — run the workflow on a fork or with `version: 0.0.0-test` and `draft: true`; verify five assets and a matching `checksums.generated.ts`.
-- [ ] **Step 4: Commit** — `ci: cross-platform release pipeline with baked checksums`
+- [x] **Step 4: Commit** — `ci: cross-platform release pipeline with baked checksums`
 
 ---
 

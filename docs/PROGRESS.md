@@ -16,6 +16,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 01-core-r2/Task 10 e2e with real Turborepo 2.11.8 · e246728 · tests/e2e/turbo.sh PASS (fs) and STORAGE=r2 PASS (MinIO): run 2 FULL TURBO, 2 hits, 2 puts, Lifecycle ✓; cargo test all green
 - 2026-10-14 · **Milestone 1 reviewed** · whole-branch review 4fcec0d..ac1b931 (0 Critical, 5 Important, 14 Minor) → fix wave f29f34b..a75362b, re-review clean · 64 unit + 39 r2 + 28 http + 12 store + 8 CLI + redaction pass; 150 MB stream OK; e2e fs + r2 PASS
 - 2026-10-14 · 02-github-action/Task 1 GitHub cache storage, --no-reads, rate gate · 1c82097, 728b40b · 76 unit + 32 http + 39 r2 + 13 store + 13 CLI + redaction pass; fmt, clippy clean; e2e fs PASS (real ghac only testable on a runner → Task 5)
+- 2026-10-14 · 02-github-action/Task 2 steps 1, 2, 4 (release pipeline + write-checksums) · 8f58ac4, b6e4326 · action vitest 12/12, biome + tsc clean, actionlint clean; local x86_64-musl zigbuild static binary OK · Step 3 (GitHub dry run) BLOCKED
 
 ## Blocked
 
@@ -40,6 +41,12 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   `keelstackhq/hoard`), so it works either way. Action: decide the public name; if it is `keelstack/hoard`, create or
   transfer the repo and update nothing else; if it stays `keelstackhq`, replace `keelstack/hoard` in README.md and
   spec §0/§2 (one search-and-replace).
+- **02-github-action/Task 2 Step 3 — release dry run on GitHub.** Needs Task 3's `build` script first (it lands next
+  in this loop). Action: on a branch, set `version = "0.0.0-test"` in Cargo.toml (`cargo update -p keel-hoard`), push,
+  then `gh workflow run release.yml --ref <branch> -f version=0.0.0-test -f draft=true`. Check: five
+  `hoard-<target>.tar.gz` assets on the draft release; the `chore(release): v0.0.0-test` commit's
+  `action/src/checksums.generated.ts` lists the same five SHA-256 values as `sha256sum` of the assets; `v0` was NOT
+  moved. Afterwards delete the draft release, the `v0.0.0-test` tag and the branch (see docs/RELEASING.md).
 
 ## Status
 
