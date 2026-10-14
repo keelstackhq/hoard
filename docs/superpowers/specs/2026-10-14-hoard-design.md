@@ -42,11 +42,14 @@ Cloudflare R2:
     r2-bucket: my-team-cache
 ```
 
-Laptop (same binary, same bucket, ideally a read-only token):
+Laptop (same binary, same bucket; a read-only R2 token is recommended, with `--mode read` so
+hoard never writes artifacts or the lifecycle rule):
 
 ```bash
-hoard serve --storage r2 --r2-bucket my-team-cache &   # prints how to load the env
-eval "$(hoard env)"                                    # sets TURBO_API/TOKEN/TEAM
+# A read-only R2 token is recommended. Credentials come from the environment:
+# HOARD_R2_ACCOUNT_ID, HOARD_R2_ACCESS_KEY_ID, HOARD_R2_SECRET_ACCESS_KEY.
+hoard serve --storage r2 --r2-bucket my-team-cache --mode read &   # prints how to load the env
+eval "$(hoard env)"                                                # sets TURBO_API/TOKEN/TEAM
 pnpm turbo run build
 ```
 
@@ -197,6 +200,11 @@ On `serve` startup with `storage=r2`:
 | `auto` | `GetBucketLifecycleConfiguration`; if our rule is missing or differs, merge it into the existing rules (keep every other rule unchanged) and `PutBucketLifecycleConfiguration`. On `AccessDenied`: exit non-zero with the fix (below). |
 | `verify` | Only read; if missing or different: exit non-zero with the fix. |
 | `manual` | Skip; log one warning that the bucket can grow until the size cap runs. |
+
+With `mode=read` or `mode=off` hoard never writes the rule: `auto` only verifies it, and a
+missing rule, `AccessDenied` or any other error is a warning (the summary shows
+`Lifecycle: not checked (read-only)`, or `Lifecycle: <days> days ✓` when the rule is in place).
+`verify` and `manual` behave as in the table. The size cap (§7.2) does not run either.
 
 Any other error while reading or writing the rules (network, timeout, 5xx) is transient: `serve`
 logs a warning and starts anyway (the size cap still bounds the bucket); the summary shows

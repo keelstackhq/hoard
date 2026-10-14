@@ -24,4 +24,37 @@ kept bounded by a lifecycle rule and a size cap):
     r2-bucket: ${{ secrets.R2_BUCKET }}
 ```
 
+## Commands
+
+The action runs the `hoard` binary for you. You can also run it yourself, for example on a
+laptop:
+
+| Command | What it does |
+|---|---|
+| `hoard serve` | Runs the cache server on 127.0.0.1 until `POST /_hoard/shutdown`, SIGTERM or Ctrl-C. |
+| `hoard env` | Prints the `export TURBO_API/TURBO_TOKEN/TURBO_TEAM` lines for a running server. |
+| `hoard prune [--force]` | Deletes the oldest objects until the R2 prefix fits in `max-size` (at most once per 24 h without `--force`). |
+| `hoard doctor` | Checks the storage credentials, bucket read/write and the R2 lifecycle rule, and prints the fixes. |
+
+Laptop, sharing the CI bucket. Use a read-only R2 token (object read) and `--mode read`, so
+hoard never writes artifacts or the lifecycle rule:
+
+```bash
+export HOARD_R2_ACCOUNT_ID=... HOARD_R2_ACCESS_KEY_ID=... HOARD_R2_SECRET_ACCESS_KEY=...
+hoard serve --storage r2 --r2-bucket my-team-cache --mode read &
+eval "$(hoard env)"
+pnpm turbo run build
+```
+
+R2 token permissions: with the default `r2-lifecycle: auto`, a read-write server needs Admin
+Read & Write, because it sets the bucket's lifecycle rule. With `--r2-lifecycle manual` or
+`verify`, object read and write is enough (a bucket admin adds the rule; `hoard doctor` prints
+the command). With `--mode read`, object read is enough.
+
+## Settings
+
+Every setting is a flag (`--max-size 5GB`) and an environment variable (`HOARD_MAX_SIZE=5GB`).
+The full list with defaults is the table in
+[spec §4.2](docs/superpowers/specs/2026-10-14-hoard-design.md#42-configuration).
+
 License: MIT.

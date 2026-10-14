@@ -888,6 +888,59 @@ fn serve_read_mode_does_not_prune() {
     })
 }
 
+/// `mode=read` never writes the lifecycle rule: `auto` only verifies, and a missing rule or
+/// AccessDenied is a warning, never a failed start.
+#[test]
+fn serve_read_mode_only_verifies_lifecycle() {
+    rt().block_on(async {
+        let Some(b) = minio_bucket().await else {
+            return;
+        };
+        let raw = b.clone();
+        let b = common::proxied(&b).await;
+        let run = |b: MinioBucket| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
+                .args(["--mode", "read"])
+                .spawn()
+                .unwrap();
+            shutdown(dir.path()).await;
+            let status = wait_exit(&mut child);
+            let (_, stderr) = output(child);
+            assert!(status.success(), "{stderr}");
+            std::fs::read_to_string(dir.path().join("summary.md")).unwrap()
+        };
+        // Rule missing: not created, and the summary says why it was not checked.
+        let summary = run(b.clone()).await;
+        assert!(
+            summary.contains("Lifecycle: not checked (read-only)"),
+            "{summary}"
+        );
+        assert!(
+            rules(&b).await.is_empty(),
+            "read mode must not write the rule"
+        );
+        // A key without lifecycle access (AccessDenied, straight to MinIO) still starts.
+        let (key_id, secret) = limited_creds();
+        let summary = run(MinioBucket {
+            key_id,
+            secret,
+            ..raw
+        })
+        .await;
+        assert!(
+            summary.contains("Lifecycle: not checked (read-only)"),
+            "{summary}"
+        );
+        // Rule present: verified.
+        ensure_lifecycle(&client(&b), &b.bucket, "cache/", 7, LifecycleMode::Auto)
+            .await
+            .unwrap();
+        let summary = run(b.clone()).await;
+        assert!(summary.contains("Lifecycle: 7 days ✓"), "{summary}");
+    })
+}
+
 /// A failing prune (here: the bucket is gone) is a summary line, never a failed shutdown.
 #[test]
 fn serve_prune_failure_is_reported_not_fatal() {

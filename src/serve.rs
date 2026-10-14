@@ -269,7 +269,15 @@ async fn lifecycle_startup_within(cfg: &Config, bound: Duration) -> anyhow::Resu
     }
     let client = r2_client(&r2.endpoint(), &r2.access_key_id, &r2.secret_access_key);
     let days = cfg.max_age_days;
-    let check = ensure_lifecycle(&client, &r2.bucket, &r2.prefix, days, cfg.r2_lifecycle);
+    // A server that never writes artifacts never writes the rule either (a read-only token
+    // usually may not): `auto` only verifies, and any problem is just a warning.
+    let read_only_auto = cfg.mode != Mode::ReadWrite && cfg.r2_lifecycle == LifecycleMode::Auto;
+    let mode = if read_only_auto {
+        LifecycleMode::Verify
+    } else {
+        cfg.r2_lifecycle
+    };
+    let check = ensure_lifecycle(&client, &r2.bucket, &r2.prefix, days, mode);
     let Ok(result) = tokio::time::timeout(bound, check).await else {
         warn!(
             "the R2 lifecycle check did not finish within {}s; continuing (the size cap still \
@@ -283,6 +291,14 @@ async fn lifecycle_startup_within(cfg: &Config, bound: Duration) -> anyhow::Resu
         Ok(status) => {
             info!(rule = rule_id(&r2.prefix), ?status, "R2 lifecycle rule ok");
             Ok(Some(format!("Lifecycle: {days} days ✓")))
+        }
+        Err(e) if read_only_auto => {
+            warn!(
+                error = %redacted(&e),
+                "read-only mode: hoard does not change the R2 lifecycle rule and could not \
+                 verify it; a read-write server or a bucket admin keeps it in place"
+            );
+            Ok(Some("Lifecycle: not checked (read-only)".into()))
         }
         Err(e @ LifecycleError::Other { .. }) => {
             warn!(
