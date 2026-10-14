@@ -280,7 +280,8 @@ first (does a same-key copy reset the age?).
 `Stats { hits, misses, puts, put_skipped_existing, put_errors, rate_limited, corrupt,
 bytes_down, bytes_up, time_saved_ms }` — `time_saved_ms` sums `duration_ms` of every hit.
 The storage line is `Storage: github`, `Storage: r2 (<bucket>/<prefix>)` or `Storage: fs (<root>)`;
-when `rate_limited > 0` the line ends with `Rate limited: N uploads skipped`.
+when `put_errors > 0` the line ends with `Upload errors: N` (so a broken storage never looks like
+a cold cache), then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`.
 
 Summary markdown (written to `summary-file`, appended by the action to `$GITHUB_STEP_SUMMARY`):
 

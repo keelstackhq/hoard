@@ -408,6 +408,10 @@ async fn shutdown_work(
     let mut extra_lines = startup_lines;
     extra_lines.extend(prune_on_shutdown(cfg, cache).await);
     let snapshot = stats.snapshot();
+    // Without this a broken storage (every upload failing) would look like a cold cache.
+    if snapshot.put_errors > 0 {
+        extra_lines.push(format!("Upload errors: {}", snapshot.put_errors));
+    }
     if snapshot.rate_limited > 0 {
         extra_lines.push(format!(
             "Rate limited: {} uploads skipped",
@@ -539,6 +543,34 @@ mod tests {
         let md = std::fs::read_to_string(&summary).unwrap();
         assert!(
             md.ends_with("Storage: github · Rate limited: 3 uploads skipped\n"),
+            "{md}"
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_reports_upload_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.fs_root = dir.path().join("store");
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Store::new(build_operator(&cfg).unwrap());
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+        };
+        let stats = Stats::default();
+        stats
+            .put_errors
+            .fetch_add(4, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .rate_limited
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.ends_with("Storage: github · Upload errors: 4 · Rate limited: 2 uploads skipped\n"),
             "{md}"
         );
     }
