@@ -120,7 +120,7 @@ scripts/write-checksums.mjs
   - `function resolveSettings(inputs: Record<string, string>, env: NodeJS.ProcessEnv): Settings` — pure
   - `async function ensureBinary(target: Target, version: string, checksums: Record<Target, string>, download: (url: string) => Promise<string>): Promise<string>` — returns the executable path; throws `Error("checksum mismatch for <target>")`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```ts
 test("r2 without secrets falls back to github", () => {
@@ -149,10 +149,10 @@ test("checksum mismatch throws", async () => {
 });
 ```
 
-- [ ] **Step 2: Run `pnpm --dir action test` — FAIL.**
-- [ ] **Step 3: Implement** — `action.yml` inputs exactly as spec §4.2 plus `version`; download URL `https://github.com/keelstack/hoard/releases/download/v<version>/hoard-<target>.tar.gz`; extract and cache with `@actions/tool-cache`.
-- [ ] **Step 4: Run — PASS; `pnpm --dir action lint` clean.**
-- [ ] **Step 5: Commit** — `feat(action): settings resolution and verified binary download`
+- [x] **Step 2: Run `pnpm --dir action test` — FAIL.**
+- [x] **Step 3: Implement** — `action.yml` inputs exactly as spec §4.2 plus `version`; download URL `https://github.com/keelstack/hoard/releases/download/v<version>/hoard-<target>.tar.gz`; extract and cache with `@actions/tool-cache`.
+- [x] **Step 4: Run — PASS; `pnpm --dir action lint` clean.**
+- [x] **Step 5: Commit** — `feat(action): settings resolution and verified binary download`
 
 ---
 

@@ -17,6 +17,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · **Milestone 1 reviewed** · whole-branch review 4fcec0d..ac1b931 (0 Critical, 5 Important, 14 Minor) → fix wave f29f34b..a75362b, re-review clean · 64 unit + 39 r2 + 28 http + 12 store + 8 CLI + redaction pass; 150 MB stream OK; e2e fs + r2 PASS
 - 2026-10-14 · 02-github-action/Task 1 GitHub cache storage, --no-reads, rate gate · 1c82097, 728b40b · 76 unit + 32 http + 39 r2 + 13 store + 13 CLI + redaction pass; fmt, clippy clean; e2e fs PASS (real ghac only testable on a runner → Task 5)
 - 2026-10-14 · 02-github-action/Task 2 steps 1, 2, 4 (release pipeline + write-checksums) · 8f58ac4, b6e4326 · action vitest 12/12, biome + tsc clean, actionlint clean; local x86_64-musl zigbuild static binary OK · Step 3 (GitHub dry run) BLOCKED
+- 2026-10-14 · 02-github-action/Task 3 action settings, platform, verified download · b6d2c04 · action vitest 51/51, biome + tsc clean, build reproducible (dist 20.9 KB), actionlint clean
 
 ## Blocked
 
