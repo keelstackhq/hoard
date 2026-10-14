@@ -1,5 +1,6 @@
 // The main and post steps (spec §10). Dependencies are injected so the orchestration is tested
 // without a runner; src/main.ts and src/post.ts call these with the real ones.
+import { randomBytes } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as actionsCore from "@actions/core";
@@ -8,11 +9,13 @@ import { CHECKSUMS } from "./checksums.generated.js";
 import { type Target, targetFor } from "./platform.js";
 import {
   getStats,
+  killServer,
   serveArgs,
   serveEnv,
   serverFiles,
   shutdownServer,
   startServer,
+  stepId,
   waitForHealth,
 } from "./server.js";
 import { resolveSettings } from "./settings.js";
@@ -53,8 +56,12 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 async function printLog(core: ActionCore, logPath: string): Promise<void> {
   const log = await readFile(logPath, "utf8").catch(() => "(no hoard log)");
+  // A log line starting with `::` must not become a workflow command.
+  const stop = randomBytes(16).toString("hex");
   core.startGroup("hoard log");
+  core.info(`::stop-commands::${stop}`);
   core.info(log);
+  core.info(`::${stop}::`);
   core.endGroup();
 }
 
@@ -71,6 +78,7 @@ export interface MainDeps {
     env: NodeJS.ProcessEnv,
   ): Promise<number>;
   waitForHealth(portFile: string): Promise<number>;
+  kill(pid: number): void;
 }
 
 export function mainDeps(): MainDeps {
@@ -83,6 +91,7 @@ export function mainDeps(): MainDeps {
       ensureBinary(target, version, CHECKSUMS, undefined, process.env),
     startServer,
     waitForHealth: (portFile) => waitForHealth(portFile),
+    kill: killServer,
   };
 }
 
@@ -90,8 +99,9 @@ export function mainDeps(): MainDeps {
 export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
   const { core, env } = d;
   const runnerTemp = env.RUNNER_TEMP || tmpdir();
-  const files = serverFiles(runnerTemp);
-  let started = false;
+  const id = stepId(env);
+  const files = serverFiles(runnerTemp, id);
+  let pid = 0;
   try {
     const inputs = Object.fromEntries(INPUTS.map((name) => [name, core.getInput(name)]));
     const settings = resolveSettings(inputs, env);
@@ -109,13 +119,12 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
 
     // A port or token file left by an earlier run would look like a ready server.
     await Promise.all([files.port, files.token, files.summary].map((f) => rm(f, { force: true })));
-    const pid = await d.startServer(
+    pid = await d.startServer(
       bin,
-      serveArgs(settings, runnerTemp),
+      serveArgs(settings, runnerTemp, id),
       files.log,
       serveEnv(settings, env),
     );
-    started = true;
     const port = await d.waitForHealth(files.port);
     const token = (await readFile(files.token, "utf8")).trim();
     if (!token) throw new Error(`hoard wrote an empty token file ${files.token}`);
@@ -132,8 +141,9 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     core.saveState("log", files.log);
     core.saveState("warnings", JSON.stringify(settings.warnings));
   } catch (e) {
+    if (pid) d.kill(pid); // spawned but not usable: do not leave it running
     core.setFailed(message(e));
-    if (started) await printLog(core, files.log);
+    if (pid) await printLog(core, files.log);
   }
 }
 
@@ -142,10 +152,11 @@ export interface PostDeps {
   env: NodeJS.ProcessEnv;
   getStats: typeof getStats;
   shutdownServer: typeof shutdownServer;
+  kill(pid: number): void;
 }
 
 export function postDeps(): PostDeps {
-  return { core: actionsCore, env: process.env, getStats, shutdownServer };
+  return { core: actionsCore, env: process.env, getStats, shutdownServer, kill: killServer };
 }
 
 function savedWarnings(raw: string): string[] {
@@ -164,6 +175,7 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
     const port = Number(core.getState("port"));
     const token = core.getState("token");
     if (!port || !token) return; // main did not start hoard; nothing to stop
+    core.setSecret(token); // post is its own process: mask again before any output
 
     let problems = false;
     const warnings = savedWarnings(core.getState("warnings"));
@@ -180,6 +192,7 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
 
     if (!(await d.shutdownServer(port, token))) {
       warn("hoard server was not running at shutdown; the summary may be incomplete");
+      d.kill(Number(core.getState("pid"))); // in case it is alive but not answering
     } else if (!stats) {
       warn("could not read hoard stats; the hits, misses and time-saved-ms outputs are 0");
     }

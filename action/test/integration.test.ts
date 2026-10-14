@@ -2,7 +2,7 @@
 // Actions environment. Skipped unless HOARD_TEST_BIN points at a hoard build, e.g.
 //   cargo build && HOARD_TEST_BIN=$PWD/target/debug/hoard pnpm --dir action test
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -102,6 +102,10 @@ test.skipIf(!bin)(
     const outputs = parseFileCommands(await readFile(files.GITHUB_OUTPUT, "utf8"));
     expect(outputs).toMatchObject({ hits: "1", misses: "0", "time-saved-ms": "750" });
     expect(await readFile(files.GITHUB_STEP_SUMMARY, "utf8")).toContain("### hoard");
+    // The fs store lives in RUNNER_TEMP under the step's id, never in ./.hoard of the checkout.
+    await expect(stat(join(work, ".hoard"))).rejects.toThrow(/ENOENT/);
+    expect(state.log).toMatch(/hoard-[0-9a-f]{12}\.log$/);
+    await expect(stat(state.log?.replace(/\.log$/, "-store") ?? "")).resolves.toBeTruthy();
 
     // The shutdown answer comes after the summary is written; the process then exits.
     await expect

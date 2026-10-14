@@ -56,15 +56,21 @@ describe("main", () => {
   function deps(f: ReturnType<typeof fakeCore>, over: Partial<MainDeps> = {}): MainDeps {
     return {
       core: f.core,
-      env: { RUNNER_TEMP: dir, PATH: "/bin", HOARD_TOKEN: "stray" },
+      env: {
+        RUNNER_TEMP: dir,
+        PATH: "/bin",
+        HOARD_TOKEN: "stray",
+        GITHUB_ACTION: "__keelstack_hoard",
+      },
       platform: "linux",
       arch: "x64",
       ensureBinary: vi.fn(async () => "/opt/hoard"),
       startServer: vi.fn(async () => {
-        await writeFile(join(dir, "hoard.token"), "tok123\n");
+        await writeFile(join(dir, "hoard-__keelstack_hoard.token"), "tok123\n");
         return 4321;
       }),
       waitForHealth: vi.fn(async () => 40404),
+      kill: vi.fn(),
       ...over,
     };
   }
@@ -80,10 +86,15 @@ describe("main", () => {
     expect(bin).toBe("/opt/hoard");
     expect(args).toContain("--storage");
     expect(args?.[args.indexOf("--storage") + 1]).toBe("github");
-    expect(log).toBe(join(dir, "hoard.log"));
+    expect(log).toBe(join(dir, "hoard-__keelstack_hoard.log"));
+    expect(args?.[args.indexOf("--token-file") + 1]).toBe(
+      join(dir, "hoard-__keelstack_hoard.token"),
+    );
+    expect(args).not.toContain("--fs-root"); // github storage
     expect(env).toMatchObject({ PATH: "/bin" });
     expect(env).not.toHaveProperty("HOARD_TOKEN");
-    expect(d.waitForHealth).toHaveBeenCalledWith(join(dir, "hoard.port"));
+    expect(d.waitForHealth).toHaveBeenCalledWith(join(dir, "hoard-__keelstack_hoard.port"));
+    expect(d.kill).not.toHaveBeenCalled();
 
     const secretAt = f.calls.findIndex((c) => c[0] === "setSecret" && c[1] === "tok123");
     const exportAt = f.calls.findIndex((c) => c[0] === "exportVariable" && c[1] === "TURBO_TOKEN");
@@ -98,8 +109,8 @@ describe("main", () => {
       port: "40404",
       token: "tok123",
       pid: "4321",
-      summary: join(dir, "hoard-summary.md"),
-      log: join(dir, "hoard.log"),
+      summary: join(dir, "hoard-__keelstack_hoard-summary.md"),
+      log: join(dir, "hoard-__keelstack_hoard.log"),
       warnings: expect.stringContaining("R2 secrets are not available"),
     });
     expect(f.of("warning")).toEqual([[expect.stringMatching(/^R2 secrets are not available/)]]);
@@ -152,17 +163,100 @@ describe("main", () => {
     ]);
     const group = f.calls.findIndex((c) => c[0] === "startGroup" && c[1] === "hoard log");
     expect(group).toBeGreaterThanOrEqual(0);
-    expect(String(f.calls[group + 1]?.[1])).toContain("serve");
-    expect(f.calls[group + 2]).toEqual(["endGroup"]);
+    expect(String(f.calls[group + 2]?.[1])).toContain("serve");
+    expect(f.calls[group + 4]).toEqual(["endGroup"]);
     expect(f.of("exportVariable")).toEqual([]);
     expect(f.of("saveState")).toEqual([]);
+  });
+
+  test("a child that is alive but never healthy is killed before the step fails", async () => {
+    const f = fakeCore();
+    const d = deps(f, {
+      waitForHealth: vi.fn(async () => {
+        throw new Error("hoard did not start within 10s");
+      }),
+    });
+    vi.mocked(d.kill).mockImplementation(() => void f.calls.push(["kill"]));
+    await runMain(d);
+    expect(d.kill).toHaveBeenCalledWith(4321);
+    const killAt = f.calls.findIndex((c) => c[0] === "kill");
+    const failAt = f.calls.findIndex((c) => c[0] === "setFailed");
+    expect(killAt).toBeGreaterThanOrEqual(0);
+    expect(killAt).toBeLessThan(failAt);
+  });
+
+  test("a failure before the spawn kills nothing", async () => {
+    const f = fakeCore({ mode: "sometimes" });
+    const d = deps(f);
+    await runMain(d);
+    expect(d.kill).not.toHaveBeenCalled();
+  });
+
+  test("fs storage keeps its store in RUNNER_TEMP, per step", async () => {
+    const f = fakeCore({ storage: "fs" });
+    const d = deps(f);
+    await runMain(d);
+    const args = vi.mocked(d.startServer).mock.calls[0]?.[1] ?? [];
+    expect(args?.[args.indexOf("--fs-root") + 1]).toBe(join(dir, "hoard-__keelstack_hoard-store"));
+  });
+
+  test("two hoard steps in one job get distinct files", async () => {
+    const paths: string[][] = [];
+    for (const id of ["__keelstack_hoard", "__keelstack_hoard_2"]) {
+      const f = fakeCore({ storage: "fs" });
+      const d = deps(f, {
+        startServer: vi.fn(async (_b: string, args: string[], log: string) => {
+          await writeFile(args[args.indexOf("--token-file") + 1] ?? "", "t\n");
+          paths.push([...args.filter((a) => a.startsWith(dir)), log]);
+          return 1;
+        }),
+      });
+      d.env.GITHUB_ACTION = id;
+      await runMain(d);
+      expect(f.of("setFailed")).toEqual([]);
+    }
+    expect(paths[0]).toHaveLength(5); // port, token, summary, fs-root, log
+    for (const p of paths[0] ?? []) expect(paths[1]).not.toContain(p);
+  });
+
+  test("without GITHUB_ACTION each step gets a random id", async () => {
+    const logs: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const f = fakeCore();
+      const d = deps(f, {
+        startServer: vi.fn(async (_b: string, args: string[], log: string) => {
+          await writeFile(args[args.indexOf("--token-file") + 1] ?? "", "t\n");
+          logs.push(log);
+          return 1;
+        }),
+      });
+      delete d.env.GITHUB_ACTION;
+      await runMain(d);
+    }
+    expect(logs[0]).toMatch(/hoard-[0-9a-f]{12}\.log$/);
+    expect(logs[0]).not.toBe(logs[1]);
+  });
+
+  test("GITHUB_ACTION is sanitised before it reaches a path", async () => {
+    const f = fakeCore();
+    const d = deps(f, {
+      startServer: vi.fn(async (_b: string, args: string[]) => {
+        await writeFile(args[args.indexOf("--token-file") + 1] ?? "", "t\n");
+        return 1;
+      }),
+    });
+    d.env.GITHUB_ACTION = "../../evil step";
+    await runMain(d);
+    expect(vi.mocked(d.startServer).mock.calls[0]?.[2]).toBe(
+      join(dir, "hoard-______evil_step.log"),
+    );
   });
 
   test("a missing token file fails the step", async () => {
     const f = fakeCore();
     const d = deps(f, { startServer: vi.fn(async () => 1) });
     await runMain(d);
-    expect(f.of("setFailed")).toEqual([[expect.stringContaining("hoard.token")]]);
+    expect(f.of("setFailed")).toEqual([[expect.stringContaining("hoard-__keelstack_hoard.token")]]);
     expect(f.of("exportVariable")).toEqual([]);
   });
 });
@@ -191,6 +285,7 @@ describe("post", () => {
       env: {},
       getStats: vi.fn(async () => ({ hits: 3, misses: 1, time_saved_ms: 900 })),
       shutdownServer: vi.fn(async () => true),
+      kill: vi.fn(),
       ...over,
     };
   }
@@ -222,7 +317,12 @@ describe("post", () => {
     const f = fakeCore({}, s);
     await runPost({ ...deps(f), env: { RUNNER_DEBUG: "1" } });
     expect(f.of("startGroup")).toEqual([["hoard log"]]);
-    expect(f.of("info")).toEqual([["hoard log line\n"]]);
+    const [[open], [content], [close]] = f.of("info") as [[string], [string], [string]];
+    expect(content).toBe("hoard log line\n");
+    const t = /^::stop-commands::([0-9a-f]{32})$/.exec(open)?.[1];
+    expect(t).toBeTruthy();
+    expect(close).toBe(`::${t}::`);
+    expect(f.of("info")).toHaveLength(3);
   });
 
   test("a server that already died: warns, still writes the summary, never throws", async () => {
@@ -289,5 +389,29 @@ describe("post", () => {
     expect(f.calls).toEqual([]);
     expect(f.summaries).toEqual([]);
     expect(d.shutdownServer).not.toHaveBeenCalled();
+  });
+
+  test("the token is masked again before any output", async () => {
+    const s = await state();
+    await writeFile(s.summary, summaryText);
+    const f = fakeCore({}, s);
+    await runPost(deps(f));
+    expect(f.calls[0]).toEqual(["setSecret", "tok"]);
+  });
+
+  test("a refused shutdown kills the saved pid", async () => {
+    const s = await state({ pid: "4321" });
+    const f = fakeCore({}, s);
+    const d = deps(f, { shutdownServer: vi.fn(async () => false) });
+    await runPost(d);
+    expect(d.kill).toHaveBeenCalledWith(4321);
+  });
+
+  test("a clean shutdown kills nothing", async () => {
+    const s = await state({ pid: "4321" });
+    const f = fakeCore({}, s);
+    const d = deps(f);
+    await runPost(d);
+    expect(d.kill).not.toHaveBeenCalled();
   });
 });

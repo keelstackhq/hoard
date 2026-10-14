@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   getStats,
+  killServer,
   serveArgs,
   serveEnv,
   shutdownServer,
@@ -95,6 +96,20 @@ describe("serveArgs", () => {
       "7",
       "--max-size",
       "5GB",
+    ]);
+  });
+
+  test("fs storage gets its store in the step's files", () => {
+    const a = serveArgs({ ...baseSettings, storage: "fs" }, "/rt", "step_2");
+    expect(a.slice(a.indexOf("--port-file"), a.indexOf("--max-age-days"))).toEqual([
+      "--port-file",
+      "/rt/hoard-step_2.port",
+      "--token-file",
+      "/rt/hoard-step_2.token",
+      "--summary-file",
+      "/rt/hoard-step_2-summary.md",
+      "--fs-root",
+      "/rt/hoard-step_2-store",
     ]);
   });
 
@@ -248,5 +263,16 @@ describe("shutdownServer and getStats", () => {
 
   test("getStats is undefined when nothing listens", async () => {
     expect(await getStats(1, "t")).toBeUndefined();
+  });
+});
+
+describe("killServer", () => {
+  test("ignores pids it must never signal and processes that are gone", () => {
+    expect(() => {
+      killServer(0);
+      killServer(1);
+      killServer(Number.NaN);
+      killServer(2 ** 22 + 12345); // above Linux pid_max default: no such process
+    }).not.toThrow();
   });
 });

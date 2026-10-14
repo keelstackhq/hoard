@@ -1,24 +1,36 @@
 // Starts, probes and stops the detached `hoard serve` process (spec §10 main 3–4, post).
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Settings } from "./settings.js";
 
-/** Files hoard serve writes inside `$RUNNER_TEMP`. */
-export function serverFiles(runnerTemp: string) {
+/**
+ * An id for this hoard step, so two hoard steps in one job never share files: the step's
+ * `GITHUB_ACTION` (unique per step in a job) made path-safe, else a random id.
+ */
+export function stepId(env: NodeJS.ProcessEnv): string {
+  const fromEnv = (env.GITHUB_ACTION ?? "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
+  return fromEnv || randomBytes(6).toString("hex");
+}
+
+/** Files of one hoard step inside `$RUNNER_TEMP`; `id` "" gives the plain `hoard.*` names. */
+export function serverFiles(runnerTemp: string, id = "") {
+  const base = join(runnerTemp, id ? `hoard-${id}` : "hoard");
   return {
-    port: join(runnerTemp, "hoard.port"),
-    token: join(runnerTemp, "hoard.token"),
-    summary: join(runnerTemp, "hoard-summary.md"),
-    log: join(runnerTemp, "hoard.log"),
+    port: `${base}.port`,
+    token: `${base}.token`,
+    summary: `${base}-summary.md`,
+    log: `${base}.log`,
+    fsRoot: `${base}-store`,
   };
 }
 
 /** argv for `hoard serve`. Never contains a secret: the R2 keys go through `serveEnv`. */
-export function serveArgs(s: Settings, runnerTemp: string): string[] {
-  const files = serverFiles(runnerTemp);
+export function serveArgs(s: Settings, runnerTemp: string, id = ""): string[] {
+  const files = serverFiles(runnerTemp, id);
   const args = [
     "serve",
     "--storage",
@@ -36,6 +48,8 @@ export function serveArgs(s: Settings, runnerTemp: string): string[] {
     files.token,
     "--summary-file",
     files.summary,
+    // The store stays out of the checkout: untracked files there can change turbo's hashes.
+    ...(s.storage === "fs" ? ["--fs-root", files.fsRoot] : []),
     "--max-age-days",
     String(s.maxAgeDays),
     "--max-size",
@@ -151,5 +165,15 @@ export async function shutdownServer(port: number, token: string): Promise<boole
     return r.ok;
   } catch {
     return false;
+  }
+}
+
+/** Best-effort SIGTERM (hoard then writes its summary and exits); errors are ignored. */
+export function killServer(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 1) return; // never init, never a process group
+  try {
+    process.kill(pid);
+  } catch {
+    // already gone
   }
 }
