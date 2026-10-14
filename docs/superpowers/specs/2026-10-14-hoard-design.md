@@ -81,7 +81,8 @@ One Rust crate (`hoard`, lib + bin) and one small TypeScript action in `action/`
 ### 4.2 Configuration
 
 Precedence: CLI flag > environment variable > default. Every flag `--foo-bar` has an env var
-`HOARD_FOO_BAR`.
+`HOARD_FOO_BAR`. An empty `HOARD_*` variable counts as unset (GitHub Actions exports empty
+secrets as `""`).
 
 | Setting | Default | Notes |
 |---|---|---|
