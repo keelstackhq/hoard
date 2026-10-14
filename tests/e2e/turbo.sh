@@ -62,13 +62,14 @@ esac
 "$hoard" serve "${serve_args[@]}" >"$work/hoard.log" 2>&1 &
 server_pid=$!
 
-# The token file is written after the port file, so waiting for it covers both.
+# The port file is the readiness signal: hoard writes the token file first, then the port file.
 for _ in $(seq 1 100); do
-	[ -s "$work/token" ] && break
+	[ -s "$work/port" ] && break
 	kill -0 "$server_pid" 2>/dev/null || fail "hoard exited during startup"
 	sleep 0.1
 done
-[ -s "$work/token" ] || fail "hoard did not write its token file"
+[ -s "$work/port" ] || fail "hoard did not write its port file"
+[ -s "$work/token" ] || fail "hoard wrote its port file but no token file"
 
 eval "$("$hoard" env --port-file "$work/port" --token-file "$work/token")"
 export TURBO_API TURBO_TOKEN TURBO_TEAM
