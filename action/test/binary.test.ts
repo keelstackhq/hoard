@@ -203,12 +203,17 @@ describe("releaseUrl", () => {
 });
 
 describe("download retries", () => {
-  test("a failing download is retried after 1 s, 2 s and 4 s", async () => {
+  /** Instant waits; records each retry delay. */
+  function fastOpts(sleeps: number[], timeoutMs = 90_000) {
+    return { sleep: async (ms: number) => void sleeps.push(ms), timeoutMs };
+  }
+
+  test("a failing download is retried once, after 2 s", async () => {
     const archive = await writeTempTarGz("bin");
     const good = downloadOf(archive);
     let calls = 0;
     const download = vi.fn(async (url: string) => {
-      if (++calls <= 3) throw new Error(`HTTP 502 (${calls})`);
+      if (++calls === 1) throw new Error("HTTP 502");
       return good(url);
     });
     const sleeps: number[] = [];
@@ -218,14 +223,14 @@ describe("download retries", () => {
       { [LINUX]: await sha256(archive) },
       download,
       {},
-      async (ms) => void sleeps.push(ms),
+      fastOpts(sleeps),
     );
     expect(basename(exe)).toBe("hoard");
-    expect(download).toHaveBeenCalledTimes(4);
-    expect(sleeps).toEqual([1_000, 2_000, 4_000]);
+    expect(download).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([2_000]);
   });
 
-  test("a download that keeps failing is a BinaryDownloadError naming the last cause", async () => {
+  test("two failures are a BinaryDownloadError naming the last cause", async () => {
     const download = vi.fn(async () => {
       throw new Error("connect ETIMEDOUT");
     });
@@ -236,24 +241,66 @@ describe("download retries", () => {
       CHECKSUMS_ZERO,
       download,
       {},
-      async (ms) => void sleeps.push(ms),
+      fastOpts(sleeps),
     ).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(BinaryDownloadError);
     expect((err as Error).message).toBe("connect ETIMEDOUT");
-    expect(download).toHaveBeenCalledTimes(4);
-    expect(sleeps).toEqual([1_000, 2_000, 4_000]);
+    expect(download).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([2_000]);
+  });
+
+  test("an HTTP 4xx is not retried, and is still a download error", async () => {
+    const download = vi.fn(async () => {
+      throw new tc.HTTPError(404);
+    });
+    const sleeps: number[] = [];
+    const err = await ensureBinary(
+      LINUX,
+      "2.0.0",
+      CHECKSUMS_ZERO,
+      download,
+      {},
+      fastOpts(sleeps),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BinaryDownloadError);
+    expect((err as Error).message).toContain("404");
+    expect(download).toHaveBeenCalledOnce();
+    expect(sleeps).toEqual([]);
+  });
+
+  test("a download that never finishes is a BinaryDownloadError at the cap", async () => {
+    const download = vi.fn(() => new Promise<string>(() => {}));
+    const started = Date.now();
+    const err = await ensureBinary(
+      LINUX,
+      "2.0.0",
+      CHECKSUMS_ZERO,
+      download,
+      {},
+      {
+        timeoutMs: 200,
+      },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BinaryDownloadError);
+    expect((err as Error).message).toBe("no answer within 200ms");
+    expect(Date.now() - started).toBeLessThan(1_500);
   });
 
   test("a checksum mismatch is not retried and is not a download error", async () => {
     const archive = await writeTempTarGz("not the real binary");
     const download = downloadOf(archive);
-    const sleep = vi.fn(async () => {});
-    const err = await ensureBinary(LINUX, "2.0.1", CHECKSUMS_ZERO, download, {}, sleep).catch(
-      (e: unknown) => e,
-    );
+    const sleeps: number[] = [];
+    const err = await ensureBinary(
+      LINUX,
+      "2.0.1",
+      CHECKSUMS_ZERO,
+      download,
+      {},
+      fastOpts(sleeps),
+    ).catch((e: unknown) => e);
     expect((err as Error).message).toBe("checksum mismatch for x86_64-unknown-linux-musl");
     expect(err).not.toBeInstanceOf(BinaryDownloadError);
     expect(download).toHaveBeenCalledOnce();
-    expect(sleep).not.toHaveBeenCalled();
+    expect(sleeps).toEqual([]);
   });
 });

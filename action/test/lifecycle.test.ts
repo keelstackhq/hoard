@@ -216,8 +216,26 @@ describe("main", () => {
     expect(f.of("setFailed")).toEqual([]);
     expect(f.of("warning")).toEqual([[text]]);
     expect(f.of("exportVariable")).toEqual([]);
-    expect(f.of("saveState")).toEqual([["unavailable", text]]);
+    expect(f.of("saveState")).toEqual([
+      ["unavailable", text],
+      ["warnings", "[]"],
+    ]);
     expect(d.startServer).not.toHaveBeenCalled();
+  });
+
+  test("after a failed download the settings warnings are saved for post", async () => {
+    const f = fakeCore({ storage: "r2", "r2-bucket": "b" }); // no secrets → github + warning
+    const d = deps(f, {
+      ensureBinary: vi.fn(async () => {
+        throw new BinaryDownloadError("HTTP 404");
+      }),
+    });
+    await runMain(d);
+    expect(f.of("setFailed")).toEqual([]);
+    const saved = Object.fromEntries(f.of("saveState"));
+    expect(JSON.parse(String(saved.warnings))).toEqual([
+      expect.stringMatching(/^R2 secrets are not available/),
+    ]);
   });
 
   test("a checksum mismatch still fails the step", async () => {
@@ -482,9 +500,24 @@ describe("post", () => {
     const d = deps(f);
     await runPost(d);
     expect(f.summaries).toEqual([`> ⚠️ ${note}\n`]);
+    expect(f.of("setOutput")).toEqual([
+      ["hits", "0"],
+      ["misses", "0"],
+      ["time-saved-ms", "0"],
+    ]);
     expect(d.getStats).not.toHaveBeenCalled();
     expect(d.shutdownServer).not.toHaveBeenCalled();
     expect(f.of("warning")).toEqual([]);
+  });
+
+  test("after a failed download post also writes the settings warnings", async () => {
+    const note = "hoard binary could not be downloaded (HTTP 404); continuing without the cache";
+    const f = fakeCore(
+      {},
+      { unavailable: note, warnings: JSON.stringify(["R2 secrets are not available"]) },
+    );
+    await runPost(deps(f));
+    expect(f.summaries).toEqual([`> ⚠️ ${note}\n\n> ⚠️ R2 secrets are not available\n`]);
   });
 
   test("a refused shutdown kills the saved pid", async () => {

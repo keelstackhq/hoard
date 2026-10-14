@@ -135,6 +135,7 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
         const note = `hoard binary could not be downloaded (${e.message}); continuing without the cache`;
         core.warning(note);
         core.saveState("unavailable", note); // post puts it in the job summary
+        core.saveState("warnings", JSON.stringify(settings.warnings));
         return;
       }
     }
@@ -204,7 +205,9 @@ export async function runPost(d: PostDeps = postDeps()): Promise<void> {
   try {
     const unavailable = core.getState("unavailable");
     if (unavailable) {
-      await core.summary.addRaw(`> ⚠️ ${unavailable}\n`).write();
+      for (const name of ["hits", "misses", "time-saved-ms"]) core.setOutput(name, "0");
+      const lines = [unavailable, ...savedWarnings(core.getState("warnings"))];
+      await core.summary.addRaw(`${lines.map((w) => `> ⚠️ ${w}`).join("\n\n")}\n`).write();
       return;
     }
     const port = Number(core.getState("port"));

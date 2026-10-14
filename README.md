@@ -80,7 +80,7 @@ summary.
   skipped. If uploads failed, the action shows a warning (`hoard: N uploads failed`) and the job
   summary says `Upload errors: N`, so a broken cache does not look like a cold one.
 - **Binary download failures never fail the build.** If the hoard binary cannot be downloaded
-  (after 3 retries), the action shows a warning and the job runs without the remote cache. A
+  (one retry, at most 90 s), the action shows a warning and the job runs without the remote cache. A
   checksum mismatch still fails the step.
 
 ## Commands

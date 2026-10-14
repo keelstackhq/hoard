@@ -322,12 +322,14 @@ main:
    local hoard binary to use instead (with a warning); it bypasses checksum verification, so only
    the workflow author can set it.
 
-   A failed download is retried 3 times, after 1 s, 2 s and 4 s. If it still fails, the cause is
-   transient (network, a github.com outage), not the user's config, so the cache must not fail
-   the build: main emits the warning
-   `hoard binary could not be downloaded (<cause>); continuing without the cache`, saves it as
-   state (`unavailable`) so post writes it as one `> ⚠️` line to the job summary, exports no
-   `TURBO_*` (turbo then runs without a remote cache) and succeeds. This is not a silent fallback:
+   A failed download is retried once, after 2 s, and the whole download takes at most 90 s
+   (`@actions/tool-cache` already retries internally, so more attempts would only stall the job).
+   An HTTP 4xx (e.g. a missing release asset) is not retried. If the download still fails or hits
+   the cap, the cause is not the user's config, so the cache must not fail the build: main emits
+   the warning `hoard binary could not be downloaded (<cause>); continuing without the cache`,
+   saves it as state (`unavailable`) together with the settings warnings, exports no `TURBO_*`
+   (turbo then runs without a remote cache) and succeeds. post sets the outputs to `0` and writes
+   that warning and the settings warnings as `> ⚠️` lines to the job summary. This is not a silent fallback:
    nothing is cached anywhere else. A checksum mismatch, an unsupported platform, a target with no
    checksum, an archive without the executable and an invalid input are not transient and still
    fail the step.
@@ -354,7 +356,8 @@ main:
    warning (e.g. the R2 → github fallback, §8) is also a `core.warning`.
 
 post (never fails the job; problems are warnings): if main saved `unavailable` (the binary
-download failed), write that one line to `$GITHUB_STEP_SUMMARY` and stop. If main saved no other
+download failed), set the outputs to `0`, write it and the settings warnings to
+`$GITHUB_STEP_SUMMARY` and stop. If main saved no other
 state, do nothing. Mask the saved token again with `core.setSecret` before any output (post is a
 separate process). Read `GET /_hoard/stats` and set the outputs (`hits`, `misses`,
 `time-saved-ms`; `0` when unreachable); when `put_errors > 0`, warn

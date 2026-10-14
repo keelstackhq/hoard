@@ -22,7 +22,7 @@ export function releaseUrl(target: Target, version: string, env: NodeJS.ProcessE
 }
 
 /**
- * The release archive could not be downloaded, even after retries. Transient (network, a
+ * The release archive could not be downloaded (after one retry, an HTTP 4xx, or the 90 s cap). Transient (network, a
  * github.com outage), so main goes on without the cache instead of failing the build (§10).
  * A checksum mismatch or a missing checksum is never this error.
  */
@@ -30,24 +30,77 @@ export class BinaryDownloadError extends Error {
   override name = "BinaryDownloadError";
 }
 
-/** Waits before the 2nd, 3rd and 4th download attempt. */
-const RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+/** Download timing; injectable for tests. */
+export interface DownloadOptions {
+  /** Wait before the one retry (default 2 s). */
+  retryDelayMs?: number;
+  /** Cap for the whole download, retry included (default 90 s). */
+  timeoutMs?: number;
+  sleep?: (ms: number) => Promise<unknown>;
+}
 
+const msText = (ms: number) => (ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`);
+
+/** An HTTP 4xx from @actions/tool-cache (HTTPError.httpStatusCode): not transient. */
+function isClientError(e: unknown): boolean {
+  const code = (e as { httpStatusCode?: unknown } | null)?.httpStatusCode;
+  return typeof code === "number" && code >= 400 && code < 500;
+}
+
+const asDownloadError = (e: unknown) =>
+  new BinaryDownloadError(e instanceof Error ? e.message : String(e), { cause: e });
+
+/**
+ * One attempt, plus one retry unless the server answered 4xx. tc.downloadTool already retries
+ * internally (10–20 s apart), so more outer attempts would only stall the job.
+ */
 async function downloadWithRetry(
   url: string,
   download: (url: string) => Promise<string>,
+  retryDelayMs: number,
   sleep: (ms: number) => Promise<unknown>,
 ): Promise<string> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await download(url);
-    } catch (e) {
-      const wait = RETRY_DELAYS_MS[attempt];
-      if (wait === undefined) {
-        throw new BinaryDownloadError(e instanceof Error ? e.message : String(e), { cause: e });
-      }
-      await sleep(wait);
-    }
+  try {
+    return await download(url);
+  } catch (e) {
+    if (isClientError(e)) throw asDownloadError(e);
+    await sleep(retryDelayMs);
+  }
+  try {
+    return await download(url);
+  } catch (e) {
+    throw asDownloadError(e);
+  }
+}
+
+/** `downloadWithRetry`, but a BinaryDownloadError once `timeoutMs` has passed. */
+async function downloadCapped(
+  url: string,
+  download: (url: string) => Promise<string>,
+  opts: DownloadOptions,
+): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? 90_000;
+  const attempt = downloadWithRetry(
+    url,
+    download,
+    opts.retryDelayMs ?? 2_000,
+    opts.sleep ?? ((ms) => delay(ms)),
+  );
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new BinaryDownloadError(`no answer within ${msText(timeoutMs)}`)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([attempt, timeout]);
+  } catch (e) {
+    // A download that lands after the cap is not used; delete what it wrote.
+    attempt.then((f) => rm(f, { force: true })).catch(() => {});
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -68,7 +121,7 @@ export async function ensureBinary(
   checksums: Partial<Record<Target, string>>,
   download: (url: string) => Promise<string> = (url) => tc.downloadTool(url),
   env: NodeJS.ProcessEnv = process.env,
-  sleep: (ms: number) => Promise<unknown> = (ms) => delay(ms),
+  opts: DownloadOptions = {},
 ): Promise<string> {
   const expected = checksums[target];
   if (!expected) {
@@ -83,7 +136,7 @@ export async function ensureBinary(
     if (cached) return join(cached, exeName);
   }
 
-  const archive = await downloadWithRetry(releaseUrl(target, version, env), download, sleep);
+  const archive = await downloadCapped(releaseUrl(target, version, env), download, opts);
   try {
     if ((await sha256(archive)) !== expected.toLowerCase()) {
       throw new Error(`checksum mismatch for ${target}`);
