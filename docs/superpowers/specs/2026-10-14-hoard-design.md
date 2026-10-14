@@ -91,7 +91,7 @@ secrets as `""`).
 |---|---|---|
 | `storage` | `github` | `github` \| `r2` \| `fs` |
 | `mode` | `read-write` | `read-write` \| `read` \| `off`; see §8 |
-| `cache-version` | `v1` | Part of every key; bump to purge |
+| `cache-version` | `v1` | Part of every key; bump to purge. One segment of `[A-Za-z0-9._-]` (not `.` or `..`, no `/`) |
 | `port` | `0` | `0` = pick a free port; actual port written to `--port-file` |
 | `port-file` | `$RUNNER_TEMP/hoard.port` or `./.hoard/port` | |
 | `token` | random 32 bytes, hex | Written to `--token-file` (mode 0600); never logged |

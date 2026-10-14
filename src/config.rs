@@ -34,9 +34,10 @@ pub enum ConfigError {
     #[error("storage=r2 needs {}; set the flag or its HOARD_* env var", .0.join(", "))]
     MissingR2(Vec<String>),
     #[error(
-        "cache-version must not be empty; set --cache-version or HOARD_CACHE_VERSION (default v1)"
+        "cache-version {0:?} must be one segment of A-Z a-z 0-9 . _ - (not . or .., no /); \
+         set --cache-version or HOARD_CACHE_VERSION (default v1)"
     )]
-    EmptyCacheVersion,
+    BadCacheVersion(String),
     #[error(
         "r2-prefix {0:?} must be segments of A-Z a-z 0-9 . _ - joined by / and must end with / \
          (no leading /, //, spaces, . or .. segments); for example cache/"
@@ -77,14 +78,18 @@ fn valid_prefix(p: &str) -> bool {
     let Some(body) = p.strip_suffix('/') else {
         return false;
     };
-    body.split('/').all(|seg| {
-        !seg.is_empty()
-            && seg != "."
-            && seg != ".."
-            && seg
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    })
+    body.split('/').all(valid_segment)
+}
+
+/// One key segment: `[A-Za-z0-9._-]+`, not `.` or `..`. Used for r2-prefix segments and for
+/// cache-version, which become key path segments (on fs, `..` would leave fs-root).
+fn valid_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg != "."
+        && seg != ".."
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn runner_temp_or(file: &str, fallback: &str) -> PathBuf {
@@ -282,8 +287,8 @@ impl TryFrom<ServeArgs> for Config {
     type Error = ConfigError;
 
     fn try_from(a: ServeArgs) -> Result<Self, ConfigError> {
-        if a.cache_version.is_empty() {
-            return Err(ConfigError::EmptyCacheVersion);
+        if !valid_segment(&a.cache_version) {
+            return Err(ConfigError::BadCacheVersion(a.cache_version));
         }
         let max_size = parse_size(&a.max_size)?;
         if !(1..=36_500).contains(&a.max_age_days) {
@@ -464,6 +469,29 @@ mod tests {
             assert!(!dbg.contains(s), "{s} leaked");
         }
     }
+    #[test]
+    fn cache_version_must_be_one_plain_segment() {
+        let parse = |v: &str| {
+            Config::try_from(ServeArgs::parse_from([
+                "serve",
+                "--storage",
+                "fs",
+                "--cache-version",
+                v,
+            ]))
+        };
+        for ok in ["v1", "v2.1", "2026-10_a", "..v"] {
+            assert_eq!(parse(ok).unwrap().cache_version, ok);
+        }
+        for bad in [
+            "..", ".", "../../..", "a/b", "v1/", "/v1", "v 1", "v\\1", "v1\n",
+        ] {
+            let e = parse(bad).unwrap_err().to_string();
+            assert!(e.contains("cache-version"), "{bad:?}: {e}");
+            assert!(e.contains("A-Z a-z 0-9 . _ -"), "{bad:?}: {e}");
+        }
+    }
+
     #[test]
     fn empty_values_rejected() {
         let a = ServeArgs::parse_from(["serve", "--storage", "fs", "--cache-version", ""]);
