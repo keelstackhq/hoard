@@ -217,6 +217,8 @@ next run retries. Deletes are free on R2; listing costs one Class A op per 1,000
 `PruneReport { listed, deleted, freed_bytes, remaining_bytes }`. On shutdown the prune is
 bounded by 5 minutes and never fails the run: the summary gets `Pruned: N objects, X` when
 something was deleted, `Prune: failed (reason)` on an error or timeout, nothing otherwise.
+The size cap counts everything under `{prefix}`, so do not nest prefixes in one bucket
+(`cache/` and `cache/team/`): a prune of the outer prefix deletes the inner one's objects.
 
 ### 7.3 Layer 3 — refresh-on-hit (optional, milestone 3)
 

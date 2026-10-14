@@ -12,6 +12,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 01-core-r2/Task 6 serve + env commands · bd1ece0, 4dedc46 · 30 unit + 28 http + 8 store + 5 CLI (incl. SIGTERM) pass; fmt, clippy clean; manual serve→PUT→GET→shutdown smoke OK
 - 2026-10-14 · 01-core-r2/Task 7 R2 storage via S3 (MinIO) · e505f6f, 86d402d · 37 unit + 13 r2 (MinIO) + 28 http + 12 store + 5 CLI pass; fmt, clippy clean; no openssl/native-tls
 - 2026-10-14 · 01-core-r2/Task 8 R2 lifecycle rule + doctor · 1727e57, aa1fc62 · 44 unit + 28 r2 (MinIO + verbatim lifecycle proxy) + 28 http + 12 store + 7 CLI pass; fmt, clippy clean
+- 2026-10-14 · 01-core-r2/Task 9 R2 size cap + daily prune · 835631e, e2bc4b5 · 56 unit + 36 r2 (MinIO) + 28 http + 12 store + 8 CLI pass; fmt, clippy clean
 
 ## Blocked
 
