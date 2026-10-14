@@ -45,7 +45,7 @@ Cloudflare R2:
 Laptop (same binary, same bucket, ideally a read-only token):
 
 ```bash
-hoard serve --storage r2 --r2-bucket my-team-cache &   # prints the export lines
+hoard serve --storage r2 --r2-bucket my-team-cache &   # prints how to load the env
 eval "$(hoard env)"                                    # sets TURBO_API/TOKEN/TEAM
 pnpm turbo run build
 ```

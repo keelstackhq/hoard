@@ -5,8 +5,10 @@ pub mod store_checks;
 
 use hoard::config::{Config, LifecycleMode, Mode, Storage};
 
-/// Config for the fs backend rooted under `root`.
-pub fn fs_config(root: &std::path::Path) -> Config {
+/// Config for the fs backend rooted under `root`: port 0, and the port, token and summary
+/// files inside `root`.
+pub fn fs_config(root: impl AsRef<std::path::Path>) -> Config {
+    let root = root.as_ref();
     Config {
         storage: Storage::Fs,
         mode: Mode::ReadWrite,
@@ -15,7 +17,7 @@ pub fn fs_config(root: &std::path::Path) -> Config {
         port_file: root.join("port"),
         token_file: root.join("token"),
         token: None,
-        summary_file: None,
+        summary_file: Some(root.join("summary.md")),
         fs_root: root.join("store"),
         r2: None,
         r2_lifecycle: LifecycleMode::Auto,
@@ -36,8 +38,9 @@ pub struct TestServer {
     pub token: String,
     pub stats: Arc<Stats>,
     pub store: Arc<Store>,
-    /// Receives `()` when `POST /_hoard/shutdown` is called.
-    pub shutdown: tokio::sync::mpsc::Receiver<()>,
+    /// Receives a reply channel when `POST /_hoard/shutdown` is called; the handler answers
+    /// once the reply is sent (or dropped).
+    pub shutdown: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>,
     pub addr: std::net::SocketAddr,
     _dir: tempfile::TempDir,
 }
@@ -75,4 +78,17 @@ pub async fn spawn_test_server(mode: Mode) -> TestServer {
         addr,
         _dir: dir,
     }
+}
+
+/// Polls until `path` exists and is non-empty (up to 10 s), then returns its contents.
+pub async fn wait_for_file(path: &std::path::Path) -> String {
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(path)
+            && !s.is_empty()
+        {
+            return s;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("{} did not appear", path.display());
 }

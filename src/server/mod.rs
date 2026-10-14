@@ -22,8 +22,9 @@ pub struct AppState {
     pub mode: Mode,
     pub prefix: String,
     pub cache_version: String,
-    /// Receives `()` on `POST /_hoard/shutdown`.
-    pub shutdown: tokio::sync::mpsc::Sender<()>,
+    /// `POST /_hoard/shutdown` sends a reply channel here and answers once the shutdown work
+    /// (prune, summary) has replied, or the receiver is gone.
+    pub shutdown: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl AppState {
@@ -62,6 +63,10 @@ async fn stats(State(s): State<AppState>) -> Json<StatsSnapshot> {
 }
 
 async fn shutdown(State(s): State<AppState>) -> &'static str {
-    let _ = s.shutdown.try_send(());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // A closed channel or a dropped reply means shutdown is already done or under way.
+    if s.shutdown.send(tx).await.is_ok() {
+        let _ = rx.await;
+    }
     "ok"
 }

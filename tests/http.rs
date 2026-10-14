@@ -5,9 +5,10 @@ mod common;
 use std::time::Duration;
 
 use bytes::Bytes;
-use common::{TestServer, spawn_test_server};
+use common::{TestServer, fs_config, spawn_test_server, wait_for_file};
 use hoard::config::Mode;
 use hoard::key::artifact_key;
+use hoard::serve::{env_lines, run_serve};
 use reqwest::{Client, Method, RequestBuilder, Response};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -365,16 +366,37 @@ async fn batch_query() {
 }
 
 #[tokio::test]
-async fn shutdown_signals_channel() {
+async fn shutdown_waits_for_reply() {
     let mut t = spawn_test_server(Mode::ReadWrite).await;
-    let r = authed(&t, Method::POST, "/_hoard/shutdown")
-        .send()
+    let req = authed(&t, Method::POST, "/_hoard/shutdown").send();
+    let resp = tokio::spawn(req);
+    let reply = tokio::time::timeout(Duration::from_secs(5), t.shutdown.recv())
         .await
+        .unwrap()
         .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !resp.is_finished(),
+        "responded before the shutdown work finished"
+    );
+    reply.send(()).unwrap();
+    let r = resp.await.unwrap().unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().await.unwrap(), "ok");
-    let got = tokio::time::timeout(Duration::from_secs(5), t.shutdown.recv()).await;
-    assert_eq!(got.unwrap(), Some(()));
+}
+
+#[tokio::test]
+async fn shutdown_answers_when_nobody_listens() {
+    let mut t = spawn_test_server(Mode::ReadWrite).await;
+    t.shutdown.close();
+    let r = tokio::time::timeout(
+        Duration::from_secs(5),
+        authed(&t, Method::POST, "/_hoard/shutdown").send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(r.status(), 200);
 }
 
 #[tokio::test]
@@ -485,4 +507,166 @@ async fn large_artifact_streams() {
     assert_eq!(n, TOTAL);
     assert_eq!(sent.finalize(), recv.finalize());
     assert_eq!(t.stats.snapshot().bytes_down, TOTAL as u64);
+}
+
+// ---- `hoard serve` (run_serve) and `hoard env` ----
+
+fn client() -> Client {
+    Client::new()
+}
+
+async fn post_shutdown(port: u16, token: &str) -> reqwest::Result<Response> {
+    client()
+        .post(format!("http://127.0.0.1:{port}/_hoard/shutdown"))
+        .bearer_auth(token)
+        .send()
+        .await
+}
+
+#[tokio::test]
+async fn serve_writes_port_and_token_files_and_summary_on_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fs_config(&dir); // port 0, port_file/token_file/summary_file inside dir
+    let h = tokio::spawn(run_serve(cfg.clone()));
+    let port: u16 = wait_for_file(&cfg.port_file).await.trim().parse().unwrap();
+    let token = std::fs::read_to_string(&cfg.token_file).unwrap();
+    assert_eq!(token.len(), 64);
+    let r = client()
+        .post(format!("http://127.0.0.1:{port}/_hoard/shutdown"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    h.await.unwrap().unwrap();
+    assert!(
+        std::fs::read_to_string(cfg.summary_file.unwrap())
+            .unwrap()
+            .contains("### hoard")
+    );
+}
+
+#[test]
+fn env_output() {
+    assert_eq!(
+        env_lines(4123, "t0k"),
+        "export TURBO_API=http://127.0.0.1:4123\nexport TURBO_TOKEN=t0k\nexport TURBO_TEAM=hoard\n"
+    );
+}
+
+#[tokio::test]
+async fn serve_summary_is_written_before_shutdown_responds() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fs_config(&dir);
+    let h = tokio::spawn(run_serve(cfg.clone()));
+    let port: u16 = wait_for_file(&cfg.port_file).await.trim().parse().unwrap();
+    let token = std::fs::read_to_string(&cfg.token_file).unwrap();
+    // The random token is 64 lowercase hex chars.
+    assert!(token.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
+    let r = post_shutdown(port, &token).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let summary = std::fs::read_to_string(cfg.summary_file.as_ref().unwrap()).unwrap();
+    assert!(
+        summary.contains(&format!("Storage: fs ({})", cfg.fs_root.display())),
+        "{summary}"
+    );
+    tokio::time::timeout(Duration::from_secs(10), h)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn serve_removes_port_and_token_files_after_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fs_config(&dir);
+    let h = tokio::spawn(run_serve(cfg.clone()));
+    let port: u16 = wait_for_file(&cfg.port_file).await.trim().parse().unwrap();
+    let token = std::fs::read_to_string(&cfg.token_file).unwrap();
+    post_shutdown(port, &token).await.unwrap();
+    h.await.unwrap().unwrap();
+    assert!(!cfg.port_file.exists());
+    assert!(!cfg.token_file.exists());
+}
+
+#[tokio::test]
+async fn serve_second_shutdown_does_not_hang() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fs_config(&dir);
+    let h = tokio::spawn(run_serve(cfg.clone()));
+    let port: u16 = wait_for_file(&cfg.port_file).await.trim().parse().unwrap();
+    let token = std::fs::read_to_string(&cfg.token_file).unwrap();
+    let (a, b) = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::join(post_shutdown(port, &token), post_shutdown(port, &token)),
+    )
+    .await
+    .expect("a shutdown request hung");
+    // A request that reaches the server gets 200; one that arrives after the listener
+    // closed may fail to connect, which is fine.
+    let ok = [a, b]
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .inspect(|r| assert_eq!(r.status(), 200))
+        .count();
+    assert!(ok >= 1);
+    tokio::time::timeout(Duration::from_secs(10), h)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn serve_uses_given_token_verbatim() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = fs_config(&dir);
+    cfg.token = Some("my-fixed-token".into());
+    cfg.port_file = dir.path().join("nested/run/port");
+    cfg.token_file = dir.path().join("nested/run/token");
+    let h = tokio::spawn(run_serve(cfg.clone()));
+    let port: u16 = wait_for_file(&cfg.port_file).await.trim().parse().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&cfg.token_file).unwrap(),
+        "my-fixed-token"
+    );
+    let r = client()
+        .get(format!("http://127.0.0.1:{port}/v8/artifacts/status"))
+        .bearer_auth("my-fixed-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    post_shutdown(port, "my-fixed-token").await.unwrap();
+    h.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_token_file_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fs_config(&dir);
+    let h = tokio::spawn(run_serve(cfg.clone()));
+    let port: u16 = wait_for_file(&cfg.port_file).await.trim().parse().unwrap();
+    let mode = std::fs::metadata(&cfg.token_file)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let token = std::fs::read_to_string(&cfg.token_file).unwrap();
+    post_shutdown(port, &token).await.unwrap();
+    h.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn serve_github_storage_fails_with_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = fs_config(&dir);
+    cfg.storage = hoard::config::Storage::Github;
+    let err = format!("{:#}", run_serve(cfg.clone()).await.unwrap_err());
+    assert!(err.contains("GitHub Action"), "{err}");
+    assert!(err.contains("--storage fs"), "{err}");
+    assert!(!cfg.port_file.exists());
 }

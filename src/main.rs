@@ -1,5 +1,10 @@
+use std::io::IsTerminal;
+
+use anyhow::bail;
 use clap::{Args, Parser, Subcommand};
 use hoard::config::{Config, ServeArgs, TokenPaths, drop_empty_hoard_env};
+use hoard::serve::{env_for, run_serve};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(
@@ -36,14 +41,43 @@ struct PruneArgs {
 fn main() {
     drop_empty_hoard_env();
     let cli = Cli::parse();
-    let result = match cli.command {
-        Command::Serve(args) | Command::Doctor(args) => Config::try_from(args).map(|_| ()),
-        Command::Prune(p) => Config::try_from(p.serve).map(|_| ()),
-        Command::Env(_) => Ok(()),
-    };
-    if let Err(e) = result {
-        eprintln!("hoard: {e}");
+    if let Err(e) = run(cli) {
+        eprintln!("error: {e:#}");
         std::process::exit(1);
     }
-    todo!("subcommand bodies land in later tasks");
+}
+
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+}
+
+fn run(cli: Cli) -> anyhow::Result<()> {
+    match cli.command {
+        Command::Env(paths) => {
+            print!("{}", env_for(&paths)?);
+            Ok(())
+        }
+        Command::Serve(args) => {
+            let cfg = Config::try_from(args)?;
+            init_logging();
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(run_serve(cfg))
+        }
+        Command::Prune(p) => {
+            Config::try_from(p.serve)?;
+            let _ = p.force;
+            bail!("`hoard prune` is not implemented yet")
+        }
+        Command::Doctor(args) => {
+            Config::try_from(args)?;
+            bail!("`hoard doctor` is not implemented yet")
+        }
+    }
 }
