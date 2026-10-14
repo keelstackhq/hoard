@@ -1,0 +1,8 @@
+{
+  "name": "@fixture/a",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "sleep 1 && mkdir -p dist && echo a > dist/out.txt"
+  }
+}

@@ -18,3 +18,26 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      HOARD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: docker compose up -d --wait minio
+      - run: cargo build --release
+      - run: tests/e2e/turbo.sh
+        env:
+          HOARD_BIN: ${{ github.workspace }}/target/release/hoard
+      - run: tests/e2e/turbo.sh
+        env:
+          STORAGE: r2
+          HOARD_BIN: ${{ github.workspace }}/target/release/hoard

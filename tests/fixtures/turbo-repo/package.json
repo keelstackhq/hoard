@@ -1,0 +1,8 @@
+{
+  "name": "hoard-e2e-fixture",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "devDependencies": {
+    "turbo": "2.11.8"
+  }
+}
