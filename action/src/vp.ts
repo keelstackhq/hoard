@@ -36,6 +36,9 @@ function seconds(ms: number): string {
   return `${ms / 1000}s`;
 }
 
+/** How long after the exit the pipes may take to close. */
+export const PIPE_DRAIN_MS = 2_000;
+
 /** Time between the SIGTERM at the timeout and the SIGKILL. */
 export const KILL_GRACE_MS = 5_000;
 
@@ -83,25 +86,31 @@ export function runVp(
         timers.push(setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS));
       }, timeoutMs),
     );
-    // `exit`, not `close`: a grandchild holding the pipes open must not keep the step waiting.
-    child.once("exit", (code) => {
+    const settle = (code: number | null) => {
       if (timedOut) {
         finish({ ok: false, line: `hoard vp ${cmd} timed out after ${seconds(timeoutMs)}` });
         return;
       }
-      // Let the pipes drain what was written before the exit.
-      setImmediate(() => {
-        const out = lastLine(stdout);
-        if (code === 0) {
-          // hoard exits 0 on storage errors and says so on its one line.
-          const warning = out.startsWith("warning: ");
-          finish({ ok: !warning, line: warning ? out.slice("warning: ".length) : out });
-        } else {
-          const why = lastLine(stderr);
-          const how = code === null ? "was killed" : `exited with code ${code}`;
-          finish({ ok: false, line: `hoard vp ${cmd} ${how}${why ? `: ${why}` : ""}` });
-        }
-      });
+      const out = lastLine(stdout);
+      if (code === 0) {
+        // hoard exits 0 on storage errors and says so on its one line.
+        const warning = out.startsWith("warning: ");
+        finish({ ok: !warning, line: warning ? out.slice("warning: ".length) : out });
+      } else {
+        const why = lastLine(stderr);
+        const how = code === null ? "was killed" : `exited with code ${code}`;
+        finish({ ok: false, line: `hoard vp ${cmd} ${how}${why ? `: ${why}` : ""}` });
+      }
+    };
+    // `close` comes once the pipes are drained, so the last line is never lost. A grandchild
+    // holding the pipes open must not keep the step waiting: `PIPE_DRAIN_MS` after `exit`,
+    // settle with what arrived.
+    let exitCode: number | null = null;
+    child.once("exit", (code) => {
+      exitCode = code;
+      if (timedOut) settle(code);
+      else timers.push(setTimeout(() => settle(exitCode), PIPE_DRAIN_MS));
     });
+    child.once("close", (code) => settle(code ?? exitCode));
   });
 }

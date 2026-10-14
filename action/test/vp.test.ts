@@ -71,6 +71,21 @@ describe.skipIf(process.platform === "win32")("runVp", () => {
     expect(r).toEqual({ ok: true, line: "restored k (1 KB)" });
   });
 
+  test("waits for the pipes to close, so a line written late is not lost", async () => {
+    // The last line reaches the pipe after the process itself has exited.
+    const bin = await stub('echo "early"\n( sleep 0.3; echo "warning: late" ) &\nexit 0');
+    const r = await runVp(bin, "save", [], {}, 5_000);
+    expect(r).toEqual({ ok: false, line: "late" });
+  });
+
+  test("a grandchild holding the pipes open does not keep the step waiting", async () => {
+    const bin = await stub('echo "saved k (1 KB)"\n( sleep 30 ) &\nexit 0');
+    const started = Date.now();
+    const r = await runVp(bin, "save", [], {}, 20_000);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(r).toEqual({ ok: true, line: "saved k (1 KB)" });
+  });
+
   test("an exit-0 warning line is not ok", async () => {
     const bin = await stub(
       'echo "warning: Vite+ cache save failed (x); the build continues without it"',
