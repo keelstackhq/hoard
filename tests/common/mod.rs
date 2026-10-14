@@ -6,6 +6,52 @@ pub mod store_checks;
 
 use hoard::config::{Config, LifecycleMode, Mode, R2Config, Storage};
 
+/// A spawned child process (a `hoard serve`, usually) that is killed and reaped on drop, so a
+/// failed assertion or an early return never leaves a server running.
+pub struct ChildGuard(Option<std::process::Child>);
+
+impl ChildGuard {
+    /// Waits for the child to exit and collects its piped output.
+    pub fn wait_with_output(mut self) -> std::process::Output {
+        let child = self.0.take().expect("child present until consumed");
+        child.wait_with_output().unwrap()
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("child present until consumed")
+    }
+}
+
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("child present until consumed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(c) = self.0.as_mut() {
+            // A child that already exited and was waited for is not signalled again.
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+/// `Command::spawn` that returns a [`ChildGuard`].
+pub trait SpawnGuarded {
+    fn spawn_guarded(&mut self) -> ChildGuard;
+}
+
+impl SpawnGuarded for std::process::Command {
+    fn spawn_guarded(&mut self) -> ChildGuard {
+        ChildGuard(Some(self.spawn().unwrap()))
+    }
+}
+
 /// Config for the fs backend rooted under `root`: port 0, and the port, token and summary
 /// files inside `root`.
 pub fn fs_config(root: impl AsRef<std::path::Path>) -> Config {

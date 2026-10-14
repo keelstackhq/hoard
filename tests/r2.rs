@@ -8,7 +8,10 @@ use aws_sdk_s3::types::{
     LifecycleRuleFilter,
 };
 use chrono::{DateTime, TimeZone, Utc};
-use common::{MinioBucket, minio_bucket, r2_config, s3_runtime as rt, store_checks as c};
+use common::{
+    ChildGuard, MinioBucket, SpawnGuarded, minio_bucket, r2_config, s3_runtime as rt,
+    store_checks as c,
+};
 use hoard::config::LifecycleMode;
 use hoard::r2::lifecycle::{
     LifecycleError, LifecycleStatus, ensure_lifecycle, fix_command, r2_client, rule_id,
@@ -475,8 +478,8 @@ fn wait_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
     panic!("process did not exit");
 }
 
-fn output(child: std::process::Child) -> (String, String) {
-    let out = child.wait_with_output().unwrap();
+fn output(child: ChildGuard) -> (String, String) {
+    let out = child.wait_with_output();
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -504,9 +507,7 @@ fn access_denied_prints_fix() {
         assert!(err.to_string().lines().any(|l| l == fix), "{err}");
 
         let dir = tempfile::tempdir().unwrap();
-        let mut child = r2_cmd("serve", &b, dir.path(), &key, &secret)
-            .spawn()
-            .unwrap();
+        let mut child = r2_cmd("serve", &b, dir.path(), &key, &secret).spawn_guarded();
         let status = wait_exit(&mut child);
         let (_, stderr) = output(child);
         assert!(!status.success(), "{stderr}");
@@ -540,9 +541,7 @@ fn serve_creates_rule_on_startup() {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
-        let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
-            .spawn()
-            .unwrap();
+        let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret).spawn_guarded();
         common::wait_for_file(&dir.path().join("port")).await;
         let r = rules(&b).await;
         let ours = our_rule(&r, "cache/").expect("serve created the rule");
@@ -572,7 +571,7 @@ fn serve_continues_when_lifecycle_unreachable() {
             secret: "s".into(),
         };
         let dir = tempfile::tempdir().unwrap();
-        let mut child = r2_cmd("serve", &b, dir.path(), "k", "s").spawn().unwrap();
+        let mut child = r2_cmd("serve", &b, dir.path(), "k", "s").spawn_guarded();
         shutdown(dir.path()).await;
         let status = wait_exit(&mut child);
         let (_, stderr) = output(child);
@@ -604,7 +603,7 @@ fn serve_ready_quickly_when_lifecycle_hangs() {
         };
         let dir = tempfile::tempdir().unwrap();
         let start = std::time::Instant::now();
-        let mut child = r2_cmd("serve", &b, dir.path(), "k", "s").spawn().unwrap();
+        let mut child = r2_cmd("serve", &b, dir.path(), "k", "s").spawn_guarded();
         common::wait_for_file(&dir.path().join("port")).await;
         let ready = start.elapsed();
         assert!(
@@ -633,8 +632,7 @@ fn serve_manual_mode_warns() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
             .args(["--r2-lifecycle", "manual"])
-            .spawn()
-            .unwrap();
+            .spawn_guarded();
         shutdown(dir.path()).await;
         let status = wait_exit(&mut child);
         let (_, stderr) = output(child);
@@ -660,10 +658,8 @@ fn doctor_checks_rule_and_bucket() {
         let b = common::proxied(&b).await;
         let dir = tempfile::tempdir().unwrap();
         let run = || {
-            let child = r2_cmd("doctor", &b, dir.path(), &b.key_id, &b.secret)
-                .spawn()
-                .unwrap();
-            let out = child.wait_with_output().unwrap();
+            let child = r2_cmd("doctor", &b, dir.path(), &b.key_id, &b.secret).spawn_guarded();
+            let out = child.wait_with_output();
             (
                 out.status.success(),
                 String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -847,8 +843,7 @@ fn serve_prunes_on_shutdown() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
             .args(["--max-size", "250"])
-            .spawn()
-            .unwrap();
+            .spawn_guarded();
         shutdown(dir.path()).await;
         let status = wait_exit(&mut child);
         let (_, stderr) = output(child);
@@ -875,8 +870,7 @@ fn serve_read_mode_does_not_prune() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
             .args(["--max-size", "0", "--mode", "read"])
-            .spawn()
-            .unwrap();
+            .spawn_guarded();
         shutdown(dir.path()).await;
         let status = wait_exit(&mut child);
         let (_, stderr) = output(child);
@@ -902,8 +896,7 @@ fn serve_read_mode_only_verifies_lifecycle() {
             let dir = tempfile::tempdir().unwrap();
             let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
                 .args(["--mode", "read"])
-                .spawn()
-                .unwrap();
+                .spawn_guarded();
             shutdown(dir.path()).await;
             let status = wait_exit(&mut child);
             let (_, stderr) = output(child);
@@ -951,8 +944,7 @@ fn serve_prune_failure_is_reported_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = r2_cmd("serve", &b, dir.path(), &b.key_id, &b.secret)
             .args(["--max-size", "0"])
-            .spawn()
-            .unwrap();
+            .spawn_guarded();
         common::wait_for_file(&dir.path().join("port")).await;
         common::s3_client(&b.endpoint, &b.key_id, &b.secret)
             .delete_bucket()
@@ -1024,8 +1016,7 @@ fn serve_reports_failed_deletes() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = r2_cmd("serve", &b, dir.path(), &key, &secret)
             .args(["--max-size", "250", "--r2-lifecycle", "manual"])
-            .spawn()
-            .unwrap();
+            .spawn_guarded();
         shutdown(dir.path()).await;
         let status = wait_exit(&mut child);
         let (_, stderr) = output(child);
@@ -1052,9 +1043,8 @@ fn prune_command_fails_on_failed_deletes() {
         let dir = tempfile::tempdir().unwrap();
         let child = r2_cmd("prune", &b, dir.path(), &key, &secret)
             .args(["--max-size", "250"])
-            .spawn()
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
+            .spawn_guarded();
+        let out = child.wait_with_output();
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{stdout}{stderr}");

@@ -1,3 +1,6 @@
+mod common;
+
+use common::SpawnGuarded;
 use std::process::Command;
 
 #[test]
@@ -182,8 +185,7 @@ fn serve_exits_0_on_sigterm_and_cleans_up() {
         .env("HOARD_PORT_FILE", &port_file)
         .env("HOARD_TOKEN_FILE", &token_file)
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+        .spawn_guarded();
     let mut ready = false;
     for _ in 0..200 {
         if std::fs::read_to_string(&port_file).is_ok_and(|s| !s.is_empty()) {
