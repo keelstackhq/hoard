@@ -359,6 +359,45 @@ async fn replaced_pointer_outside_the_prefix_is_not_deleted() {
     assert!(store.head(&mac).await.unwrap().is_some());
 }
 
+/// Directories left by an interrupted restore (a hard kill between the renames) are removed
+/// at the next restore once they are an hour old; younger ones may belong to a running restore.
+#[cfg(unix)]
+#[tokio::test]
+async fn restore_sweeps_stale_debris() {
+    let root = tempfile::tempdir().unwrap();
+    let (b, _) = fs_backend(root.path());
+    let (_ws, dir) = empty_target();
+    let parent = dir.parent().unwrap().to_path_buf();
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    let make = |name: &str, old: bool| {
+        let p = parent.join(name);
+        std::fs::create_dir_all(p.join("sub")).unwrap();
+        std::fs::write(p.join("sub/f"), b"x").unwrap();
+        if old {
+            std::fs::File::open(&p)
+                .unwrap()
+                .set_modified(two_hours_ago)
+                .unwrap();
+        }
+        p
+    };
+    let stale_restore = make(".task-cache.hoard-restore-0a1b2c3d4e5f", true);
+    let stale_old = make(".task-cache.hoard-old-0a1b2c3d4e5f", true);
+    let fresh = make(".task-cache.hoard-restore-ffffffffffff", false);
+    let other = make(".other.hoard-old-0a1b2c3d4e5f", true);
+    assert_eq!(
+        vp_restore(&b, V, LINUX, &dir).await.unwrap(),
+        RestoreOutcome::NotFound
+    );
+    assert!(!stale_restore.exists());
+    assert!(!stale_old.exists());
+    assert!(
+        fresh.exists(),
+        "a restore younger than an hour may still be running"
+    );
+    assert!(other.exists(), "not this cache directory's debris");
+}
+
 #[tokio::test]
 async fn failed_extract_leaves_the_old_directory_intact() {
     let root = tempfile::tempdir().unwrap();

@@ -252,6 +252,46 @@ async fn restore_into(
     Ok(())
 }
 
+/// Debris older than this is from an interrupted restore, not a running one.
+const DEBRIS_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Removes `.{name}.hoard-restore-*` and `.{name}.hoard-old-*` next to `dir` that are older
+/// than [`DEBRIS_AGE`]: left behind when a restore was killed between its renames (on Windows
+/// the action's SIGTERM is a hard kill). Errors only cost disk space, so they are ignored.
+fn sweep_debris(dir: &Path) {
+    let (Some(name), Some(parent)) = (dir.file_name(), dir.parent()) else {
+        return;
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let name = name.to_string_lossy();
+    let prefixes = [
+        format!(".{name}.hoard-restore-"),
+        format!(".{name}.hoard-old-"),
+    ];
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let file_name = e.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !prefixes.iter().any(|p| file_name.starts_with(p.as_str())) {
+            continue;
+        }
+        let stale = std::fs::symlink_metadata(e.path())
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > DEBRIS_AGE);
+        if stale && let Err(err) = std::fs::remove_dir_all(e.path()) {
+            warn!(path = %e.path().display(), error = %err, "cannot remove an old Vite+ restore directory");
+        }
+    }
+}
+
 /// The archive key a pointer object names, if it is an archive under `pfx` (this OS and cache
 /// version); anything else is ignored with a warning.
 fn pointed_key(pfx: &str, raw: &[u8]) -> Option<String> {
@@ -274,6 +314,8 @@ pub async fn vp_restore(
     os_arch: &str,
     dir: &Path,
 ) -> anyhow::Result<RestoreOutcome> {
+    let owned = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || sweep_debris(&owned)).await?;
     match backend {
         VpBackend::Store { store, prefix } => {
             let pfx = key_prefix(prefix, cache_version, os_arch);

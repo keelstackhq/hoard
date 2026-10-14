@@ -194,7 +194,11 @@ archive to a temp file in `RUNNER_TEMP` (else the system temp dir; the runner em
 the job) and uploads it from there (its size goes into the envelope). `vp restore` streams the
 archive into a new directory next to the target (the same filesystem, so the swap is a rename;
 not `RUNNER_TEMP`, which may be another filesystem) and only then swaps it in place of the
-target, so a failed or partial restore leaves the old directory as it was.
+target, so a failed or partial restore leaves the old directory as it was. A restore killed
+between its two renames leaves the target missing (a cold cache) and its
+`.<name>.hoard-restore-*` / `.<name>.hoard-old-*` siblings behind; every `vp restore` first
+removes such siblings that are more than 1 hour old (a younger one may belong to a restore that
+is still running).
 Extraction rejects absolute paths, `..` components, symlinks or hardlinks whose target leaves
 the directory, and device or fifo entries.
 
