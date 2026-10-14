@@ -5,6 +5,8 @@ use std::time::Duration;
 use opendal::layers::TimeoutLayer;
 use opendal::{Operator, services};
 
+pub mod lifecycle;
+
 /// Region used for R2 (R2 ignores the region but S3 signing needs one).
 pub const R2_REGION: &str = "auto";
 

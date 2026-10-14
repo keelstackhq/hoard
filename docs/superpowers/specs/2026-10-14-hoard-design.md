@@ -189,6 +189,10 @@ On `serve` startup with `storage=r2`:
 | `verify` | Only read; if missing or different: exit non-zero with the fix. |
 | `manual` | Skip; log one warning that the bucket can grow until the size cap runs. |
 
+Any other error while reading or writing the rules (network, timeout, 5xx) is transient: `serve`
+logs a warning and starts anyway (the size cap still bounds the bucket); the summary shows
+`Lifecycle: not checked (<reason>)`. `hoard doctor` always verifies (never writes) the rule.
+
 The fix message must contain the exact command:
 
 ```
@@ -266,7 +270,10 @@ Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-appl
 - HTTP integration tests run the server in-process on the `fs` store and drive it with `reqwest`.
 - S3/R2 tests run against MinIO (`docker compose up minio`), enabled by
   `HOARD_TEST_S3_ENDPOINT`; CI always sets it. MinIO implements lifecycle configuration and
-  conditional PUT, which covers §7.1 and §6.3.
+  conditional PUT, which covers §6.3 and most of §7.1.
+  MinIO drops `AbortIncompleteMultipartUpload` from lifecycle rules, so the lifecycle tests
+  that read the rule back run through a test proxy that stores lifecycle configurations
+  verbatim; the rule itself is verified against real R2 by a human.
 - End-to-end: `tests/e2e/turbo.sh` builds a fixture Turborepo twice against `hoard serve`,
   deleting `.turbo` and `node_modules/.cache` in between; the second run must print `FULL TURBO`.
 - Action: vitest unit tests for input resolution and target selection; a self-test workflow uses

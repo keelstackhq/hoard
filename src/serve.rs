@@ -9,7 +9,10 @@ use anyhow::{Context, bail};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::config::{Config, Storage, TokenPaths, default_port_file, default_token_file};
+use crate::config::{
+    Config, LifecycleMode, Storage, TokenPaths, default_port_file, default_token_file,
+};
+use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, r2_client, rule_id};
 use crate::server::{AppState, router};
 use crate::stats::{Stats, render_summary};
 use crate::store::{Store, build_operator};
@@ -56,7 +59,7 @@ fn random_token() -> String {
 }
 
 /// Key prefix and the summary's storage line for the configured backend.
-fn storage_layout(cfg: &Config) -> anyhow::Result<(String, String)> {
+pub(crate) fn storage_layout(cfg: &Config) -> anyhow::Result<(String, String)> {
     match cfg.storage {
         Storage::Fs => Ok((
             FS_PREFIX.to_string(),
@@ -161,7 +164,7 @@ fn env_hint(cfg: &Config) -> String {
 pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let (prefix, storage_line) = storage_layout(&cfg)?;
     let store = Arc::new(Store::new(build_operator(&cfg)?));
-    // Startup checks that must pass before the server is reachable go here.
+    let startup_lines: Vec<String> = lifecycle_startup(&cfg).await?.into_iter().collect();
 
     let token = cfg.token.clone().unwrap_or_else(random_token);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.port))
@@ -214,7 +217,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     };
     info!("shutting down");
 
-    shutdown_work(&cfg, &stats, &storage_line).await;
+    shutdown_work(&cfg, &stats, &storage_line, startup_lines).await;
     remove_if_present(&cfg.port_file);
     remove_if_present(&cfg.token_file);
 
@@ -228,11 +231,46 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Work done once on shutdown: hooks contribute extra summary lines, then the summary is
-/// written. Contract: this never fails. Hooks and the summary report problems as warnings
-/// or summary lines, so shutdown always exits 0 (the cache must never fail the build).
-async fn shutdown_work(cfg: &Config, stats: &Stats, storage_line: &str) {
-    let extra_lines: Vec<String> = Vec::new();
+/// Startup step for `storage=r2` (spec §7.1): ensure or verify the lifecycle rule, and return
+/// the summary's `Lifecycle:` line. A missing rule (`verify`) or AccessDenied is a setup error;
+/// a transient error is only a warning, since the size cap still bounds the bucket.
+async fn lifecycle_startup(cfg: &Config) -> anyhow::Result<Option<String>> {
+    let Some(r2) = cfg.r2.as_ref().filter(|_| cfg.storage == Storage::R2) else {
+        return Ok(None);
+    };
+    if cfg.r2_lifecycle == LifecycleMode::Manual {
+        warn!("r2-lifecycle=manual: the bucket can grow until the size cap runs");
+        return Ok(Some("Lifecycle: manual".into()));
+    }
+    let client = r2_client(&r2.endpoint(), &r2.access_key_id, &r2.secret_access_key);
+    let days = cfg.max_age_days;
+    match ensure_lifecycle(&client, &r2.bucket, &r2.prefix, days, cfg.r2_lifecycle).await {
+        Ok(status) => {
+            info!(rule = rule_id(&r2.prefix), ?status, "R2 lifecycle rule ok");
+            Ok(Some(format!("Lifecycle: {days} days ✓")))
+        }
+        Err(LifecycleError::Other(e)) => {
+            warn!(
+                error = format!("{e:#}"),
+                "cannot check the R2 lifecycle rule; continuing (the size cap still bounds the bucket)"
+            );
+            Ok(Some(format!("Lifecycle: not checked ({e})")))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Work done once on shutdown: hooks contribute extra summary lines (after the startup
+/// lines), then the summary is written. Contract: this never fails. Hooks and the summary
+/// report problems as warnings or summary lines, so shutdown always exits 0 (the cache must
+/// never fail the build).
+async fn shutdown_work(
+    cfg: &Config,
+    stats: &Stats,
+    storage_line: &str,
+    startup_lines: Vec<String>,
+) {
+    let extra_lines = startup_lines;
     if let Some(path) = &cfg.summary_file {
         let md = render_summary(&stats.snapshot(), storage_line, &extra_lines);
         if let Err(e) = write_atomic(path, &md, false) {

@@ -1,14 +1,17 @@
 services:
   minio:
     image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
-    command: server /data
+    # Starts the server and creates the limited test user (see the script).
+    entrypoint: ["/bin/bash", "/hoard/entrypoint.sh"]
+    volumes:
+      - ./tests/minio/entrypoint.sh:/hoard/entrypoint.sh:ro
     ports:
       - "9000:9000"
     environment:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: minio123
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      test: ["CMD-SHELL", "test -f /tmp/hoard-minio-ready && curl -f http://127.0.0.1:9000/minio/health/live"]
       interval: 2s
       timeout: 3s
       retries: 30

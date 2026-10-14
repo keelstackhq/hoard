@@ -1,6 +1,7 @@
 //! Helpers shared by integration tests.
 #![allow(dead_code)]
 
+pub mod lifecycle_proxy;
 pub mod store_checks;
 
 use hoard::config::{Config, LifecycleMode, Mode, R2Config, Storage};
@@ -173,4 +174,13 @@ pub fn r2_config(root: impl AsRef<std::path::Path>, b: &MinioBucket) -> Config {
         prefix: "cache/".into(),
     });
     cfg
+}
+
+/// `b` reached through a [`lifecycle_proxy`]: lifecycle rules are kept verbatim (MinIO drops
+/// `AbortIncompleteMultipartUpload`), everything else goes to MinIO.
+pub async fn proxied(b: &MinioBucket) -> MinioBucket {
+    MinioBucket {
+        endpoint: lifecycle_proxy::spawn(&b.endpoint).await,
+        ..b.clone()
+    }
 }

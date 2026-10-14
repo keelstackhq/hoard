@@ -67,16 +67,44 @@ fn env_prints_export_lines_for_running_server() {
 
 #[test]
 fn unimplemented_commands_fail_cleanly() {
-    for cmd in ["prune", "doctor"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_hoard"))
-            .args([cmd, "--storage", "fs"])
-            .output()
-            .unwrap();
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("not implemented yet"), "{stderr}");
-        assert!(!stderr.contains("panicked"), "{stderr}");
-    }
+    let out = Command::new(env!("CARGO_BIN_EXE_hoard"))
+        .args(["prune", "--storage", "fs"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not implemented yet"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[test]
+fn doctor_fs_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    let out = Command::new(env!("CARGO_BIN_EXE_hoard"))
+        .args(["doctor", "--storage", "fs", "--fs-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("✓ bucket read/write"), "{stdout}");
+    assert!(!root.join("cache/_hoard/doctor").exists());
+}
+
+#[test]
+fn doctor_github_not_supported_yet() {
+    let out = Command::new(env!("CARGO_BIN_EXE_hoard"))
+        .args(["doctor", "--storage", "github"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--storage fs|r2"), "{stderr}");
 }
 
 #[cfg(unix)]
