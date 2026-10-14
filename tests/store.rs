@@ -60,3 +60,9 @@ fn unsupported_backends_fail_clearly() {
             .contains("not yet supported")
     );
 }
+
+#[tokio::test]
+async fn fs_list_hides_scratch_files() {
+    let (s, _d) = fs_store();
+    c::check_list_hides_scratch_files(&s).await;
+}

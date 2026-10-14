@@ -203,6 +203,9 @@ impl Store {
                 continue;
             }
             let key = entry.path().to_string();
+            if key.starts_with(&format!("{FS_TMP_DIR}/")) {
+                continue; // in-flight fs write
+            }
             let mut meta = entry.metadata().clone();
             if meta.last_modified().is_none() || !meta.is_file() {
                 meta = self.op.stat(&key).await?;

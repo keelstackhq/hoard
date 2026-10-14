@@ -116,3 +116,19 @@ pub async fn check_failed_body_leaves_no_object(s: &Store) {
     // No scratch files from the aborted write are visible anywhere.
     assert!(s.list("").await.unwrap().is_empty());
 }
+
+pub async fn check_list_hides_scratch_files(s: &Store) {
+    s.put("p/a", &header(1), body(b"x")).await.unwrap();
+    // Simulates an in-flight temp file of an fs write.
+    s.op.write(".hoard-tmp/inflight", b"partial".to_vec())
+        .await
+        .unwrap();
+    let keys: Vec<_> = s
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert_eq!(keys, ["p/a"]);
+}
