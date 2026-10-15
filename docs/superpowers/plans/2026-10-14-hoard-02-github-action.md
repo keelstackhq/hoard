@@ -199,5 +199,5 @@ test("shutdownServer returns false when nothing listens", async () => {
 - Create: `.github/workflows/self-test.yml`
 
 - [x] **Step 1: Write the workflow** — matrix `os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]` × `storage: [github]`, plus `ubuntu-latest` × `storage: r2` (only when `secrets.R2_ACCESS_KEY_ID != ''`). Job `warm` runs the action (`uses: ./`) and builds `tests/fixtures/turbo-repo`; job `hit` (needs `warm`, same matrix) runs it again in a fresh checkout and asserts `steps.cache.outputs.hits` > 0 and the turbo output contains `FULL TURBO`. Uses a per-run `cache-version: run-${{ github.run_id }}` so runs never see each other.
-- [ ] **Step 2: Run on a branch — expect all green; the job summary shows the hoard table**
+- [x] **Step 2: Run on a branch — expect all green; the job summary shows the hoard table**
 - [x] **Step 3: Commit** — `ci: self-test the action on Linux, macOS, Windows and R2`

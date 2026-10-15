@@ -27,6 +27,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 03-vite-plus-throughput/Task 4 steps 1, 4 (benchmark generator + workflow, new `throttled` stat) · 0c54198, 4744fb2 · node:test 6/6; cargo all green; action 148/148; actionlint clean; local 50-package run: 50 puts then 50 hits · Steps 2–3 BLOCKED
 - 2026-10-15 · **Milestone 3 reviewed** · whole-branch review 4f28859..99e1034 (0 Critical, 3 Important, 15 Minor) → fix wave 1e158e1..1b7a69d + flaky-test fix f977bfd, re-reviews clean · cargo all green twice in a row (108 unit, 44 vp, 45 r2, 18 write-behind …); 150 MB stream OK; action 157/157 incl. real binary; dist 159 KB fresh; actionlint clean; bench 6/6; e2e fs + r2 PASS; no openssl
 - 2026-10-15 · Naming decided by the owner: `keelstackhq/hoard` (README, spec, plan updated; npm scope `@keelstack` of the private action package unchanged)
+- 2026-10-15 · 01-core-r2 CI + 02-github-action/Task 5 Step 2 (first runs on GitHub, PR keelstackhq/hoard#1) · 82a2472 (fix for the `fetch_update` deprecation on Rust 1.99) · ci run 38691600578: `rust`, `e2e`, `action` green; self-test run 38691600620: all 12 jobs green — every `hit` job passed its `FULL TURBO` and `hits > 0` checks on Linux x64/arm64, macOS, Windows (GitHub cache) and Linux (real R2 bucket, `r2-lifecycle: auto` started without error); `vp hit` restored the task cache and logged `vp run: cache hit`
 
 ## Blocked
 
@@ -38,29 +39,18 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   --r2-account-id <id> --r2-bucket <bucket>` once, stop it, then `hoard doctor --storage r2 --r2-account-id <id>
   --r2-bucket <bucket>` — it must print `✓ lifecycle rule hoard-cache- (7 days)`. If it says the rule differs, report
   the output of `npx wrangler r2 bucket lifecycle list <bucket>`.
+  Partial evidence (2026-10-15): the self-test R2 leg ran against the repository's real bucket with
+  `r2-lifecycle: auto` and hoard started, so the rule was applied or already present; the `doctor` check of the
+  exact rule (including the 1-day abort) is still open.
   In the same session, check immutable keys for large artifacts on R2: run `STORAGE=r2 tests/e2e/turbo.sh` is not
   enough (MinIO); instead PUT the same >8 MiB artifact twice through `hoard serve --storage r2` (e.g. two parallel
   `curl -X PUT --data-binary @big.bin` against `/v8/artifacts/abc`) and confirm the object is unchanged
   (`If-None-Match: *` on CompleteMultipartUpload must be honoured by R2).
-- **01-core-r2 CI — workflow never run on GitHub.** `.github/workflows/ci.yml` (jobs `rust`, `e2e`) triggers only
-  on pushes to `main` and on pull requests, so it has not run yet; everything it does passes locally. Action: open a
-  PR from `claude/admiring-ride-kl6qd9` (or push to `main`) and check both jobs go green; if `pnpm/action-setup` or
-  the MinIO image pull fails, paste the job log.
 - **02-github-action/Task 2 Step 3 — release dry run on GitHub.** The action `build` script now exists. Action: on a branch, set `version = "0.0.0-test"` in Cargo.toml (`cargo update -p keel-hoard`), push,
   then `gh workflow run release.yml --ref <branch> -f version=0.0.0-test -f draft=true`. Check: five
   `hoard-<target>.tar.gz` assets on the draft release; the `chore(release): v0.0.0-test` commit's
   `action/src/checksums.generated.ts` lists the same five SHA-256 values as `sha256sum` of the assets; `v0` was NOT
   moved. Afterwards delete the draft release, the `v0.0.0-test` tag and the branch (see docs/RELEASING.md).
-- **02-github-action/Task 5 Step 2 — self-test on real runners.** `.github/workflows/self-test.yml` (Linux x64/arm64,
-  macOS, Windows × GitHub cache, plus Linux × R2) has never run. Action: (optional, for the R2 leg) add repository
-  secrets `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (Settings → Secrets and variables →
-  Actions); then run it from the Actions tab (*self-test* → *Run workflow* on `claude/admiring-ride-kl6qd9`) or open a
-  PR. Expect every `hit` job to log `FULL TURBO` and `hits > 0`, and the job summary to show the hoard table. Paste the
-  log of any red job — Windows/macOS legs are the likeliest first failures.
-  The same run now includes the Vite+ jobs `vp-warm` / `vp-hit` (GitHub storage, ubuntu-latest): `vp-hit` must find a
-  non-empty `node_modules/.vite/task-cache` and log a Vite+ cache hit. This is the first time hoard's GitHub cache
-  client (`src/vp/gha_twirp.rs`) talks to the real service — it is only tested against a mock so far; paste its log if
-  it fails.
 - **03-vite-plus-throughput/Task 3 Step 1 — does R2 reset an object's age on self-copy?** Refresh-on-hit uses
   CopyObject onto itself (MinIO: yes). Action: with a test R2 bucket and token, run
   `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=…
@@ -86,7 +76,7 @@ recorded above, with its fixes merged and re-reviewed. Branch: `claude/admiring-
 - **Storage backends:**
   - `fs`, local disk;
   - `r2`, any S3 API (tested against MinIO);
-  - `github`, the GitHub Actions cache via OpenDAL ghac (mock-tested; see Blocked).
+  - `github`, the GitHub Actions cache via OpenDAL ghac (verified on real runners by self-test, 2026-10-15).
 - **R2 stays bounded:**
   - a lifecycle rule (`auto`/`verify`/`manual`; foreign rules are kept intact);
   - a daily size cap (`prune`);
@@ -107,8 +97,9 @@ recorded above, with its fixes merged and re-reviewed. Branch: `claude/admiring-
   - starts hoard, exports `TURBO_*`, restores and saves Vite+;
   - in post: shuts down, writes the job summary, sets outputs and warns on upload errors or throttling.
   It never fails a job because of the cache (a failed binary download is a warning, capped at 90 s).
-- **Pipelines (written, not yet run on GitHub):** `ci.yml`, a cross-platform `release.yml` with SHA-pinned actions,
-  `self-test.yml` (four OSes × GitHub cache, R2, Vite+) and `bench.yml`.
+- **Pipelines:** `ci.yml` and `self-test.yml` (four OSes × GitHub cache, real R2, Vite+) are green on GitHub
+  (PR keelstackhq/hoard#1, head 82a2472). The cross-platform `release.yml` with SHA-pinned actions and `bench.yml`
+  have not run yet.
 - **Last local run:**
   - `cargo fmt`/`clippy` clean, and the full `cargo test` with MinIO green twice in a row;
   - the 150 MB streaming test passes;
@@ -144,15 +135,13 @@ lists every input and output.
 
 ### Blocked items for you, in a sensible order
 
-1. **CI:** the PR is open; check that `ci.yml` goes green on it (opened 2026-10-15).
-2. **Self-test on real runners:** run `self-test.yml`, optionally after adding the four `R2_*` secrets. It includes
-   the first real test of the GitHub cache paths (ghac and the Vite+ client).
-3. **Release dry run:** `release.yml` with `0.0.0-test`, `draft=true`.
-4. **Real R2 checks:**
+1. ~~**CI**~~ and ~~**self-test on real runners**~~: green on PR keelstackhq/hoard#1 (2026-10-15).
+2. **Release dry run:** `release.yml` with `0.0.0-test`, `draft=true`.
+3. **Real R2 checks:**
    - the lifecycle rule with `hoard doctor`;
    - immutable >8 MiB artifacts;
    - `refresh_real_r2`, which decides whether self-copy resets the object's age.
-5. **Benchmark:** run `bench.yml` with 100, 400 and 1000 packages, then apply the packing decision (rule above).
+4. **Benchmark:** run `bench.yml` with 100, 400 and 1000 packages, then apply the packing decision (rule above).
 
 After that, cut the first real release (`docs/RELEASING.md`).
 
