@@ -118,9 +118,20 @@ impl FailingWrites {
     fn should_fail(&self) -> bool {
         match &self.fail_times {
             None => true,
-            Some(left) => left
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok(),
+            // A compare-exchange loop: `fetch_update` is deprecated on newer Rust and its
+            // replacement `try_update` is missing on older stable.
+            Some(left) => {
+                let mut n = left.load(Ordering::SeqCst);
+                loop {
+                    let Some(next) = n.checked_sub(1) else {
+                        return false;
+                    };
+                    match left.compare_exchange(n, next, Ordering::SeqCst, Ordering::SeqCst) {
+                        Ok(_) => return true,
+                        Err(actual) => n = actual,
+                    }
+                }
+            }
         }
     }
 }
