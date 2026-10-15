@@ -25,6 +25,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 03-vite-plus-throughput/Task 2 write-behind uploads · b064ff2, 3885bd5 · cargo all green (18 write-behind, 100 lib); 150 MB stream on+off; e2e fs, fs+write-behind, r2 PASS; action 145/145; dist 158 KB
 - 2026-10-14 · 03-vite-plus-throughput/Task 3 steps 2–5 (refresh-on-hit) · 2cc23f7 · cargo all green (45 r2 incl. 5 refresh on MinIO); action 148/148; e2e r2 with refresh PASS · Step 1's real-R2 check BLOCKED
 - 2026-10-14 · 03-vite-plus-throughput/Task 4 steps 1, 4 (benchmark generator + workflow, new `throttled` stat) · 0c54198, 4744fb2 · node:test 6/6; cargo all green; action 148/148; actionlint clean; local 50-package run: 50 puts then 50 hits · Steps 2–3 BLOCKED
+- 2026-10-15 · **Milestone 3 reviewed** · whole-branch review 4f28859..99e1034 (0 Critical, 3 Important, 15 Minor) → fix wave 1e158e1..1b7a69d + flaky-test fix f977bfd, re-reviews clean · cargo all green twice in a row (108 unit, 44 vp, 45 r2, 18 write-behind …); 150 MB stream OK; action 157/157 incl. real binary; dist 159 KB fresh; actionlint clean; bench 6/6; e2e fs + r2 PASS; no openssl
 
 ## Blocked
 
@@ -49,8 +50,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   `keelstackhq/hoard`), so it works either way. Action: decide the public name; if it is `keelstack/hoard`, create or
   transfer the repo and update nothing else; if it stays `keelstackhq`, replace `keelstack/hoard` in README.md and
   spec §0/§2 (one search-and-replace).
-- **02-github-action/Task 2 Step 3 — release dry run on GitHub.** Needs Task 3's `build` script first (it lands next
-  in this loop). Action: on a branch, set `version = "0.0.0-test"` in Cargo.toml (`cargo update -p keel-hoard`), push,
+- **02-github-action/Task 2 Step 3 — release dry run on GitHub.** The action `build` script now exists. Action: on a branch, set `version = "0.0.0-test"` in Cargo.toml (`cargo update -p keel-hoard`), push,
   then `gh workflow run release.yml --ref <branch> -f version=0.0.0-test -f draft=true`. Check: five
   `hoard-<target>.tar.gz` assets on the draft release; the `chore(release): v0.0.0-test` commit's
   `action/src/checksums.generated.ts` lists the same five SHA-256 values as `sha256sum` of the assets; `v0` was NOT
@@ -61,6 +61,10 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   Actions); then run it from the Actions tab (*self-test* → *Run workflow* on `claude/admiring-ride-kl6qd9`) or open a
   PR. Expect every `hit` job to log `FULL TURBO` and `hits > 0`, and the job summary to show the hoard table. Paste the
   log of any red job — Windows/macOS legs are the likeliest first failures.
+  The same run now includes the Vite+ jobs `vp-warm` / `vp-hit` (GitHub storage, ubuntu-latest): `vp-hit` must find a
+  non-empty `node_modules/.vite/task-cache` and log a Vite+ cache hit. This is the first time hoard's GitHub cache
+  client (`src/vp/gha_twirp.rs`) talks to the real service — it is only tested against a mock so far; paste its log if
+  it fails.
 - **03-vite-plus-throughput/Task 3 Step 1 — does R2 reset an object's age on self-copy?** Refresh-on-hit uses
   CopyObject onto itself (MinIO: yes). Action: with a test R2 bucket and token, run
   `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=…
@@ -74,4 +78,96 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 
 ## Status
 
-<!-- Written when the build loop stops. -->
+Written 2026-10-15, when the build loop stopped. All three plans are complete except the steps listed under
+**Blocked**, which need GitHub, a real R2 bucket or a decision from you. Every milestone has a whole-branch review
+recorded above, with its fixes merged and re-reviewed. Branch: `claude/admiring-ride-kl6qd9` (pushed).
+
+### What works (verified locally, 2026-10-15)
+
+- **`hoard` binary (Rust, rustls only, no OpenSSL).** It serves the Turborepo remote-cache API on 127.0.0.1 with a
+  bearer token. Storage errors never fail a build: a failed read is a miss, a failed write still answers 200 and is
+  counted. Artifacts are streamed, never held in memory.
+- **Storage backends:**
+  - `fs`, local disk;
+  - `r2`, any S3 API (tested against MinIO);
+  - `github`, the GitHub Actions cache via OpenDAL ghac (mock-tested; see Blocked).
+- **R2 stays bounded:**
+  - a lifecycle rule (`auto`/`verify`/`manual`; foreign rules are kept intact);
+  - a daily size cap (`prune`);
+  - `doctor`;
+  - optional `refresh-on-hit`.
+- **Throughput:**
+  - write-behind uploads (on by default for `github`), drained within a 270 s shutdown budget;
+  - a 429 rate gate;
+  - `throttled` / `rate_limited` / `put_errors` counters;
+  - a job-summary table.
+- **Vite+:** `hoard vp restore|save` archives `node_modules/.vite/task-cache` per OS and architecture. It:
+  - picks the newest archive;
+  - rejects path traversal and escaping symlinks;
+  - skips saves when nothing changed;
+  - deletes replaced archives on r2/fs.
+- **GitHub Action:** `action.yml` at the root, node24, a 159 KB dist. It:
+  - verifies the binary's SHA-256 against checksums baked in at release time;
+  - starts hoard, exports `TURBO_*`, restores and saves Vite+;
+  - in post: shuts down, writes the job summary, sets outputs and warns on upload errors or throttling.
+  It never fails a job because of the cache (a failed binary download is a warning, capped at 90 s).
+- **Pipelines (written, not yet run on GitHub):** `ci.yml`, a cross-platform `release.yml` with SHA-pinned actions,
+  `self-test.yml` (four OSes × GitHub cache, R2, Vite+) and `bench.yml`.
+- **Last local run:**
+  - `cargo fmt`/`clippy` clean, and the full `cargo test` with MinIO green twice in a row;
+  - the 150 MB streaming test passes;
+  - the action passes 157/157, including a run against the real binary;
+  - actionlint clean;
+  - `tests/e2e/turbo.sh` passes on fs and on r2 (real Turborepo 2.11.8: the second run is `FULL TURBO`).
+
+### How to try it
+
+```bash
+# build and test (Docker needed for MinIO)
+docker compose up -d --wait minio
+export HOARD_TEST_S3_ENDPOINT=http://127.0.0.1:9000
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+tests/e2e/turbo.sh                      # real Turborepo against hoard on local disk
+STORAGE=r2 tests/e2e/turbo.sh           # same, MinIO as R2
+pnpm --dir action install && pnpm --dir action lint && pnpm --dir action test
+
+# use it on a laptop with any Turborepo
+cargo build --release
+./target/release/hoard serve --storage fs &           # or --storage r2 --r2-bucket … (keys via HOARD_R2_* env)
+eval "$(./target/release/hoard env)"                   # exports TURBO_API, TURBO_TOKEN, TURBO_TEAM
+pnpm turbo run build                                   # second run after `rm -rf .turbo` → FULL TURBO
+curl -s -X POST -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/shutdown"   # prints final stats
+
+# Vite+ task cache, by hand
+./target/release/hoard vp save --storage fs     # after `vp run …`
+./target/release/hoard vp restore --storage fs  # in a fresh checkout, after `pnpm install`
+```
+
+In CI, once a release exists: `- uses: keelstack/hoard@v1` (or `keelstackhq/hoard@v1`, see Blocked). The README
+lists every input and output.
+
+### Blocked items for you, in a sensible order
+
+1. **Naming:** decide between `keelstack/hoard` and `keelstackhq/hoard`. This gates the README and the first release.
+2. **CI:** open a PR from this branch so `ci.yml` runs for the first time.
+3. **Self-test on real runners:** run `self-test.yml`, optionally after adding the four `R2_*` secrets. It includes
+   the first real test of the GitHub cache paths (ghac and the Vite+ client).
+4. **Release dry run:** `release.yml` with `0.0.0-test`, `draft=true`.
+5. **Real R2 checks:**
+   - the lifecycle rule with `hoard doctor`;
+   - immutable >8 MiB artifacts;
+   - `refresh_real_r2`, which decides whether self-copy resets the object's age.
+6. **Benchmark:** run `bench.yml` with 100, 400 and 1000 packages, then apply the packing decision (rule above).
+
+After that, cut the first real release (`docs/RELEASING.md`).
+
+### Known limits and decisions to revisit
+
+- Every decision taken on your behalf is in `docs/superpowers/rulings.md`, with what it costs if wrong.
+- Deferred minor review findings are in the milestone reviews. For example:
+  - no free-space check before spooling (std has none, and no crate was added);
+  - matrix legs that run different Vite+ tasks share only the newest leg's cache.
+- `CLAUDE.md` was left untouched. Its "Layout" list does not yet mention `src/writebehind.rs`, `src/redact.rs`,
+  `src/ratelimit.rs`, `src/doctor.rs` or `scripts/bench/`.
+- MinIO for tests is `pgsty/minio` (the `minio/minio` image was removed from Docker Hub).
+- In this container, dockerd has to be started by hand.
