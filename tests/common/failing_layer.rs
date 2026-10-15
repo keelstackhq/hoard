@@ -1,7 +1,8 @@
 //! A test-only OpenDAL layer that fails every write with a chosen `ErrorKind` and counts the
 //! calls that reach the store, to stand in for a backend that rate-limits (GitHub cache 429)
 //! or rejects a second create of an immutable key. [`FailingWrites::slow`] instead lets
-//! writes through and delays each writer's `close` (a slow upload).
+//! writes through and delays each writer's `close` (a slow upload); [`FailingWrites::gated`]
+//! blocks each `close` until the test opens a [`Gate`], so tests need no wall-clock bounds.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +28,41 @@ impl Calls {
     }
 }
 
+/// A latch the test controls: while closed, every writer's `close` waits. `entered` counts
+/// closes that reached the gate, `finished` those that completed.
+#[derive(Debug)]
+pub struct Gate {
+    open: tokio::sync::watch::Sender<bool>,
+    pub entered: AtomicU64,
+    pub finished: AtomicU64,
+}
+
+impl Gate {
+    pub fn new(open: bool) -> Arc<Self> {
+        Arc::new(Self {
+            open: tokio::sync::watch::channel(open).0,
+            entered: AtomicU64::new(0),
+            finished: AtomicU64::new(0),
+        })
+    }
+
+    /// Lets blocked and future closes proceed.
+    pub fn release(&self) {
+        self.open.send_replace(true);
+    }
+
+    /// Blocks closes that start from now on.
+    pub fn hold(&self) {
+        self.open.send_replace(false);
+    }
+
+    async fn pass(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let mut rx = self.open.subscribe();
+        let _ = rx.wait_for(|open| *open).await;
+    }
+}
+
 /// Fails writes with `kind` (and `message`, which may carry a fake HTTP response context).
 #[derive(Debug, Clone)]
 pub struct FailingWrites {
@@ -42,6 +78,8 @@ pub struct FailingWrites {
     pub fail_times: Option<Arc<AtomicU64>>,
     /// Do not fail: pass writes through and sleep this long in each writer's `close`.
     pub slow_close: Option<Duration>,
+    /// Do not fail: pass writes through, each writer's `close` waiting for this gate to open.
+    pub gate: Option<Arc<Gate>>,
     pub calls: Arc<Calls>,
 }
 
@@ -54,6 +92,7 @@ impl FailingWrites {
             fail_first_write: false,
             fail_times: None,
             slow_close: None,
+            gate: None,
             calls: Arc::default(),
         }
     }
@@ -63,6 +102,14 @@ impl FailingWrites {
     pub fn slow(delay: Duration) -> Self {
         Self {
             slow_close: Some(delay),
+            ..Self::new(ErrorKind::Unexpected)
+        }
+    }
+
+    /// A store whose uploads finish only while `gate` is open.
+    pub fn gated(gate: Arc<Gate>) -> Self {
+        Self {
+            gate: Some(gate),
             ..Self::new(ErrorKind::Unexpected)
         }
     }
@@ -111,10 +158,11 @@ impl oio::Write for FailFirstWrite {
     }
 }
 
-/// A writer whose `close` sleeps first.
+/// A writer whose `close` waits for the gate and/or sleeps first.
 struct SlowClose {
     inner: oio::Writer,
-    delay: Duration,
+    delay: Option<Duration>,
+    gate: Option<Arc<Gate>>,
 }
 
 impl oio::Write for SlowClose {
@@ -123,8 +171,17 @@ impl oio::Write for SlowClose {
     }
 
     async fn close(&mut self) -> Result<opendal::Metadata> {
-        tokio::time::sleep(self.delay).await;
-        self.inner.close().await
+        if let Some(gate) = &self.gate {
+            gate.pass().await;
+        }
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
+        let done = self.inner.close().await;
+        if let Some(gate) = &self.gate {
+            gate.finished.fetch_add(1, Ordering::SeqCst);
+        }
+        done
     }
 
     async fn abort(&mut self) -> Result<()> {
@@ -188,9 +245,13 @@ impl Service for FailingService {
 
     fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         self.cfg.calls.write.fetch_add(1, Ordering::SeqCst);
-        if let Some(delay) = self.cfg.slow_close {
+        if self.cfg.slow_close.is_some() || self.cfg.gate.is_some() {
             let inner = self.inner.write(ctx, path, args)?;
-            return Ok(Box::new(SlowClose { inner, delay }));
+            return Ok(Box::new(SlowClose {
+                inner,
+                delay: self.cfg.slow_close,
+                gate: self.cfg.gate.clone(),
+            }));
         }
         if !self.cfg.should_fail() {
             return self.inner.write(ctx, path, args);

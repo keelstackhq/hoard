@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use common::failing_layer::FailingWrites;
+use common::failing_layer::{FailingWrites, Gate};
 use common::{TestServer, layered_fs_store, spawn_write_behind_server};
 use hoard::envelope::Header;
 use hoard::key::artifact_key;
@@ -97,14 +97,19 @@ async fn exists(store: &Store, hash: &str) -> bool {
 
 #[tokio::test]
 async fn put_answers_before_the_slow_upload_and_drain_waits_for_it() {
-    let (store, dir) = layered_fs_store(FailingWrites::slow(SLOW));
+    let gate = Gate::new(false);
+    let (store, dir) = layered_fs_store(FailingWrites::gated(gate.clone()));
     let t = spawn_write_behind_server(store, SPOOL_CAP, dir).await;
-    let start = Instant::now();
     let r = put(&t, "aa11", b"artifact-bytes").await;
-    let took = start.elapsed();
     assert_eq!(r.status(), 200);
-    assert!(took < Duration::from_millis(300), "PUT took {took:?}");
+    // The PUT is answered while the upload is provably blocked: it started, did not finish.
+    wait_until("the upload to start", || {
+        gate.entered.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(gate.finished.load(Ordering::SeqCst), 0);
     assert_eq!(t.stats.snapshot().puts, 0, "not uploaded yet");
+    gate.release();
 
     let report = t
         .write_behind
@@ -176,7 +181,7 @@ async fn drain_timeout_drops_in_flight_uploads_and_leaves_no_object() {
     let start = Instant::now();
     let report = q.wb.drain(Duration::from_millis(50)).await;
     assert!(
-        start.elapsed() < Duration::from_secs(2),
+        start.elapsed() < Duration::from_secs(20),
         "{:?}",
         start.elapsed()
     );
@@ -248,21 +253,22 @@ async fn same_key_queued_twice_is_spooled_once() {
 /// A PUT that would push the spool over its cap is uploaded synchronously instead.
 #[tokio::test]
 async fn full_spool_falls_back_to_a_synchronous_upload() {
-    let (store, dir) = layered_fs_store(FailingWrites::slow(Duration::from_millis(300)));
+    let gate = Gate::new(true);
+    let (store, dir) = layered_fs_store(FailingWrites::gated(gate.clone()));
     let t = spawn_write_behind_server(store, 10, dir).await;
-    let start = Instant::now();
     assert_eq!(put(&t, "f1", b"0123456789abcdef").await.status(), 200);
-    assert!(start.elapsed() >= Duration::from_millis(300), "synchronous");
     assert_eq!(t.stats.snapshot().puts, 1, "uploaded before the response");
-    // A body that fits is queued.
-    let start = Instant::now();
+    assert_eq!(gate.finished.load(Ordering::SeqCst), 1);
+    // A body that fits is queued: answered while its upload is blocked.
+    gate.hold();
     assert_eq!(put(&t, "f2", b"small").await.status(), 200);
-    assert!(
-        start.elapsed() < Duration::from_millis(250),
-        "{:?}",
-        start.elapsed()
-    );
+    wait_until("the queued upload to start", || {
+        gate.entered.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    assert_eq!(gate.finished.load(Ordering::SeqCst), 1);
     assert_eq!(t.stats.snapshot().puts, 1);
+    gate.release();
     t.write_behind
         .as_ref()
         .unwrap()

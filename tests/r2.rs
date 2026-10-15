@@ -1200,10 +1200,25 @@ impl RefreshFixture {
         status
     }
 
-    /// Requests seen since the last call, after letting background work settle.
-    async fn settled_log(&self) -> Vec<String> {
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-        self.log.take()
+    /// Requests seen since the last call: polls until `done` accepts them (10 s limit), then
+    /// allows a short grace period so unexpected extra requests still show up.
+    async fn settled_log(&self, done: impl Fn(&[String]) -> bool) -> Vec<String> {
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            seen.extend(self.log.take());
+            if done(&seen) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for requests, saw {seen:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        seen.extend(self.log.take());
+        seen
     }
 
     fn key(&self, hash: &str) -> String {
@@ -1223,15 +1238,16 @@ fn get_hit_refreshes_old_object_once_per_run() {
         for _ in 0..3 {
             assert_eq!(f.get("aa").await, 200);
         }
-        let log = f.settled_log().await;
         let key = f.key("aa");
+        let log = f.settled_log(|l| l.contains(&format!("PUT {key}"))).await;
         let count = |m: &str| log.iter().filter(|l| **l == format!("{m} {key}")).count();
         assert_eq!(count("HEAD"), 1, "{log:?}");
         assert_eq!(count("PUT"), 1, "{log:?}");
         assert_eq!(f.t.stats.snapshot().refreshed, 1);
         // A later hit in the same run does not refresh again.
         assert_eq!(f.get("aa").await, 200);
-        assert!(f.settled_log().await.iter().all(|l| !l.starts_with("PUT")));
+        let log = f.settled_log(|l| l.contains(&format!("GET {key}"))).await;
+        assert!(log.iter().all(|l| !l.starts_with("PUT")), "{log:?}");
         assert_eq!(f.t.stats.snapshot().refreshed, 1);
     })
 }
@@ -1248,8 +1264,8 @@ fn get_hit_leaves_young_object_alone() {
         for _ in 0..3 {
             assert_eq!(f.get("aa").await, 200);
         }
-        let log = f.settled_log().await;
         let key = f.key("aa");
+        let log = f.settled_log(|l| l.contains(&format!("HEAD {key}"))).await;
         assert_eq!(
             log.iter().filter(|l| **l == format!("HEAD {key}")).count(),
             1,
@@ -1271,7 +1287,8 @@ fn get_hit_without_refresh_makes_no_copy() {
         f.put("aa").await;
         assert_eq!(f.get("aa").await, 200);
         let key = f.key("aa");
-        assert_eq!(f.settled_log().await, vec![format!("GET {key}")]);
+        let want = format!("GET {key}");
+        assert_eq!(f.settled_log(|l| l.contains(&want)).await, vec![want]);
         assert_eq!(f.t.stats.snapshot().refreshed, 0);
     })
 }
