@@ -2,9 +2,9 @@
 
 Date: 2026-10-14 · Status: draft for implementation · Idea: `monorepo-ci-cache` (life-os)
 
-Names: GitHub org `keelstack` (tools for bootstrapping projects), repo `keelstack/hoard`, binary
+Names: GitHub org `keelstackhq` (tools for bootstrapping projects), repo `keelstackhq/hoard`, binary
 `hoard`, Rust package `keel-hoard` (the crate name `hoard` is taken), npm scope `@keelstack`, env
-prefix `HOARD_`. Usage: `uses: keelstack/hoard@v1`.
+prefix `HOARD_`. Usage: `uses: keelstackhq/hoard@v1`.
 
 ## 1. Goal
 
@@ -26,14 +26,14 @@ laptops). An R2 bucket must never grow without limit.
 GitHub cache (default):
 
 ```yaml
-- uses: keelstack/hoard@v1
+- uses: keelstackhq/hoard@v1
 - run: pnpm turbo run build test lint
 ```
 
 Cloudflare R2:
 
 ```yaml
-- uses: keelstack/hoard@v1
+- uses: keelstackhq/hoard@v1
   with:
     storage: r2
     r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
@@ -396,7 +396,7 @@ Storage: r2 (my-team-cache/cache/) · Lifecycle: 7 days ✓ · Pruned: 18 object
 
 ## 10. The GitHub Action (`action/`)
 
-`action.yml` at the repo root (so `uses: keelstack/hoard@v1` works): `runs.using: node24`,
+`action.yml` at the repo root (so `uses: keelstackhq/hoard@v1` works): `runs.using: node24`,
 `main: action/dist/main.js`, `post: action/dist/post.js`, `post-if: always()`. Source in
 `action/src/`, bundled with esbuild; committed `action/dist/` < 200 KB. Inputs mirror §4.2 plus
 `version` (binary version, default = the action's own release; any other value fails, because the

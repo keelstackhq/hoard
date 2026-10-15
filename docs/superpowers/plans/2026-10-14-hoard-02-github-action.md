@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `uses: keelstack/hoard@v1` gives any Turborepo job a working cache with zero config (GitHub Actions cache) or with R2 secrets, on Linux, macOS and Windows runners.
+**Goal:** `uses: keelstackhq/hoard@v1` gives any Turborepo job a working cache with zero config (GitHub Actions cache) or with R2 secrets, on Linux, macOS and Windows runners.
 
 **Architecture:** The binary from milestone 1 gains a `github` storage (OpenDAL `services-ghac`) with rate-limit handling. A tag-triggered workflow cross-compiles five targets and publishes them with SHA-256 checksums that are baked into the action bundle. A node24 TypeScript action downloads and verifies the binary, runs it detached, exports the `TURBO_*` variables, and in its post step shuts it down and writes the job summary.
 
@@ -150,7 +150,7 @@ test("checksum mismatch throws", async () => {
 ```
 
 - [x] **Step 2: Run `pnpm --dir action test` — FAIL.**
-- [x] **Step 3: Implement** — `action.yml` inputs exactly as spec §4.2 plus `version`; download URL `https://github.com/keelstack/hoard/releases/download/v<version>/hoard-<target>.tar.gz`; extract and cache with `@actions/tool-cache`.
+- [x] **Step 3: Implement** — `action.yml` inputs exactly as spec §4.2 plus `version`; download URL `https://github.com/keelstackhq/hoard/releases/download/v<version>/hoard-<target>.tar.gz`; extract and cache with `@actions/tool-cache`.
 - [x] **Step 4: Run — PASS; `pnpm --dir action lint` clean.**
 - [x] **Step 5: Commit** — `feat(action): settings resolution and verified binary download`
 

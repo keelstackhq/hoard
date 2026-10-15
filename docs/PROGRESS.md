@@ -26,6 +26,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-14 · 03-vite-plus-throughput/Task 3 steps 2–5 (refresh-on-hit) · 2cc23f7 · cargo all green (45 r2 incl. 5 refresh on MinIO); action 148/148; e2e r2 with refresh PASS · Step 1's real-R2 check BLOCKED
 - 2026-10-14 · 03-vite-plus-throughput/Task 4 steps 1, 4 (benchmark generator + workflow, new `throttled` stat) · 0c54198, 4744fb2 · node:test 6/6; cargo all green; action 148/148; actionlint clean; local 50-package run: 50 puts then 50 hits · Steps 2–3 BLOCKED
 - 2026-10-15 · **Milestone 3 reviewed** · whole-branch review 4f28859..99e1034 (0 Critical, 3 Important, 15 Minor) → fix wave 1e158e1..1b7a69d + flaky-test fix f977bfd, re-reviews clean · cargo all green twice in a row (108 unit, 44 vp, 45 r2, 18 write-behind …); 150 MB stream OK; action 157/157 incl. real binary; dist 159 KB fresh; actionlint clean; bench 6/6; e2e fs + r2 PASS; no openssl
+- 2026-10-15 · Naming decided by the owner: `keelstackhq/hoard` (README, spec, plan updated; npm scope `@keelstack` of the private action package unchanged)
 
 ## Blocked
 
@@ -45,11 +46,6 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   on pushes to `main` and on pull requests, so it has not run yet; everything it does passes locally. Action: open a
   PR from `claude/admiring-ride-kl6qd9` (or push to `main`) and check both jobs go green; if `pnpm/action-setup` or
   the MinIO image pull fails, paste the job log.
-- **Naming: `keelstack` vs `keelstackhq`.** The spec and README say `uses: keelstack/hoard@v1`, but this repo is
-  `keelstackhq/hoard`. The action downloads release binaries from `$GITHUB_ACTION_REPOSITORY` (falls back to
-  `keelstackhq/hoard`), so it works either way. Action: decide the public name; if it is `keelstack/hoard`, create or
-  transfer the repo and update nothing else; if it stays `keelstackhq`, replace `keelstack/hoard` in README.md and
-  spec §0/§2 (one search-and-replace).
 - **02-github-action/Task 2 Step 3 — release dry run on GitHub.** The action `build` script now exists. Action: on a branch, set `version = "0.0.0-test"` in Cargo.toml (`cargo update -p keel-hoard`), push,
   then `gh workflow run release.yml --ref <branch> -f version=0.0.0-test -f draft=true`. Check: five
   `hoard-<target>.tar.gz` assets on the draft release; the `chore(release): v0.0.0-test` commit's
@@ -143,21 +139,20 @@ curl -s -X POST -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/shutd
 ./target/release/hoard vp restore --storage fs  # in a fresh checkout, after `pnpm install`
 ```
 
-In CI, once a release exists: `- uses: keelstack/hoard@v1` (or `keelstackhq/hoard@v1`, see Blocked). The README
+In CI, once a release exists: `- uses: keelstackhq/hoard@v1`. The README
 lists every input and output.
 
 ### Blocked items for you, in a sensible order
 
-1. **Naming:** decide between `keelstack/hoard` and `keelstackhq/hoard`. This gates the README and the first release.
-2. **CI:** open a PR from this branch so `ci.yml` runs for the first time.
-3. **Self-test on real runners:** run `self-test.yml`, optionally after adding the four `R2_*` secrets. It includes
+1. **CI:** the PR is open; check that `ci.yml` goes green on it (opened 2026-10-15).
+2. **Self-test on real runners:** run `self-test.yml`, optionally after adding the four `R2_*` secrets. It includes
    the first real test of the GitHub cache paths (ghac and the Vite+ client).
-4. **Release dry run:** `release.yml` with `0.0.0-test`, `draft=true`.
-5. **Real R2 checks:**
+3. **Release dry run:** `release.yml` with `0.0.0-test`, `draft=true`.
+4. **Real R2 checks:**
    - the lifecycle rule with `hoard doctor`;
    - immutable >8 MiB artifacts;
    - `refresh_real_r2`, which decides whether self-copy resets the object's age.
-6. **Benchmark:** run `bench.yml` with 100, 400 and 1000 packages, then apply the packing decision (rule above).
+5. **Benchmark:** run `bench.yml` with 100, 400 and 1000 packages, then apply the packing decision (rule above).
 
 After that, cut the first real release (`docs/RELEASING.md`).
 

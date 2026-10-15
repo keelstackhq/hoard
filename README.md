@@ -1,13 +1,13 @@
 # hoard
 
 One-line CI cache for TypeScript monorepos (Turborepo and Vite+), stored in the GitHub Actions
-cache or your own Cloudflare R2 bucket. Part of [keelstack](https://github.com/keelstack): tools
+cache or your own Cloudflare R2 bucket. Part of [keelstackhq](https://github.com/keelstackhq): tools
 for bootstrapping projects.
 
 > Status: under construction. See `docs/superpowers/specs/2026-10-14-hoard-design.md`.
 
 ```yaml
-- uses: keelstack/hoard@v1
+- uses: keelstackhq/hoard@v1
 - run: pnpm turbo run build test lint
 ```
 
@@ -15,7 +15,7 @@ With Cloudflare R2 (no size or rate limits, shared across branches and laptops; 
 kept bounded by a lifecycle rule and a size cap):
 
 ```yaml
-- uses: keelstack/hoard@v1
+- uses: keelstackhq/hoard@v1
   with:
     storage: r2
     r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
@@ -23,9 +23,6 @@ kept bounded by a lifecycle rule and a size cap):
     r2-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
     r2-bucket: ${{ secrets.R2_BUCKET }}
 ```
-
-The action lives at [keelstackhq/hoard](https://github.com/keelstackhq/hoard) for now; the
-`keelstack/hoard` name above is not final.
 
 Pin a release tag (`@v1` or `@v1.2.3`), not `@main` or a commit: each action release can only
 run the hoard binary of that same release, and code on `main` may need a newer binary than the
@@ -102,7 +99,7 @@ summary.
   - uses: actions/setup-node@v5
     with: { node-version: 24, cache: pnpm }
   - run: pnpm install --frozen-lockfile
-  - uses: keelstack/hoard@v1     # after the install: restores node_modules/.vite/task-cache
+  - uses: keelstackhq/hoard@v1     # after the install: restores node_modules/.vite/task-cache
   - run: pnpm exec vp run build  # post step saves the task cache
   ```
 - **Binary download failures never fail the build.** If the hoard binary cannot be downloaded
