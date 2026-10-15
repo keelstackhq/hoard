@@ -1,0 +1,8 @@
+{
+  "name": "@fixture/a",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"setTimeout(()=>{const f=require('fs');f.mkdirSync('dist',{recursive:true});f.writeFileSync('dist/out.txt','a\\n')},1000)\""
+  }
+}

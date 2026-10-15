@@ -1,0 +1,11 @@
+{
+  "name": "@fixture/b",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"setTimeout(()=>{const f=require('fs');f.mkdirSync('dist',{recursive:true});f.writeFileSync('dist/out.txt','b\\n')},1000)\""
+  },
+  "dependencies": {
+    "@fixture/a": "workspace:*"
+  }
+}

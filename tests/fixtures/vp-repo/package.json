@@ -1,0 +1,9 @@
+{
+  "name": "hoard-vp-fixture",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "devDependencies": {
+    "vite-plus": "1.2.0"
+  }
+}

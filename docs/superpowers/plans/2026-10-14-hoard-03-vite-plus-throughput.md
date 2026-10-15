@@ -44,9 +44,9 @@
   - `struct GhaTwirp` with `get_download_url(key: &str, restore_keys: &[String], version: &str) -> Result<Option<(String /*matched*/, String /*url*/)>>`, `create_entry`, `upload_blocks`, `finalize` (never logs URLs)
   - Action: `detectTools(root): { turbo: boolean; vp: boolean }` (`turbo.json` / `vite-plus` in root `package.json` dependencies)
 
-- [ ] **Step 1: Write failing tests** — archive round-trip keeps file bytes and mtimes; archive with `../evil` entry is rejected; `vp_restore` on an empty fs store → `NotFound`; save from `linux-x64` then restore for `darwin-arm64` → `NotFound`; two saves → restore returns the newer; dir larger than `max_size` → `SkippedTooLarge`; `detectTools` on fixtures.
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement** (R2/fs: pointer object; GitHub: `GhaTwirp` with `restore_keys`).  **Step 4: Run — PASS** (GitHub path covered by the self-test workflow with a Vite+ fixture added to `tests/fixtures/vp-repo/`).
-- [ ] **Step 5: Commit** — `feat: Vite+ task-cache restore and save`
+- [x] **Step 1: Write failing tests** — archive round-trip keeps file bytes and mtimes; archive with `../evil` entry is rejected; `vp_restore` on an empty fs store → `NotFound`; save from `linux-x64` then restore for `darwin-arm64` → `NotFound`; two saves → restore returns the newer; dir larger than `max_size` → `SkippedTooLarge`; `detectTools` on fixtures.
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement** (R2/fs: pointer object; GitHub: `GhaTwirp` with `restore_keys`).  **Step 4: Run — PASS** (GitHub path covered by the self-test workflow with a Vite+ fixture added to `tests/fixtures/vp-repo/`).
+- [x] **Step 5: Commit** — `feat: Vite+ task-cache restore and save`
 
 ---
 
@@ -58,9 +58,9 @@
 **Interfaces:**
 - Produces: `struct WriteBehind` with `fn new(store: Arc<Store>, spool_dir: PathBuf, concurrency: usize) -> Self`, `async fn enqueue(&self, key: String, header: Header, body: impl Stream<…>) -> Result<()>` (spools to a temp file, returns when spooled), `async fn drain(&self, timeout: Duration) -> DrainReport { uploaded, dropped }`
 
-- [ ] **Step 1: Write failing tests** — with a store that sleeps 500 ms per put, PUT responds in < 100 ms; `drain` waits until uploaded; with a 50 ms drain timeout and a slow store, `dropped > 0` and counted as `put_errors`; a spool file is deleted after upload; killing the worker mid-upload leaves no object at the key (fs store, Review Focus 3).
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement.**  **Step 4: Run — PASS.**
-- [ ] **Step 5: Commit** — `feat: write-behind uploads drained on shutdown`
+- [x] **Step 1: Write failing tests** — with a store that sleeps 500 ms per put, PUT responds in < 100 ms; `drain` waits until uploaded; with a 50 ms drain timeout and a slow store, `dropped > 0` and counted as `put_errors`; a spool file is deleted after upload; killing the worker mid-upload leaves no object at the key (fs store, Review Focus 3).
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement.**  **Step 4: Run — PASS.**
+- [x] **Step 5: Commit** — `feat: write-behind uploads drained on shutdown`
 
 ---
 
@@ -74,8 +74,8 @@
 - Produces: `async fn refresh_object(client: &aws_sdk_s3::Client, bucket: &str, key: &str) -> Result<()>` (CopyObject onto itself with `MetadataDirective::Replace`); a per-run `DashSet<String>` of refreshed keys
 
 - [ ] **Step 1: Write failing test (MinIO first, then once by hand against a real R2 bucket)** — put object, read `last_modified`, wait 2 s, `refresh_object`, `last_modified` is newer and body unchanged. If R2 does not reset the age with a self-copy, switch to re-PUT of the same envelope and record the finding in the spec §7.3.
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement** (spawned in the background after the GET response starts; never delays the response).  **Step 4: Run — PASS.**
-- [ ] **Step 5: Commit** — `feat: refresh popular R2 artifacts on hit`
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement** (spawned in the background after the GET response starts; never delays the response).  **Step 4: Run — PASS.**
+- [x] **Step 5: Commit** — `feat: refresh popular R2 artifacts on hit`
 
 ---
 
@@ -84,7 +84,7 @@
 **Files:**
 - Create: `scripts/bench/generate-monorepo.mjs` (N packages, each a trivial `build`), `.github/workflows/bench.yml` (`workflow_dispatch`, inputs `packages` default 400)
 
-- [ ] **Step 1: Write the generator and workflow** — cold run with `storage: github`, read `rate_limited` and wall time from the job outputs; warm run in a second job.
+- [x] **Step 1: Write the generator and workflow** — cold run with `storage: github`, read `rate_limited` and wall time from the job outputs; warm run in a second job.
 - [ ] **Step 2: Run with 100, 400 and 1000 packages; record the numbers in `docs/benchmarks/2026-xx-rate-limit.md`**
-- [ ] **Step 3: Decide** — if `rate_limited > 0` at ≤ 400 packages, write a spec section and a new plan for packing (one pack + index per job, HTTP Range reads); otherwise record "packing not needed" in the spec §12.
-- [ ] **Step 4: Commit** — `bench: GitHub cache upload rate limits`
+- [ ] **Step 3: Decide** — if `throttled > 0` (429 responses received; `rate_limited` misses background 429s) at ≤ 400 packages, write a spec section and a new plan for packing (one pack + index per job, HTTP Range reads); otherwise record "packing not needed" in the spec §12.
+- [x] **Step 4: Commit** — `bench: GitHub cache upload rate limits`

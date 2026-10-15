@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `uses: keelstack/hoard@v1` gives any Turborepo job a working cache with zero config (GitHub Actions cache) or with R2 secrets, on Linux, macOS and Windows runners.
+**Goal:** `uses: keelstackhq/hoard@v1` gives any Turborepo job a working cache with zero config (GitHub Actions cache) or with R2 secrets, on Linux, macOS and Windows runners.
 
 **Architecture:** The binary from milestone 1 gains a `github` storage (OpenDAL `services-ghac`) with rate-limit handling. A tag-triggered workflow cross-compiles five targets and publishes them with SHA-256 checksums that are baked into the action bundle. A node24 TypeScript action downloads and verifies the binary, runs it detached, exports the `TURBO_*` variables, and in its post step shuts it down and writes the job summary.
 
@@ -15,7 +15,7 @@
 - `action.yml` lives at the repo root (`runs.using: node24`, `main: action/dist/main.js`, `post: action/dist/post.js`, `post-if: always()`).
 - `action/dist/` is committed and must stay under 200 KB total (CI fails above).
 - Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. Asset name `hoard-<target>.tar.gz` containing `hoard` (`hoard.exe` on Windows).
-- The action never downloads a binary whose SHA-256 is not in the baked `checksums.json`.
+- The action never downloads a binary whose SHA-256 is not in the baked `action/src/checksums.generated.ts`.
 - Cache errors never fail the job; setup errors fail it loudly with a fix.
 - `TURBO_TOKEN` is passed to `core.setSecret` before it is exported.
 - `storage: r2` without all four R2 secrets → fall back to `github` with a warning (fork PRs); never fail.
@@ -67,7 +67,7 @@ scripts/write-checksums.mjs
   - `struct RateGate` with `fn allow_upload(&self, now: Instant) -> bool`, `fn on_rate_limited(&self, now: Instant, retry_after: Option<Duration>)`; default pause 60 s
   - Store PUT maps OpenDAL `ErrorKind::RateLimited` to `StoreError::RateLimited { retry_after }`; the PUT handler then calls `on_rate_limited`, increments `rate_limited`, returns `200`; while paused, PUTs are skipped (`200`, counted as `rate_limited`)
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```rust
 #[test] fn gate_pauses_and_resumes() {
@@ -87,8 +87,8 @@ scripts/write-checksums.mjs
 #[tokio::test] async fn rate_limited_put_is_200_and_counted() { /* store wrapper that returns RateLimited → PUT 200, rate_limited == 1, next PUT skipped without calling the store */ }
 ```
 
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement** (`services-ghac` with `version` = `hoard-{cache_version}` so cache versions never collide).  **Step 4: Run — PASS.**
-- [ ] **Step 5: Commit** — `feat: GitHub Actions cache storage with rate-limit handling`
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement** (`services-ghac` with `version` = `hoard-{cache_version}` so cache versions never collide).  **Step 4: Run — PASS.**
+- [x] **Step 5: Commit** — `feat: GitHub Actions cache storage with rate-limit handling`
 
 ---
 
@@ -100,10 +100,10 @@ scripts/write-checksums.mjs
 **Interfaces:**
 - Produces: GitHub release `vX.Y.Z` with five `hoard-<target>.tar.gz` assets; `action/src/checksums.generated.ts` exporting `export const VERSION = "X.Y.Z"; export const CHECKSUMS: Record<Target, string>`; commit `chore(release): vX.Y.Z` with rebuilt `action/dist/`; tags `vX.Y.Z` and moved major tag `vX`.
 
-- [ ] **Step 1: Write `scripts/write-checksums.mjs`** — input: directory of assets; output: the TS file above; exits non-zero unless exactly the five targets are present. Unit test it with vitest (`action/test/write-checksums.test.ts`): five fake files → file contains five 64-hex entries; four files → throws `"missing target aarch64-apple-darwin"`.
-- [ ] **Step 2: Write the workflow** — trigger `workflow_dispatch` with input `version`; matrix build (zigbuild for musl, native for darwin/windows), `strip`, tar.gz, upload artifacts; job `publish`: download all, run the script, `pnpm --dir action build`, check dist < 200 KB, commit, tag, create release with assets.
+- [x] **Step 1: Write `scripts/write-checksums.mjs`** — input: directory of assets; output: the TS file above; exits non-zero unless exactly the five targets are present. Unit test it with vitest (`action/test/write-checksums.test.ts`): five fake files → file contains five 64-hex entries; four files → throws `"missing target aarch64-apple-darwin"`.
+- [x] **Step 2: Write the workflow** — trigger `workflow_dispatch` with input `version`; matrix build (zigbuild for musl, native for darwin/windows), `strip`, tar.gz, upload artifacts; job `publish`: download all, run the script, `pnpm --dir action build`, check dist < 200 KB, commit, tag, create release with assets.
 - [ ] **Step 3: Dry run** — run the workflow on a fork or with `version: 0.0.0-test` and `draft: true`; verify five assets and a matching `checksums.generated.ts`.
-- [ ] **Step 4: Commit** — `ci: cross-platform release pipeline with baked checksums`
+- [x] **Step 4: Commit** — `ci: cross-platform release pipeline with baked checksums`
 
 ---
 
@@ -120,7 +120,7 @@ scripts/write-checksums.mjs
   - `function resolveSettings(inputs: Record<string, string>, env: NodeJS.ProcessEnv): Settings` — pure
   - `async function ensureBinary(target: Target, version: string, checksums: Record<Target, string>, download: (url: string) => Promise<string>): Promise<string>` — returns the executable path; throws `Error("checksum mismatch for <target>")`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```ts
 test("r2 without secrets falls back to github", () => {
@@ -149,10 +149,10 @@ test("checksum mismatch throws", async () => {
 });
 ```
 
-- [ ] **Step 2: Run `pnpm --dir action test` — FAIL.**
-- [ ] **Step 3: Implement** — `action.yml` inputs exactly as spec §4.2 plus `version`; download URL `https://github.com/keelstack/hoard/releases/download/v<version>/hoard-<target>.tar.gz`; extract and cache with `@actions/tool-cache`.
-- [ ] **Step 4: Run — PASS; `pnpm --dir action lint` clean.**
-- [ ] **Step 5: Commit** — `feat(action): settings resolution and verified binary download`
+- [x] **Step 2: Run `pnpm --dir action test` — FAIL.**
+- [x] **Step 3: Implement** — `action.yml` inputs exactly as spec §4.2 plus `version`; download URL `https://github.com/keelstackhq/hoard/releases/download/v<version>/hoard-<target>.tar.gz`; extract and cache with `@actions/tool-cache`.
+- [x] **Step 4: Run — PASS; `pnpm --dir action lint` clean.**
+- [x] **Step 5: Commit** — `feat(action): settings resolution and verified binary download`
 
 ---
 
@@ -172,7 +172,7 @@ test("checksum mismatch throws", async () => {
   - main: settings → binary → start → health → `core.setSecret(token)` → export `TURBO_API`, `TURBO_TOKEN`, `TURBO_TEAM=hoard` → `core.saveState("port"|"token"|"summary")`
   - post: shutdown → append summary + warnings to `$GITHUB_STEP_SUMMARY` → outputs `hits`, `misses`, `time-saved-ms` (from `GET /_hoard/stats` before shutdown) → print log on failure or `RUNNER_DEBUG=1`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```ts
 test("serveArgs for r2", () => {
@@ -188,8 +188,8 @@ test("shutdownServer returns false when nothing listens", async () => {
 });
 ```
 
-- [ ] **Step 2: Run — FAIL.**  **Step 3: Implement** — R2 secrets are passed as `HOARD_R2_SECRET_ACCESS_KEY` etc. in the child env, never argv. Post never throws (wrap and `core.warning`).  **Step 4: Run — PASS.**
-- [ ] **Step 5: Commit** — `feat(action): start, export and shut down hoard`
+- [x] **Step 2: Run — FAIL.**  **Step 3: Implement** — R2 secrets are passed as `HOARD_R2_SECRET_ACCESS_KEY` etc. in the child env, never argv. Post never throws (wrap and `core.warning`).  **Step 4: Run — PASS.**
+- [x] **Step 5: Commit** — `feat(action): start, export and shut down hoard`
 
 ---
 
@@ -198,6 +198,6 @@ test("shutdownServer returns false when nothing listens", async () => {
 **Files:**
 - Create: `.github/workflows/self-test.yml`
 
-- [ ] **Step 1: Write the workflow** — matrix `os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]` × `storage: [github]`, plus `ubuntu-latest` × `storage: r2` (only when `secrets.R2_ACCESS_KEY_ID != ''`). Job `warm` runs the action (`uses: ./`) and builds `tests/fixtures/turbo-repo`; job `hit` (needs `warm`, same matrix) runs it again in a fresh checkout and asserts `steps.cache.outputs.hits` > 0 and the turbo output contains `FULL TURBO`. Uses a per-run `cache-version: run-${{ github.run_id }}` so runs never see each other.
-- [ ] **Step 2: Run on a branch — expect all green; the job summary shows the hoard table**
-- [ ] **Step 3: Commit** — `ci: self-test the action on Linux, macOS, Windows and R2`
+- [x] **Step 1: Write the workflow** — matrix `os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]` × `storage: [github]`, plus `ubuntu-latest` × `storage: r2` (only when `secrets.R2_ACCESS_KEY_ID != ''`). Job `warm` runs the action (`uses: ./`) and builds `tests/fixtures/turbo-repo`; job `hit` (needs `warm`, same matrix) runs it again in a fresh checkout and asserts `steps.cache.outputs.hits` > 0 and the turbo output contains `FULL TURBO`. Uses a per-run `cache-version: run-${{ github.run_id }}` so runs never see each other.
+- [x] **Step 2: Run on a branch — expect all green; the job summary shows the hoard table**
+- [x] **Step 3: Commit** — `ci: self-test the action on Linux, macOS, Windows and R2`

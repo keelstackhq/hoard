@@ -1,0 +1,81 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    env:
+      HOARD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: docker compose up -d --wait minio
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      HOARD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: docker compose up -d --wait minio
+      - run: cargo build --release
+      - run: pnpm --dir action install --frozen-lockfile
+      - name: Action against the real binary (dist/main.js, dist/post.js)
+        run: pnpm --dir action exec vitest run test/integration.test.ts
+        env:
+          HOARD_TEST_BIN: ${{ github.workspace }}/target/release/hoard
+      - run: tests/e2e/turbo.sh
+        env:
+          HOARD_BIN: ${{ github.workspace }}/target/release/hoard
+      - run: tests/e2e/turbo.sh
+        env:
+          STORAGE: r2
+          HOARD_BIN: ${{ github.workspace }}/target/release/hoard
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - run: pnpm --dir action install --frozen-lockfile
+      - run: pnpm --dir action lint
+      - run: pnpm --dir action typecheck
+      - run: pnpm --dir action test
+      - run: pnpm --dir action build
+      - run: node --test "scripts/bench/*.test.mjs" # benchmark generator
+      - name: Check action/dist is rebuilt
+        run: |
+          git add -N action/dist
+          if ! git diff --exit-code --stat action/dist; then
+            echo "::error::action/dist is out of date: run 'pnpm --dir action build' and commit action/dist"
+            exit 1
+          fi
+      - name: Check action/dist size
+        run: |
+          size=$(du -sb action/dist | cut -f1)
+          echo "action/dist is $size bytes (limit 204800)"
+          if [ "$size" -gt 204800 ]; then
+            echo "::error::action/dist is $size bytes, over the 200 KB limit: trim dependencies or bundle settings in action/"
+            exit 1
+          fi

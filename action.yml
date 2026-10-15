@@ -1,0 +1,77 @@
+name: hoard
+description: Turborepo remote cache for CI, stored in the GitHub Actions cache or a Cloudflare R2 bucket.
+author: keelstack
+branding:
+  icon: archive
+  color: gray-dark
+
+inputs:
+  storage:
+    description: "Where artifacts are stored: github (GitHub Actions cache), r2 (Cloudflare R2) or fs (runner disk)."
+    required: false
+    default: github
+  mode:
+    description: "read-write, read or off. Empty: from the workflow's cache mode (ACTIONS_CACHE_MODE), else read-write."
+    required: false
+    default: ""
+  cache-version:
+    description: "Part of every cache key; change it to start from an empty cache."
+    required: false
+    default: v1
+  r2-account-id:
+    description: "Cloudflare account ID (r2). Not needed when r2-endpoint is set."
+    required: false
+  r2-access-key-id:
+    description: "R2 access key ID (r2). Pass it from a secret."
+    required: false
+  r2-secret-access-key:
+    description: "R2 secret access key (r2). Pass it from a secret."
+    required: false
+  r2-bucket:
+    description: "R2 bucket name (r2)."
+    required: false
+  r2-prefix:
+    description: "Key prefix inside the bucket, ending in / (r2)."
+    required: false
+    default: cache/
+  r2-endpoint:
+    description: "S3 endpoint URL override, e.g. MinIO (r2). Replaces r2-account-id."
+    required: false
+  r2-lifecycle:
+    description: "auto (set the bucket's expiry rule), verify (fail if it is missing) or manual (r2)."
+    required: false
+    default: auto
+  max-age-days:
+    description: "Delete R2 objects this many days after their last write, 1-36500 (r2)."
+    required: false
+    default: "7"
+  max-size:
+    description: "Size cap for the R2 prefix, e.g. 5GB; the oldest objects are pruned above it (r2)."
+    required: false
+    default: 5GB
+  refresh-on-hit:
+    description: "R2 only: when a cache hit reads an object older than max-age-days / 2, copy it onto itself so the lifecycle rule does not expire what is still in use (true or false)."
+    required: false
+    default: "false"
+  vp-max-size:
+    description: "Vite+ only: skip saving the task cache when it is larger than this, e.g. 2GB (then run `vp cache clean`)."
+    required: false
+    default: 2GB
+  version:
+    description: "hoard binary version. Empty: this action's own release, the only one it can verify."
+    required: false
+    default: ""
+
+outputs:
+  hits:
+    description: "Number of cache hits."
+  misses:
+    description: "Number of cache misses."
+  time-saved-ms:
+    description: "Sum of the original task durations of all hits, in milliseconds."
+
+runs:
+  using: node24
+  main: action/dist/main.js
+  post: action/dist/post.js
+  post-if: always()

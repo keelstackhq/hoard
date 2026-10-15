@@ -1,0 +1,312 @@
+name: self-test
+# Runs the action (`uses: ./`) on real runners against tests/fixtures/turbo-repo:
+#   warm  builds the fixture with an empty cache (misses, uploads);
+#   hit   rebuilds it in a fresh checkout and must replay everything from the cache.
+# vp-warm / vp-hit do the same for Vite+ on tests/fixtures/vp-repo with storage: github: warm runs
+#   the task and post saves the task cache; hit restores it in a fresh checkout and must print a
+#   Vite Task cache hit. The action only looks for Vite+ at the workspace root, so these jobs check
+#   hoard out into ./hoard (`uses: ./hoard`) and copy the fixture to the root.
+# The cache-version is run-<run_id>-<os>-<storage>: unique per run (runs never see each other) and
+# per matrix leg (task hashes are OS-independent here, so one leg's uploads must not satisfy
+# another leg's hit assertion). run_attempt is deliberately not part of it: re-running only the
+# failed `hit` jobs must find the entries `warm` wrote in the earlier attempt.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - action.yml
+      - action/**
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - tests/fixtures/**
+      - .github/workflows/self-test.yml
+
+permissions:
+  contents: read # the GitHub cache works with the runtime token; nothing else is needed
+
+concurrency:
+  group: self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: warm (${{ matrix.os }}, ${{ matrix.storage }}, ${{ matrix.binary }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        storage: [github]
+        # `source`: build the binary from this checkout and hand it to the action through
+        # HOARD_ACTION_BINARY_PATH (no release exists yet, so the action's baked checksums are
+        # empty and it would refuse to download one). After the first release, add `release`
+        # here: that variant skips the build and the env var, so the action downloads and
+        # verifies the published binary (the `if: matrix.binary == 'source'` steps below).
+        binary: [source]
+        include:
+          - { os: ubuntu-latest, storage: r2, binary: source }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check prerequisites
+        id: gate
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: |
+          if [ "${{ matrix.storage }}" = r2 ] && [ -z "$R2_ACCESS_KEY_ID" ]; then
+            echo "::notice title=R2 skipped::The R2 leg is skipped because the R2_* repository secrets are missing (fork PR, or not configured yet)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
+        with:
+          toolchain: stable
+      - if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
+        run: cargo build --release
+      - name: Locate the binary
+        id: bin
+        if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
+        run: |
+          exe=hoard
+          [ "$RUNNER_OS" = Windows ] && exe=hoard.exe
+          echo "name=$exe" >> "$GITHUB_OUTPUT"
+          echo "path=$GITHUB_WORKSPACE/target/release/$exe" >> "$GITHUB_OUTPUT"
+      - name: Share the binary with the hit job
+        if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hoard-${{ matrix.os }}-${{ matrix.storage }}
+          path: target/release/${{ steps.bin.outputs.name }}
+          if-no-files-found: error
+          retention-days: 1
+      - if: steps.gate.outputs.run == 'true'
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install the fixture
+        if: steps.gate.outputs.run == 'true'
+        working-directory: tests/fixtures/turbo-repo
+        run: pnpm install --frozen-lockfile
+      - name: hoard
+        id: cache
+        if: steps.gate.outputs.run == 'true'
+        uses: ./
+        env:
+          HOARD_ACTION_BINARY_PATH: ${{ matrix.binary == 'source' && steps.bin.outputs.path || '' }}
+        with:
+          storage: ${{ matrix.storage }}
+          cache-version: run-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.storage }}
+          r2-account-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCOUNT_ID || '' }}
+          r2-access-key-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCESS_KEY_ID || '' }}
+          r2-secret-access-key: ${{ matrix.storage == 'r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
+          r2-bucket: ${{ matrix.storage == 'r2' && secrets.R2_BUCKET || '' }}
+      - name: Build (cold cache)
+        if: steps.gate.outputs.run == 'true'
+        working-directory: tests/fixtures/turbo-repo
+        run: pnpm turbo run build
+
+  hit:
+    name: hit (${{ matrix.os }}, ${{ matrix.storage }}, ${{ matrix.binary }})
+    needs: warm
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        storage: [github]
+        binary: [source] # see the note in `warm`
+        include:
+          - { os: ubuntu-latest, storage: r2, binary: source }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check prerequisites
+        id: gate
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: |
+          if [ "${{ matrix.storage }}" = r2 ] && [ -z "$R2_ACCESS_KEY_ID" ]; then
+            echo "::notice title=R2 skipped::The R2 leg is skipped because the R2_* repository secrets are missing (fork PR, or not configured yet)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Fetch the binary built in warm
+        if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hoard-${{ matrix.os }}-${{ matrix.storage }}
+          path: ${{ runner.temp }}/hoard-bin
+      - name: Locate the binary
+        id: bin
+        if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
+        run: |
+          exe=hoard
+          [ "$RUNNER_OS" = Windows ] && exe=hoard.exe
+          dir="$RUNNER_TEMP/hoard-bin"
+          chmod +x "$dir/$exe"
+          echo "path=$dir/$exe" >> "$GITHUB_OUTPUT"
+      - if: steps.gate.outputs.run == 'true'
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install the fixture
+        if: steps.gate.outputs.run == 'true'
+        working-directory: tests/fixtures/turbo-repo
+        run: pnpm install --frozen-lockfile
+      - name: hoard
+        id: cache
+        if: steps.gate.outputs.run == 'true'
+        uses: ./
+        env:
+          HOARD_ACTION_BINARY_PATH: ${{ matrix.binary == 'source' && steps.bin.outputs.path || '' }}
+        with:
+          storage: ${{ matrix.storage }}
+          cache-version: run-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.storage }}
+          r2-account-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCOUNT_ID || '' }}
+          r2-access-key-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCESS_KEY_ID || '' }}
+          r2-secret-access-key: ${{ matrix.storage == 'r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
+          r2-bucket: ${{ matrix.storage == 'r2' && secrets.R2_BUCKET || '' }}
+      - name: Build (warm cache)
+        if: steps.gate.outputs.run == 'true'
+        working-directory: tests/fixtures/turbo-repo
+        run: pnpm turbo run build 2>&1 | tee "$RUNNER_TEMP/turbo.log"
+      - name: Assert full cache replay
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          grep -q 'FULL TURBO' "$RUNNER_TEMP/turbo.log" || {
+            echo "::error::turbo output has no 'FULL TURBO': the second build did not replay every task from the cache"
+            exit 1
+          }
+          # The action's `hits` output is only set by its post step, after this job's steps have
+          # run, so read the same counter live from the running server (TURBO_API/TURBO_TOKEN
+          # are exported by the action).
+          stats="$(curl -fsS -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/stats")"
+          hits="$(printf '%s' "$stats" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).hits))')"
+          echo "hoard hits: $hits"
+          [ "$hits" -gt 0 ] || {
+            echo "::error::hoard reported $hits cache hits; expected more than 0"
+            exit 1
+          }
+
+  vp-warm:
+    name: vp warm (ubuntu-latest, github, source)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: hoard
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: hoard
+      - run: cargo build --release
+        working-directory: hoard
+      - name: Share the binary with the hit job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hoard-vp
+          path: hoard/target/release/hoard
+          if-no-files-found: error
+          retention-days: 1
+      - name: Put the fixture at the workspace root
+        run: cp -R hoard/tests/fixtures/vp-repo/. .
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install the fixture
+        run: pnpm install --no-frozen-lockfile # the fixture has no lockfile
+      - name: hoard
+        uses: ./hoard
+        env:
+          HOARD_ACTION_BINARY_PATH: ${{ github.workspace }}/hoard/target/release/hoard
+        with:
+          storage: github
+          cache-version: run-${{ github.run_id }}-vp
+      - name: Run the task (cold cache; post saves the task cache)
+        run: pnpm exec vp run hello
+
+  vp-hit:
+    name: vp hit (ubuntu-latest, github, source)
+    needs: vp-warm
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: hoard
+          persist-credentials: false
+      - name: Fetch the binary built in vp-warm
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hoard-vp
+          path: ${{ runner.temp }}/hoard-bin
+      - run: chmod +x "$RUNNER_TEMP/hoard-bin/hoard"
+      - name: Put the fixture at the workspace root
+        run: cp -R hoard/tests/fixtures/vp-repo/. .
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install the fixture
+        run: pnpm install --no-frozen-lockfile
+      - name: hoard (restores the task cache)
+        uses: ./hoard
+        env:
+          HOARD_ACTION_BINARY_PATH: ${{ runner.temp }}/hoard-bin/hoard
+        with:
+          storage: github
+          cache-version: run-${{ github.run_id }}-vp
+      - name: Assert the task cache was restored
+        run: |
+          [ -n "$(ls -A node_modules/.vite/task-cache 2>/dev/null)" ] || {
+            echo "::error::node_modules/.vite/task-cache is empty after the hoard step: nothing was restored"
+            exit 1
+          }
+      - name: Run the task (warm cache)
+        run: pnpm exec vp run hello 2>&1 | tee "$RUNNER_TEMP/vp.log"
+      - name: Assert a Vite Task cache hit
+        run: |
+          # Vite+ 1.2.0 prints `… cache hit, replaying` per task and `vp run: cache hit, …` at the end.
+          grep -q 'cache hit' "$RUNNER_TEMP/vp.log" || {
+            echo "::error::vp output has no 'cache hit': the restored task cache was not used"
+            exit 1
+          }

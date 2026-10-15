@@ -1,0 +1,208 @@
+name: bench
+# GitHub cache upload rate-limit benchmark (spec §6.4, §12). Not run on push or PR.
+#   cold  builds N generated packages with an empty cache: every task is a miss and a PUT, so this
+#         is the burst of uploads that can hit GitHub's 200 uploads/min limit. It records `puts`,
+#         `rate_limited`, `put_errors`, the build wall time and (with write-behind) how long the
+#         background uploads kept running after the build.
+#   warm  rebuilds the same repo on a fresh runner with the same cache-version: every task should
+#         be a hit; records hits, misses and wall time.
+#   report  puts both into one markdown row, ready to paste into docs/benchmarks/.
+# See docs/benchmarks/README.md.
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: Number of generated packages (1-5000); try 100, 400, 1000
+        type: string
+        default: "400"
+      write-behind:
+        description: hoard write-behind mode (auto = on for the GitHub cache)
+        type: choice
+        options: [auto, "on", "off"]
+        default: auto
+
+permissions:
+  contents: read # the GitHub cache works with the runtime token; nothing else is needed
+
+env:
+  PACKAGES: ${{ inputs.packages }}
+  WRITE_BEHIND: ${{ inputs.write-behind }}
+
+jobs:
+  cold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      packages: ${{ steps.gen.outputs.packages }}
+      puts: ${{ steps.stats.outputs.puts }}
+      rate-limited: ${{ steps.stats.outputs.rate-limited }}
+      throttled: ${{ steps.stats.outputs.throttled }}
+      put-errors: ${{ steps.stats.outputs.put-errors }}
+      wall-seconds: ${{ steps.build.outputs.wall-seconds }}
+      drain-seconds: ${{ steps.stats.outputs.drain-seconds }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo build --release
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Generate the monorepo
+        id: gen
+        run: |
+          node scripts/bench/generate-monorepo.mjs "$RUNNER_TEMP/bench" "$PACKAGES"
+          echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+      - name: Install
+        working-directory: ${{ runner.temp }}/bench
+        run: pnpm install --no-frozen-lockfile
+      - name: hoard
+        uses: ./
+        env:
+          HOARD_ACTION_BINARY_PATH: ${{ github.workspace }}/target/release/hoard
+          HOARD_WRITE_BEHIND: ${{ env.WRITE_BEHIND }}
+        with:
+          storage: github
+          cache-version: bench-${{ github.run_id }}
+      - name: Build (cold cache)
+        id: build
+        working-directory: ${{ runner.temp }}/bench
+        run: |
+          start=$(date +%s.%N)
+          pnpm turbo run build --concurrency=32
+          end=$(date +%s.%N)
+          echo "wall-seconds=$(echo "$end - $start" | bc -l | xargs printf '%.1f')" >> "$GITHUB_OUTPUT"
+      - name: Read hoard stats
+        id: stats
+        run: |
+          stats() { curl -fsS -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/stats"; }
+          # With write-behind the PUTs were answered before they were uploaded: wait until every
+          # package is accounted for (uploaded, already there, failed or skipped as rate limited)
+          # so the counters are final. A 429 under write-behind pauses and retries the upload (not
+          # counted as rate_limited), so `throttled` is the decisive number and a long drain its
+          # cost. This wait (at most 900 s) runs while the server is up, before the shutdown, so
+          # it is separate from hoard's own shutdown budget (120 s drain within 270 s); it is long
+          # enough for a rate-limited queue to drain here instead of being dropped there. The
+          # 45 min job limit covers a build, this wait and a slow runner without letting a hang
+          # run for 6 hours.
+          start=$(date +%s)
+          while :; do
+            s="$(stats)"
+            done_count="$(jq '.puts + .put_skipped_existing + .put_errors + .rate_limited' <<<"$s")"
+            [ "$done_count" -ge "$PACKAGES" ] && { drain=$(( $(date +%s) - start )); break; }
+            [ $(( $(date +%s) - start )) -ge 900 ] && { drain=timeout; echo "::warning::uploads still pending after 900 s; the counters are not final"; break; }
+            sleep 2
+          done
+          echo "$s"
+          {
+            echo "puts=$(jq .puts <<<"$s")"
+            echo "rate-limited=$(jq .rate_limited <<<"$s")"
+            echo "throttled=$(jq .throttled <<<"$s")"
+            echo "put-errors=$(jq .put_errors <<<"$s")"
+            echo "drain-seconds=$drain"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Cold run: $PACKAGES packages, write-behind $WRITE_BEHIND"
+            echo
+            echo "| metric | value |"
+            echo "| --- | --- |"
+            echo "| wall seconds (build) | ${{ steps.build.outputs.wall-seconds }} |"
+            echo "| upload drain seconds after build | $drain |"
+            echo "| puts | $(jq .puts <<<"$s") |"
+            echo "| rate_limited | $(jq .rate_limited <<<"$s") |"
+            echo "| throttled (429 responses) | $(jq .throttled <<<"$s") |"
+            echo "| put_errors | $(jq .put_errors <<<"$s") |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  warm:
+    needs: cold
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      hits: ${{ steps.stats.outputs.hits }}
+      misses: ${{ steps.stats.outputs.misses }}
+      wall-seconds: ${{ steps.build.outputs.wall-seconds }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo build --release
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Generate the monorepo
+        run: node scripts/bench/generate-monorepo.mjs "$RUNNER_TEMP/bench" "$PACKAGES"
+      - name: Install
+        working-directory: ${{ runner.temp }}/bench
+        run: pnpm install --no-frozen-lockfile
+      - name: hoard
+        uses: ./
+        env:
+          HOARD_ACTION_BINARY_PATH: ${{ github.workspace }}/target/release/hoard
+          HOARD_WRITE_BEHIND: ${{ env.WRITE_BEHIND }}
+        with:
+          storage: github
+          cache-version: bench-${{ github.run_id }}
+      - name: Build (warm cache)
+        id: build
+        working-directory: ${{ runner.temp }}/bench
+        run: |
+          start=$(date +%s.%N)
+          pnpm turbo run build --concurrency=32
+          end=$(date +%s.%N)
+          echo "wall-seconds=$(echo "$end - $start" | bc -l | xargs printf '%.1f')" >> "$GITHUB_OUTPUT"
+      - name: Read hoard stats
+        id: stats
+        run: |
+          s="$(curl -fsS -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/stats")"
+          echo "$s"
+          # A missing or non-numeric counter would make `-eq` fail with a bash error; say why.
+          hits="$(jq -e '.hits | numbers' <<<"$s")" || {
+            echo "::error::hoard stats have no numeric hits counter: $s"
+            exit 1
+          }
+          [ "$hits" -eq "$PACKAGES" ] || echo "::warning::expected $PACKAGES hits on the warm run, got $hits"
+          echo "hits=$hits" >> "$GITHUB_OUTPUT"
+          echo "misses=$(jq .misses <<<"$s")" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Warm run: $PACKAGES packages, write-behind $WRITE_BEHIND"
+            echo
+            echo "| metric | value |"
+            echo "| --- | --- |"
+            echo "| wall seconds (build) | ${{ steps.build.outputs.wall-seconds }} |"
+            echo "| hits | $hits |"
+            echo "| misses | $(jq .misses <<<"$s") |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    needs: [cold, warm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Combined result
+        env:
+          COLD: ${{ toJSON(needs.cold.outputs) }}
+          WARM: ${{ toJSON(needs.warm.outputs) }}
+        run: |
+          c() { jq -r ".\"$1\"" <<<"$COLD"; }
+          w() { jq -r ".\"$1\"" <<<"$WARM"; }
+          {
+            echo "### Rate-limit benchmark (copy into docs/benchmarks/2026-10-rate-limit.md)"
+            echo
+            echo "| packages | write-behind | cold wall (s) | drain (s) | puts | rate_limited | throttled | put_errors | warm wall (s) | hits |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            echo "| $(c packages) | $WRITE_BEHIND | $(c wall-seconds) | $(c drain-seconds) | $(c puts) | $(c rate-limited) | $(c throttled) | $(c put-errors) | $(w wall-seconds) | $(w hits) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
