@@ -84,3 +84,10 @@ commit. Run the e2e script before pushing anything that touches `server/`, `stor
   to `stat` first.
 - Vite+ remote caching is unreleased upstream; until it ships we only save/restore its
   task-cache directory.
+
+## Org decisions
+
+Cross-repo decisions from keelstackhq/decisions; follow them. To change one, open a PR there.
+The hook refreshes this snapshot; commit an update alone as `chore: sync org decisions`.
+
+@docs/agents/org-decisions.md
