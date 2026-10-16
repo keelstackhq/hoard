@@ -1,0 +1,10 @@
+# keelstackhq decisions
+
+Settled decisions that apply across repos. Follow them. To change one, open a PR here
+(see README). Hard limit: 60 lines; reasoning lives in `decisions/`, read it only when needed.
+
+| ID    | Date       | Scope        | Decision                                                                                                                                                                                              |
+| ----- | ---------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D-001 | 2026-10-15 | all          | GitHub org and npm scope are `keelstackhq`; "keelstack" is only the product name. [why](decisions/001-org-name.md)                                                                                    |
+| D-002 | 2026-10-16 | all          | `keelstackhq/decisions` is the record of cross-repo decisions; open topics are discussed elsewhere, only settled ones land here, by PR merged by the owner. [why](decisions/002-decisions-process.md) |
+| D-003 | 2026-10-15 | hull, splice | `docs/template-format.md` is shared by hull and splice, byte-identical; change it in both repos in the same week. [why](decisions/003-template-contract.md)                                           |
