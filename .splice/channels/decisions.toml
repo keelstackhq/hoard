@@ -1,0 +1,31 @@
+format = 1
+splice = "0.2.0"
+
+[channel]
+name = "decisions"
+track = "main"
+only = []
+exclude = []
+
+[template]
+source = "gh:keelstackhq/decisions//channel"
+version = "0.0.0+g768fd17"
+commit = "768fd17aebb21a52ba8a061a491f5d14e471aa2d"
+
+[vars]
+
+[[pieces]]
+id = "snapshot"
+name = "snapshot"
+vars = {}
+
+[[pieces]]
+id = "import-claude"
+name = "import-claude"
+vars = {}
+
+[files]
+"docs/agents/org-decisions.md" = { class = "owned", sha256 = "7bbc1b09baf888503dfa315ecf21d19ae3373a345461c1bd89c53a0e0eceb3c8" }
+
+[sections]
+"CLAUDE.md" = { sha256 = "fa8a562d118a28c7b4f663d29089cef4b8038229fb9cbd56c649dd58764ed2d2", created = false }
