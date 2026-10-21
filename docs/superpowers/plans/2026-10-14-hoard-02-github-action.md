@@ -102,7 +102,7 @@ scripts/write-checksums.mjs
 
 - [x] **Step 1: Write `scripts/write-checksums.mjs`** — input: directory of assets; output: the TS file above; exits non-zero unless exactly the five targets are present. Unit test it with vitest (`action/test/write-checksums.test.ts`): five fake files → file contains five 64-hex entries; four files → throws `"missing target aarch64-apple-darwin"`.
 - [x] **Step 2: Write the workflow** — trigger `workflow_dispatch` with input `version`; matrix build (zigbuild for musl, native for darwin/windows), `strip`, tar.gz, upload artifacts; job `publish`: download all, run the script, `pnpm --dir action build`, check dist < 200 KB, commit, tag, create release with assets.
-- [ ] **Step 3: Dry run** — run the workflow on a fork or with `version: 0.0.0-test` and `draft: true`; verify five assets and a matching `checksums.generated.ts`.
+- [x] **Step 3: Dry run** — run the workflow on a fork or with `version: 0.0.0-test` and `draft: true`; verify five assets and a matching `checksums.generated.ts`.
 - [x] **Step 4: Commit** — `ci: cross-platform release pipeline with baked checksums`
 
 ---
