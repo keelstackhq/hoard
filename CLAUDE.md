@@ -84,3 +84,12 @@ commit. Run the e2e script before pushing anything that touches `server/`, `stor
   to `stat` first.
 - Vite+ remote caching is unreleased upstream; until it ships we only save/restore its
   task-cache directory.
+
+<!-- splice:decisions:begin — managed by `splice update --channel decisions`; edit the source -->
+## Org decisions
+
+Cross-repo decisions from keelstackhq/decisions; follow them. To change one, open a PR there.
+`splice update --channel decisions` refreshes this snapshot; commit it alone as `chore: sync org decisions`.
+
+@docs/agents/org-decisions.md
+<!-- splice:decisions:end -->
