@@ -532,7 +532,8 @@ and only forward (never below the newest stable `vX.*` tag, so a backport leaves
   uploads/min (milestone 3, gated by a benchmark: needed if `throttled > 0` at 400 packages or
   fewer, see `docs/benchmarks/`). **Packing needed (bench 2026-10):** a cold build of 400
   packages got a `429` (`throttled` 1) and skipped 22 uploads during the pause (`rate_limited`
-  22), so the warm run had 378 of 400 hits; 100 packages stayed under the limit
+  22), so the warm run had 378 of 400 hits. 100 packages stayed under the limit, and so did 1000
+  slower packages (about 146 uploads/min): the limit is uploads per minute, not package count
   (`docs/benchmarks/2026-10-rate-limit.md`). The design (one pack + index per job, HTTP Range
   reads) gets its own spec section and plan before any code.
 - Nx adapter.

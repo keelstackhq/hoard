@@ -4,11 +4,24 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 100 | auto | 36.4 | 2 | 100 | 0 | 0 | 0 | 3.8 | 100 |
 | 400 | auto | 103.5 | 2 | 378 | 22 | 1 | 0 | 6.0 | 378 |
+| 1000 | auto | 411.9 | 2 | 1000 | 0 | 0 | 0 | 4.1 | 1000 |
 
 Runs (2026-10-21, `ubuntu-latest`, main at ed8074a, one run at a time so they do not share the
 repository's upload limit):
 
 - 100 packages: https://github.com/keelstackhq/hoard/actions/runs/39659795765
 - 400 packages: https://github.com/keelstackhq/hoard/actions/runs/39662254202
+- 1000 packages: https://github.com/keelstackhq/hoard/actions/runs/39664353368
 
-Decision: pending.
+Decision: **packing needed** (see spec §12). The rule is `throttled > 0` at 400 packages or
+fewer, and the 400-package run got a `429`.
+
+Notes:
+
+- At 400 packages the cold build ran at about 233 uploads/min (400 tasks in 103.5 s), above the
+  200/min limit. After the one `429`, hoard paused uploads, and the 22 PUTs that came in during the
+  pause were skipped (`rate_limited` 22, as spec §6.4 says). Those 22 tasks were misses on the warm
+  run (378 of 400 hits).
+- At 1000 packages the build was slower per task (1000 tasks in 411.9 s, about 146 uploads/min),
+  so it stayed under the limit and got no `429`. The limit is about uploads per minute, not about
+  the package count, so a faster runner or cheaper tasks can hit it at any size.
