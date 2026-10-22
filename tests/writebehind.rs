@@ -31,6 +31,7 @@ fn header(size: u64) -> Header {
         duration_ms: Some(7),
         tag: None,
         size,
+        hash: None,
     }
 }
 

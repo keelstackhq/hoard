@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +13,11 @@ use tracing::{info, warn};
 use crate::config::{
     Config, LifecycleMode, Mode, Storage, TokenPaths, default_port_file, default_token_file,
 };
+use crate::pack::Packs;
+use crate::pack::backend::PackBackend;
+use crate::pack::names::PackNames;
+use crate::pack::reader::PackReader;
+use crate::pack::writer::PackWriter;
 use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, fix_command, r2_client, rule_id};
 use crate::r2::prune::prune;
 use crate::r2::refresh::Refresher;
@@ -33,6 +38,10 @@ pub const GITHUB_PREFIX: &str = "hoard/";
 /// marker is only written on completion, so an interrupted prune runs again next time.
 /// Known limitation: if the LIST alone takes longer than this, the marker is never written.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// How long reads and the PUT duplicate check wait for the pack index to load at startup
+/// (Turborepo's request timeout is 30 s).
+const PACK_INDEX_WAIT: Duration = Duration::from_secs(10);
 
 /// Upper bound for all shutdown work together (drain, then prune, then the summary). The
 /// GitHub Action waits 300 s for the shutdown reply; staying under it keeps the summary.
@@ -218,7 +227,20 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
 
     let stats = Arc::new(Stats::default());
     let rate_gate = Arc::new(RateGate::default());
-    let write_behind = start_write_behind(&cfg, &store, &stats, &rate_gate);
+    let packs = start_packs(
+        &cfg,
+        &prefix,
+        &stats,
+        &rate_gate,
+        PackBackend::from_config,
+        default_spool_dir(),
+    )?;
+    // Packing replaces write-behind for Turborepo artifacts.
+    let write_behind = if packs.is_some() {
+        None
+    } else {
+        start_write_behind(&cfg, &store, &stats, &rate_gate)
+    };
     let refresh = start_refresher(&cfg, &stats);
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<oneshot::Sender<StatsSnapshot>>(8);
     let state = AppState {
@@ -231,6 +253,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         prefix: prefix.clone(),
         cache_version: cfg.cache_version.clone(),
         write_behind: write_behind.clone(),
+        packs: packs.clone(),
         refresh,
         shutdown: shutdown_tx,
     };
@@ -267,6 +290,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         store: &store_for_shutdown,
         prefix: &prefix,
         write_behind: write_behind.as_deref(),
+        packs: packs.as_deref(),
     };
     let final_stats = shutdown_work(&cfg, cache, &stats, &storage_line, startup_lines).await;
     remove_if_present(&cfg.port_file);
@@ -281,6 +305,63 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let _ = stop_tx.send(());
     server.await.context("server task failed")??;
     Ok(())
+}
+
+/// Packing (spec §6.5) when `pack` is on and the server does anything (`mode` is not `off`):
+/// the backend, the pack names from the process environment, the reader (loads the newest index
+/// unless `no-reads`) and, in `read-write` mode, the writer with the fresh spool dir
+/// `spool_dir`. A backend that cannot be built is a setup error (missing GitHub env, bad
+/// config), never a fallback to per-artifact storage. A spool dir that cannot be created is a
+/// warning: the server keeps packs without a writer, so PUTs count `put_errors`.
+fn start_packs(
+    cfg: &Config,
+    prefix: &str,
+    stats: &Arc<Stats>,
+    gate: &Arc<RateGate>,
+    make_backend: impl FnOnce(&Config) -> anyhow::Result<PackBackend>,
+    spool_dir: PathBuf,
+) -> anyhow::Result<Option<Arc<Packs>>> {
+    if !cfg.pack || cfg.mode == Mode::Off {
+        return Ok(None);
+    }
+    let backend = Arc::new(make_backend(cfg)?);
+    let names = Arc::new(PackNames::from_env(prefix, &cfg.cache_version, |k| {
+        std::env::var(k).ok().filter(|v| !v.is_empty())
+    }));
+    let reader = PackReader::start(
+        backend.clone(),
+        names.clone(),
+        !cfg.no_reads,
+        PACK_INDEX_WAIT,
+    );
+    let writer = if cfg.mode == Mode::ReadWrite {
+        let dir = spool_dir;
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => Some(PackWriter::new(
+                backend,
+                reader.clone(),
+                names,
+                stats.clone(),
+                gate.clone(),
+                dir,
+            )),
+            Err(e) => {
+                warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "cannot create the pack spool dir; artifacts are not cached"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    info!(
+        "pack on: Turborepo artifacts are packed into a few large entries and become readable \
+         after this server shuts down"
+    );
+    Ok(Some(Arc::new(Packs { reader, writer })))
 }
 
 /// The write-behind queue when `write-behind` is on and the server writes (`read-write`): a
@@ -314,19 +395,39 @@ fn start_write_behind(
     )))
 }
 
-/// The refresh-on-hit helper (spec §7.3): only for `storage=r2` in `read-write` mode, since a
-/// refresh is a write. Asking for it elsewhere is ignored with one info line.
-fn start_refresher(cfg: &Config, stats: &Arc<Stats>) -> Option<Arc<Refresher>> {
-    if !cfg.refresh_on_hit {
-        return None;
+/// What `refresh-on-hit` does in this run (spec §7.3).
+#[derive(Debug, PartialEq, Eq)]
+enum RefreshPlan {
+    On,
+    /// Off by choice, or not set where it does not apply (silent).
+    Off,
+    /// Set to true where it does not apply: one info line, nothing else.
+    Ignored,
+}
+
+/// `refresh-on-hit` applies only to `storage=r2` in `read-write` mode, since a refresh is a
+/// write; there it is on unless set to false. Elsewhere it does nothing.
+fn refresh_plan(cfg: &Config) -> RefreshPlan {
+    let applies = cfg.storage == Storage::R2 && cfg.mode == Mode::ReadWrite;
+    match (cfg.refresh_on_hit, applies) {
+        (Some(false), _) => RefreshPlan::Off,
+        (_, true) => RefreshPlan::On,
+        (None, false) => RefreshPlan::Off,
+        (Some(true), false) => RefreshPlan::Ignored,
     }
-    let r2 = match (&cfg.r2, cfg.storage, cfg.mode) {
-        (Some(r2), Storage::R2, Mode::ReadWrite) => r2,
-        _ => {
+}
+
+/// The refresh-on-hit helper (spec §7.3), when [`refresh_plan`] says it is on.
+fn start_refresher(cfg: &Config, stats: &Arc<Stats>) -> Option<Arc<Refresher>> {
+    match refresh_plan(cfg) {
+        RefreshPlan::On => {}
+        RefreshPlan::Off => return None,
+        RefreshPlan::Ignored => {
             info!("refresh-on-hit is ignored: it needs storage=r2 and mode=read-write");
             return None;
         }
-    };
+    }
+    let r2 = cfg.r2.as_ref()?;
     let client = r2_client(&r2.endpoint(), &r2.access_key_id, &r2.secret_access_key);
     let threshold = Refresher::threshold_for(cfg.max_age_days);
     info!(
@@ -409,6 +510,7 @@ struct ShutdownCache<'a> {
     store: &'a Store,
     prefix: &'a str,
     write_behind: Option<&'a WriteBehind>,
+    packs: Option<&'a Packs>,
 }
 
 /// Shutdown hook for `storage=r2`, `mode=read-write` (spec §7.2): enforce `max-size`, bounded
@@ -517,6 +619,15 @@ async fn shutdown_work_within(
             ));
         }
     }
+    if let Some(writer) = cache.packs.and_then(|p| p.writer.as_ref()) {
+        let report = writer.drain(bounds.drain.min(bounds.budget)).await;
+        if report.dropped > 0 {
+            extra_lines.push(format!(
+                "Upload queue: {} dropped at shutdown",
+                report.dropped
+            ));
+        }
+    }
     let prune_bound = bounds
         .prune
         .min(bounds.budget.saturating_sub(start.elapsed()));
@@ -529,6 +640,9 @@ async fn shutdown_work_within(
     if snapshot.refreshed > 0 {
         extra_lines.push(format!("Refreshed: {} objects", snapshot.refreshed));
     }
+    if snapshot.refresh_errors > 0 {
+        extra_lines.push(format!("Refresh errors: {}", snapshot.refresh_errors));
+    }
     if snapshot.rate_limited > 0 {
         extra_lines.push(format!(
             "Rate limited: {} uploads skipped",
@@ -537,6 +651,9 @@ async fn shutdown_work_within(
     }
     if snapshot.throttled > 0 {
         extra_lines.push(format!("Throttled: {} responses (429)", snapshot.throttled));
+    }
+    if snapshot.packs > 0 {
+        extra_lines.push(format!("Packs: {} uploaded", snapshot.packs));
     }
     if let Some(path) = &cfg.summary_file {
         let md = render_summary(&snapshot, storage_line, &extra_lines);
@@ -552,6 +669,57 @@ mod tests {
     use super::*;
     use crate::config::ServeArgs;
     use clap::Parser;
+
+    fn fs_pack_cfg(dir: &Path) -> Config {
+        Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "fs",
+            "--fs-root",
+            dir.to_str().unwrap(),
+            "--pack",
+            "on",
+        ]))
+        .unwrap()
+    }
+
+    /// A pack backend that cannot be built is a startup error, not a fallback.
+    #[tokio::test]
+    async fn pack_on_with_a_failing_backend_is_a_startup_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = fs_pack_cfg(dir.path());
+        let err = start_packs(
+            &cfg,
+            "",
+            &Arc::new(Stats::default()),
+            &Arc::new(RateGate::default()),
+            |_| anyhow::bail!("ACTIONS_RESULTS_URL is not set: fix it"),
+            dir.path().join("spool"),
+        )
+        .err()
+        .expect("must fail");
+        assert!(err.to_string().contains("ACTIONS_RESULTS_URL is not set"));
+    }
+
+    /// A spool dir that cannot be created keeps packs on, without a writer.
+    #[tokio::test]
+    async fn pack_on_with_an_unusable_spool_dir_keeps_packs_without_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = fs_pack_cfg(dir.path());
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, b"x").unwrap();
+        let packs = start_packs(
+            &cfg,
+            "",
+            &Arc::new(Stats::default()),
+            &Arc::new(RateGate::default()),
+            PackBackend::from_config,
+            blocker.join("spool"),
+        )
+        .unwrap()
+        .expect("packs stay on");
+        assert!(packs.writer.is_none());
+    }
 
     /// A prune slower than the bound becomes a summary line, never an error.
     // Sends S3 requests to a server that never answers, so no pooled connection outlives the
@@ -586,6 +754,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let start = std::time::Instant::now();
         let lines = prune_on_shutdown_within(&cfg, cache, Duration::from_millis(200)).await;
@@ -653,6 +822,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let stats = Stats::default();
         shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
@@ -681,6 +851,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_reports_packs_after_throttled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.fs_root = dir.path().join("store");
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Store::new(build_operator(&cfg).unwrap());
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+            write_behind: None,
+            packs: None,
+        };
+        let stats = Stats::default();
+        shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(!md.contains("Packs:"), "{md}");
+
+        stats
+            .throttled
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .packs
+            .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        let snap = shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
+        assert_eq!(snap.packs, 3);
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.ends_with("Throttled: 2 responses (429) · Packs: 3 uploaded\n"),
+            "{md}"
+        );
+    }
+
+    fn refresh_cfg(storage: Storage, mode: Mode, set: Option<bool>) -> Config {
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.storage = storage;
+        cfg.mode = mode;
+        cfg.refresh_on_hit = set;
+        cfg
+    }
+
+    /// Spec §7.3: on by default for r2 read-write; a silent no-op for github and fs (and r2
+    /// read-only) unless asked for by name; `false` turns it off.
+    #[test]
+    fn refresh_on_hit_default_is_on_for_r2_and_silent_elsewhere() {
+        use RefreshPlan::*;
+        let rw = Mode::ReadWrite;
+        for set in [None, Some(true)] {
+            assert_eq!(refresh_plan(&refresh_cfg(Storage::R2, rw, set)), On);
+        }
+        assert_eq!(
+            refresh_plan(&refresh_cfg(Storage::R2, rw, Some(false))),
+            Off
+        );
+        for storage in [Storage::Github, Storage::Fs] {
+            assert_eq!(refresh_plan(&refresh_cfg(storage, rw, None)), Off);
+            assert_eq!(refresh_plan(&refresh_cfg(storage, rw, Some(false))), Off);
+            assert_eq!(refresh_plan(&refresh_cfg(storage, rw, Some(true))), Ignored);
+        }
+        let ro = Mode::Read;
+        assert_eq!(refresh_plan(&refresh_cfg(Storage::R2, ro, None)), Off);
+        assert_eq!(
+            refresh_plan(&refresh_cfg(Storage::R2, ro, Some(true))),
+            Ignored
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_reports_refresh_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.fs_root = dir.path().join("store");
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Store::new(build_operator(&cfg).unwrap());
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+            write_behind: None,
+            packs: None,
+        };
+        let stats = Stats::default();
+        stats
+            .refreshed
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .refresh_errors
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        shutdown_work(&cfg, cache, &stats, "Storage: r2", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.ends_with("Storage: r2 · Refreshed: 2 objects · Refresh errors: 1\n"),
+            "{md}"
+        );
+    }
+
+    #[tokio::test]
     async fn summary_reports_refreshed_objects() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg =
@@ -693,6 +963,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let stats = Stats::default();
         shutdown_work(&cfg, cache, &stats, "Storage: r2", vec![]).await;
@@ -722,6 +993,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let stats = Stats::default();
         stats
@@ -778,6 +1050,7 @@ mod tests {
             duration_ms: None,
             tag: None,
             size: 3,
+            hash: None,
         };
         let body = futures::stream::iter([Ok(bytes::Bytes::from_static(b"abc"))]);
         wb.enqueue("cache/turbo/v1/ab".into(), header, body)
@@ -787,6 +1060,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: Some(&wb),
+            packs: None,
         };
         let start = std::time::Instant::now();
         let bounds = ShutdownBounds {
@@ -846,6 +1120,7 @@ mod tests {
             duration_ms: None,
             tag: None,
             size: 3,
+            hash: None,
         };
         let body = futures::stream::iter([Ok(bytes::Bytes::from_static(b"abc"))]);
         wb.enqueue("cache/turbo/v1/ab".into(), header, body)
@@ -855,6 +1130,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: Some(&wb),
+            packs: None,
         };
         let bounds = ShutdownBounds {
             budget: Duration::from_millis(600),
@@ -909,6 +1185,7 @@ mod tests {
             duration_ms: None,
             tag: None,
             size,
+            hash: None,
         }
     }
 
@@ -936,6 +1213,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         assert!(
             prune_on_shutdown_within(&cfg, cache, PRUNE_TIMEOUT)

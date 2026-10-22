@@ -81,8 +81,11 @@ export function serveArgs(s: Settings, runnerTemp: string, id = ""): string[] {
 export function serveEnv(s: Settings, baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.HOARD_TOKEN;
-  // An inherited value must not turn the option on behind the input's back.
-  if (s.refreshOnHit) env.HOARD_REFRESH_ON_HIT = "true";
+  // Always explicit for r2 read-write, so an inherited value cannot override the input.
+  // Elsewhere (github, fs, r2 read/off) it does nothing, so it is not passed and hoard stays
+  // silent about it (§7.3).
+  if (s.storage === "r2" && s.mode === "read-write")
+    env.HOARD_REFRESH_ON_HIT = String(s.refreshOnHit);
   else delete env.HOARD_REFRESH_ON_HIT;
   if (s.r2) {
     if (s.r2.accountId) env.HOARD_R2_ACCOUNT_ID = s.r2.accountId;

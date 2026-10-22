@@ -21,6 +21,8 @@ use super::body::ExactLength;
 use crate::config::Mode;
 use crate::envelope::{Header, MAX_HEADER_LEN, PREFIX_LEN, encode_header};
 use crate::key::validate_hash;
+use crate::pack::reader::PackGet;
+use crate::pack::writer::Accepted;
 use crate::redact::redacted;
 use crate::store::{GetOutcome, PutOutcome, StoreError};
 use crate::writebehind::Enqueued;
@@ -85,6 +87,22 @@ pub async fn query(State(s): State<AppState>, body: Bytes) -> Json<HashMap<Strin
     let hashes = serde_json::from_slice::<Query>(&body)
         .map(|q| q.hashes)
         .unwrap_or_default();
+    if let Some(packs) = &s.packs {
+        // Answered from the index: no storage request per hash.
+        let mut found = HashMap::new();
+        for hash in hashes.into_iter().filter(|h| validate_hash(h)) {
+            if let Some(e) = packs.reader.lookup(&hash).await {
+                found.insert(
+                    hash,
+                    Found {
+                        size: e.loc.size,
+                        task_duration_ms: e.loc.duration_ms,
+                    },
+                );
+            }
+        }
+        return Json(found);
+    }
     let found = futures::stream::iter(hashes.into_iter().filter(|h| validate_hash(h)))
         .map(|hash| {
             let s = &s;
@@ -136,6 +154,24 @@ pub async fn head_artifact(State(s): State<AppState>, Path(hash): Path<String>) 
         inc(&s.stats.misses, 1);
         return StatusCode::NOT_FOUND.into_response();
     }
+    if let Some(packs) = &s.packs {
+        return match packs.reader.lookup(&hash).await {
+            Some(e) => {
+                let h = Header {
+                    v: 1,
+                    duration_ms: e.loc.duration_ms,
+                    tag: e.loc.tag,
+                    size: e.loc.size,
+                    hash: None,
+                };
+                (StatusCode::OK, artifact_headers(&h)).into_response()
+            }
+            None => {
+                inc(&s.stats.misses, 1);
+                StatusCode::NOT_FOUND.into_response()
+            }
+        };
+    }
     match s.store.head(&s.turbo_key(&hash)).await {
         Ok(Some(h)) => (StatusCode::OK, artifact_headers(&h)).into_response(),
         Ok(None) => {
@@ -165,17 +201,29 @@ pub async fn get_artifact(State(s): State<AppState>, Path(hash): Path<String>) -
         return miss();
     }
     let key = s.turbo_key(&hash);
-    let (h, body) = match s.store.get(&key).await {
-        Ok(GetOutcome::Hit(h, body)) => (h, body),
-        Ok(GetOutcome::Miss) => return miss(),
-        Ok(GetOutcome::Corrupt) => {
-            warn!(%hash, "GET: stored object is not a valid HRD1 blob, treating as miss");
-            inc(&s.stats.corrupt, 1);
-            return miss();
+    let (h, body) = if let Some(packs) = &s.packs {
+        match packs.reader.get(&hash).await {
+            PackGet::Hit(h, body) => (h, body),
+            PackGet::Miss => return miss(),
+            PackGet::Corrupt => {
+                warn!(%hash, "GET: packed artifact is corrupt, treating as miss");
+                inc(&s.stats.corrupt, 1);
+                return miss();
+            }
         }
-        Err(e) => {
-            warn!(%hash, error = %redacted(&e), "GET: storage error, treating as miss");
-            return miss();
+    } else {
+        match s.store.get(&key).await {
+            Ok(GetOutcome::Hit(h, body)) => (h, body),
+            Ok(GetOutcome::Miss) => return miss(),
+            Ok(GetOutcome::Corrupt) => {
+                warn!(%hash, "GET: stored object is not a valid HRD1 blob, treating as miss");
+                inc(&s.stats.corrupt, 1);
+                return miss();
+            }
+            Err(e) => {
+                warn!(%hash, error = %redacted(&e), "GET: storage error, treating as miss");
+                return miss();
+            }
         }
     };
     // The header's size is the body length: a stored body of another length ends the response
@@ -234,10 +282,38 @@ pub async fn put_artifact(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
         size,
+        hash: None,
     };
     if encode_header(&header).len() > PREFIX_LEN + MAX_HEADER_LEN {
         warn!(%hash, "PUT: artifact headers too large for the envelope, not caching");
         inc(&s.stats.put_errors, 1);
+        return put_ok();
+    }
+    // Packing: spool the body into the next pack; it is uploaded in the background and at
+    // shutdown. Nothing is written to the store per artifact.
+    if let Some(packs) = &s.packs {
+        let Some(writer) = &packs.writer else {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                warn!("PUT: packing has no writer (spool dir unusable); artifacts are not cached");
+            }
+            inc(&s.stats.put_errors, 1);
+            return put_ok();
+        };
+        let stream = Box::pin(body.into_data_stream().map_err(std::io::Error::other));
+        match writer.put(&hash, header, stream).await {
+            Ok(Accepted::Spooled) => {}
+            Ok(Accepted::Duplicate) => inc(&s.stats.put_skipped_existing, 1),
+            Ok(Accepted::NotCached(why)) => {
+                warn!(%hash, why, "PUT: not cached");
+                inc(&s.stats.put_errors, 1);
+            }
+            Err(e) => {
+                warn!(%hash, error = %e, "PUT: cannot spool the artifact into a pack, not cached");
+                inc(&s.stats.put_errors, 1);
+            }
+        }
         return put_ok();
     }
     let key = s.turbo_key(&hash);

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `uses: keelstackhq/hoard@v1` gives any Turborepo job a working cache with zero config (GitHub Actions cache) or with R2 secrets, on Linux, macOS and Windows runners.
+**Goal:** `uses: keelstackhq/hoard@v0` gives any Turborepo job a working cache with zero config (GitHub Actions cache) or with R2 secrets, on Linux, macOS and Windows runners.
 
 **Architecture:** The binary from milestone 1 gains a `github` storage (OpenDAL `services-ghac`) with rate-limit handling. A tag-triggered workflow cross-compiles five targets and publishes them with SHA-256 checksums that are baked into the action bundle. A node24 TypeScript action downloads and verifies the binary, runs it detached, exports the `TURBO_*` variables, and in its post step shuts it down and writes the job summary.
 
@@ -102,7 +102,7 @@ scripts/write-checksums.mjs
 
 - [x] **Step 1: Write `scripts/write-checksums.mjs`** — input: directory of assets; output: the TS file above; exits non-zero unless exactly the five targets are present. Unit test it with vitest (`action/test/write-checksums.test.ts`): five fake files → file contains five 64-hex entries; four files → throws `"missing target aarch64-apple-darwin"`.
 - [x] **Step 2: Write the workflow** — trigger `workflow_dispatch` with input `version`; matrix build (zigbuild for musl, native for darwin/windows), `strip`, tar.gz, upload artifacts; job `publish`: download all, run the script, `pnpm --dir action build`, check dist < 200 KB, commit, tag, create release with assets.
-- [ ] **Step 3: Dry run** — run the workflow on a fork or with `version: 0.0.0-test` and `draft: true`; verify five assets and a matching `checksums.generated.ts`.
+- [x] **Step 3: Dry run** — run the workflow on a fork or with `version: 0.0.0-test` and `draft: true`; verify five assets and a matching `checksums.generated.ts`.
 - [x] **Step 4: Commit** — `ci: cross-platform release pipeline with baked checksums`
 
 ---

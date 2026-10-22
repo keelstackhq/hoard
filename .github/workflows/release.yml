@@ -169,6 +169,10 @@ jobs:
           cat action/src/checksums.generated.ts
       - name: Build action
         run: pnpm --dir action install --frozen-lockfile && pnpm --dir action build
+      # The release commit's push does not trigger CI, so test the baked checksums here: a
+      # failure stops the release before anything is committed, tagged or published.
+      - name: Test action (with the baked checksums)
+        run: pnpm --dir action test
       - name: Check action/dist size
         run: |
           size=$(du -sb action/dist | cut -f1)

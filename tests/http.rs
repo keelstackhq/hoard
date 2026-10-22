@@ -274,6 +274,7 @@ async fn read_mode_rejects_put() {
         duration_ms: Some(7),
         tag: None,
         size: 3,
+        hash: None,
     };
     t.store
         .put(
@@ -309,6 +310,7 @@ async fn off_mode_status_disabled() {
         duration_ms: None,
         tag: None,
         size: 1,
+        hash: None,
     };
     t.store
         .put(

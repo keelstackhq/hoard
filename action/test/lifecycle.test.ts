@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { BinaryDownloadError } from "../src/binary.js";
+import { VERSION } from "../src/checksums.generated.js";
 import {
   type ActionCore,
   INPUTS,
@@ -95,7 +96,7 @@ describe("main", () => {
     await runMain(d);
 
     expect(f.of("setFailed")).toEqual([]);
-    expect(d.ensureBinary).toHaveBeenCalledWith("x86_64-unknown-linux-musl", "0.0.0-dev");
+    expect(d.ensureBinary).toHaveBeenCalledWith("x86_64-unknown-linux-musl", VERSION); // the baked release version
     const [bin, args, log, env] = vi.mocked(d.startServer).mock.calls[0] ?? [];
     expect(bin).toBe("/opt/hoard");
     expect(args).toContain("--storage");
@@ -149,6 +150,32 @@ describe("main", () => {
     const [, args, , env] = vi.mocked(d.startServer).mock.calls[0] ?? [];
     expect(args?.[args.indexOf("--storage") + 1]).toBe("r2");
     expect(env).toMatchObject({ HOARD_REFRESH_ON_HIT: "true" });
+  });
+
+  test("refresh-on-hit defaults to on for r2 and can be turned off", async () => {
+    const r2 = {
+      storage: "r2",
+      "r2-endpoint": "http://127.0.0.1:9000",
+      "r2-access-key-id": "ak",
+      "r2-secret-access-key": "sk",
+      "r2-bucket": "b",
+    };
+    for (const [inputs, want] of [
+      [r2, "true"],
+      [{ ...r2, "refresh-on-hit": "false" }, "false"],
+    ] as const) {
+      const f = fakeCore(inputs);
+      const d = deps(f);
+      await runMain(d);
+      expect(f.of("setFailed")).toEqual([]);
+      const [, , , env] = vi.mocked(d.startServer).mock.calls[0] ?? [];
+      expect(env).toMatchObject({ HOARD_REFRESH_ON_HIT: want });
+    }
+  });
+
+  test("action.yml default for refresh-on-hit is true", () => {
+    const yml = readFileSync(new URL("../../action.yml", import.meta.url), "utf8");
+    expect(yml).toMatch(/^ {2}refresh-on-hit:\n(?: {4}.*\n)*? {4}default: "true"$/m);
   });
 
   test("action.yml declares exactly the inputs main reads", () => {

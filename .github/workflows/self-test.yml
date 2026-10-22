@@ -6,9 +6,9 @@ name: self-test
 #   the task and post saves the task cache; hit restores it in a fresh checkout and must print a
 #   Vite Task cache hit. The action only looks for Vite+ at the workspace root, so these jobs check
 #   hoard out into ./hoard (`uses: ./hoard`) and copy the fixture to the root.
-# The cache-version is run-<run_id>-<os>-<storage>: unique per run (runs never see each other) and
-# per matrix leg (task hashes are OS-independent here, so one leg's uploads must not satisfy
-# another leg's hit assertion). run_attempt is deliberately not part of it: re-running only the
+# The cache-version is run-<run_id>-<os>-<storage>-<binary>: unique per run (runs never see each
+# other) and per matrix leg (task hashes are OS-independent here, so one leg's uploads must not
+# satisfy another leg's hit assertion). run_attempt is deliberately not part of it: re-running only the
 # failed `hit` jobs must find the entries `warm` wrote in the earlier attempt.
 on:
   workflow_dispatch:
@@ -41,11 +41,10 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         storage: [github]
         # `source`: build the binary from this checkout and hand it to the action through
-        # HOARD_ACTION_BINARY_PATH (no release exists yet, so the action's baked checksums are
-        # empty and it would refuse to download one). After the first release, add `release`
-        # here: that variant skips the build and the env var, so the action downloads and
-        # verifies the published binary (the `if: matrix.binary == 'source'` steps below).
-        binary: [source]
+        # HOARD_ACTION_BINARY_PATH. `release`: skip the build and the env var, so the action
+        # downloads the published binary of its baked VERSION and verifies its SHA-256 (the
+        # `if: matrix.binary == 'source'` steps below only run for `source`).
+        binary: [source, release]
         include:
           - { os: ubuntu-latest, storage: r2, binary: source }
     defaults:
@@ -111,7 +110,7 @@ jobs:
           HOARD_ACTION_BINARY_PATH: ${{ matrix.binary == 'source' && steps.bin.outputs.path || '' }}
         with:
           storage: ${{ matrix.storage }}
-          cache-version: run-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.storage }}
+          cache-version: run-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.storage }}-${{ matrix.binary }}
           r2-account-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCOUNT_ID || '' }}
           r2-access-key-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCESS_KEY_ID || '' }}
           r2-secret-access-key: ${{ matrix.storage == 'r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
@@ -130,7 +129,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         storage: [github]
-        binary: [source] # see the note in `warm`
+        binary: [source, release] # see the note in `warm`
         include:
           - { os: ubuntu-latest, storage: r2, binary: source }
     defaults:
@@ -187,7 +186,7 @@ jobs:
           HOARD_ACTION_BINARY_PATH: ${{ matrix.binary == 'source' && steps.bin.outputs.path || '' }}
         with:
           storage: ${{ matrix.storage }}
-          cache-version: run-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.storage }}
+          cache-version: run-${{ github.run_id }}-${{ matrix.os }}-${{ matrix.storage }}-${{ matrix.binary }}
           r2-account-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCOUNT_ID || '' }}
           r2-access-key-id: ${{ matrix.storage == 'r2' && secrets.R2_ACCESS_KEY_ID || '' }}
           r2-secret-access-key: ${{ matrix.storage == 'r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
@@ -199,8 +198,11 @@ jobs:
       - name: Assert full cache replay
         if: steps.gate.outputs.run == 'true'
         run: |
+          # On a failed check, show hoard's own log (redacted by hoard) to explain the miss.
+          hoard_log() { for f in "$RUNNER_TEMP"/hoard-*.log; do [ -f "$f" ] && { echo "--- $f"; cat "$f"; }; done; }
           grep -q 'FULL TURBO' "$RUNNER_TEMP/turbo.log" || {
             echo "::error::turbo output has no 'FULL TURBO': the second build did not replay every task from the cache"
+            hoard_log
             exit 1
           }
           # The action's `hits` output is only set by its post step, after this job's steps have
@@ -211,6 +213,7 @@ jobs:
           echo "hoard hits: $hits"
           [ "$hits" -gt 0 ] || {
             echo "::error::hoard reported $hits cache hits; expected more than 0"
+            hoard_log
             exit 1
           }
 

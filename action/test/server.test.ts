@@ -25,7 +25,7 @@ const baseSettings: Settings = {
   r2Lifecycle: "auto",
   maxAgeDays: 7,
   maxSize: "5GB",
-  refreshOnHit: false,
+  refreshOnHit: false, // not the default; tests that care set it
   version: "0.0.0-dev",
   warnings: [],
 };
@@ -249,6 +249,7 @@ describe("serveEnv", () => {
       HOARD_R2_ACCOUNT_ID: "acct-123",
       HOARD_R2_ACCESS_KEY_ID: "AKIDSECRETVALUE",
       HOARD_R2_SECRET_ACCESS_KEY: "s3cr3t-value-do-not-print",
+      HOARD_REFRESH_ON_HIT: "false",
     });
   });
 
@@ -260,11 +261,34 @@ describe("serveEnv", () => {
     expect(env).not.toHaveProperty("HOARD_R2_ACCOUNT_ID");
   });
 
-  test("refresh-on-hit is passed as HOARD_REFRESH_ON_HIT; an inherited value is not trusted", () => {
-    const on = serveEnv({ ...baseSettings, refreshOnHit: true }, {});
+  test("refresh-on-hit is passed as HOARD_REFRESH_ON_HIT for r2; an inherited value is not trusted", () => {
+    const r2 = { ...baseSettings, storage: "r2" as const, r2: r2Fixture };
+    const on = serveEnv({ ...r2, refreshOnHit: true }, { HOARD_REFRESH_ON_HIT: "false" });
     expect(on.HOARD_REFRESH_ON_HIT).toBe("true");
-    const off = serveEnv(baseSettings, { HOARD_REFRESH_ON_HIT: "true" });
-    expect(off).not.toHaveProperty("HOARD_REFRESH_ON_HIT");
+    const off = serveEnv({ ...r2, refreshOnHit: false }, { HOARD_REFRESH_ON_HIT: "true" });
+    expect(off.HOARD_REFRESH_ON_HIT).toBe("false");
+  });
+
+  test("refresh-on-hit is not passed for r2 outside read-write, where it does nothing (§7.3)", () => {
+    for (const mode of ["read", "off"] as const) {
+      const env = serveEnv(
+        { ...baseSettings, storage: "r2", r2: r2Fixture, mode, refreshOnHit: true },
+        { HOARD_REFRESH_ON_HIT: "true" },
+      );
+      expect(env).not.toHaveProperty("HOARD_REFRESH_ON_HIT");
+    }
+  });
+
+  test("refresh-on-hit is not passed for github or fs, where it does nothing (§7.3)", () => {
+    for (const storage of ["github", "fs"] as const) {
+      for (const refreshOnHit of [true, false]) {
+        const env = serveEnv(
+          { ...baseSettings, storage, refreshOnHit },
+          { HOARD_REFRESH_ON_HIT: "true" },
+        );
+        expect(env).not.toHaveProperty("HOARD_REFRESH_ON_HIT");
+      }
+    }
   });
 
   test("github storage passes the environment through, without HOARD_TOKEN", () => {

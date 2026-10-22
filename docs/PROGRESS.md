@@ -28,40 +28,36 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-15 · **Milestone 3 reviewed** · whole-branch review 4f28859..99e1034 (0 Critical, 3 Important, 15 Minor) → fix wave 1e158e1..1b7a69d + flaky-test fix f977bfd, re-reviews clean · cargo all green twice in a row (108 unit, 44 vp, 45 r2, 18 write-behind …); 150 MB stream OK; action 157/157 incl. real binary; dist 159 KB fresh; actionlint clean; bench 6/6; e2e fs + r2 PASS; no openssl
 - 2026-10-15 · Naming decided by the owner: `keelstackhq/hoard` (README, spec, plan updated; npm scope `@keelstack` of the private action package unchanged)
 - 2026-10-15 · 01-core-r2 CI + 02-github-action/Task 5 Step 2 (first runs on GitHub, PR keelstackhq/hoard#1) · 82a2472 (fix for the `fetch_update` deprecation on Rust 1.99) · ci run 38691600578: `rust`, `e2e`, `action` green; self-test run 38691600620: all 12 jobs green — every `hit` job passed its `FULL TURBO` and `hits > 0` checks on Linux x64/arm64, macOS, Windows (GitHub cache) and Linux (real R2 bucket, `r2-lifecycle: auto` started without error); `vp hit` restored the task cache and logged `vp run: cache hit`
+- 2026-10-21 · 02-github-action/Task 2 Step 3 (release dry run) · release run 39659790600 (attempt 2; attempt 1's two macOS jobs got no runner and were cancelled after 15 min, nothing published) · five `hoard-<target>.tar.gz` assets on draft pre-release v0.0.0-test; `sha256sum` of each equals `action/src/checksums.generated.ts` in `chore(release): v0.0.0-test` (c5f9775); x86_64 musl binary is static and prints `hoard 0.0.0-test`; no `v0` tag created · cleanup of release, tag and branch needs the owner (see Blocked)
+- 2026-10-21 · 03-vite-plus-throughput/Task 4 Steps 2–3 (rate-limit bench + packing decision) · runs 39659795765 (100), 39662254202 (400), 39664353368 (1000) · 100: throttled 0; 400: throttled 1, rate_limited 22, warm hits 378/400; 1000: throttled 0 (slower build, ~146 uploads/min) → **packing needed**, recorded in spec §12; results in `docs/benchmarks/2026-10-rate-limit.md` · packing spec section + plan not written yet
+- 2026-10-22 · **0.1.0 released** · release run 39749863566 → `chore(release): v0.1.0` (5c32424), tags `v0.1.0` and `v0` on it · release v0.1.0 (stable) has the five `hoard-<target>.tar.gz`, their digests equal `checksums.generated.ts` (`VERSION = "0.1.0"`); x86_64 musl binary is static and prints `hoard 0.1.0` · docs pin `@v0` (0.x); 1.0 and `v1` wait for packing; self-test gains a `release` variant (published binary)
+- 2026-10-22 · real-R2 owner checks (01-core-r2/Task 8, 03-vite-plus-throughput/Task 3 Step 1) · new `.github/workflows/r2-checks.yml`, run 39752184290 on the repository's R2 bucket · `hoard doctor`: `✓ lifecycle rule hoard-cache- (7 days)` (verify requires the 1-day multipart abort) and `✓ bucket read/write`; immutable >8 MiB: one 20 MiB key PUT twice in a row and another PUT twice in parallel, all 200, GET returns the first / one complete body, stats `puts 2, put_skipped_existing 2, put_errors 0` (the parallel loser was refused by R2's conditional create, so R2 honours If-None-Match on CompleteMultipartUpload); `refresh_real_r2` passes: self-copy moves last_modified forward (…826 → …829), so CopyObject refresh resets the object's age on R2
+
+- 2026-10-22 · ci: `ci-ok` aggregate job (PR keelstackhq/hoard#5, merged) · 2ecc3ac · actionlint clean; ci run green incl. ci-ok
+- 2026-10-22 · 04-packing/design · ae72a62, c50fcb3 · spec §6.5 + plan; opus design review (3 Critical, 6 Important) folded in, decisions recorded in the plan
+- 2026-10-22 · 04-packing/Task 1 shared Twirp client + Range reads · 8bb6c1d · 8 gha_twirp + 44 vp pass
+- 2026-10-22 · 04-packing/Task 2 pack setting, envelope hash, packs stat · 55cf151 · 113 unit pass
+- 2026-10-22 · 04-packing/Task 3 pack index · 4e5db71 · 123 unit pass (10 index)
+- 2026-10-22 · 04-packing/Task 4 pack backend + Range reads · 6cd654d · 20 pack tests (fs + GitHub mock)
+- 2026-10-22 · 04-packing/Task 5 pack writer + shutdown index merge · 319e658 · 34 pack tests, 3× no flakes
+- 2026-10-22 · 04-packing/Task 6 server wiring · 6251b7a · 4 http_pack; e2e fs, fs+PACK=on, r2 PASS
+- 2026-10-22 · 04-packing/Task 7 bench + docs · 09e962f, 91141ea; whole-branch review fixes 2303f84; diagnostics f1e1f41 · cargo all green (37 pack); CI + self-test (10 legs on the GitHub cache) green
+- 2026-10-22 · 04-packing/Task 8 bench with packing · runs 39755912769 (400), 39756606113 (1000) · 400 and 1000: 1 pack, throttled 0, rate_limited 0, put_errors 0, warm hits 400/400 and 1000/1000 → goal met
+- 2026-10-22 · **0.2.0 prepared** · `Cargo.toml` and `Cargo.lock` at 0.2.0 · 0.2.0 ships packing (spec §6.5, PR keelstackhq/hoard#9) as 0.x so it runs in real use first; `@v0` moves to 0.2.0; 1.0 and `v1` come later
+- 2026-10-22 · **0.2.0 released** · release run 39768777131 → `chore(release): v0.2.0` (cdc7052), tags `v0.2.0` and `v0` on it · release v0.2.0 (stable) has the five `hoard-<target>.tar.gz`, their digests equal `checksums.generated.ts` (`VERSION = "0.2.0"`); x86_64 musl binary is static and prints `hoard 0.2.0`; action lint + 156 tests pass on cdc7052, dist rebuild identical (164 KB) · self-test run 39773285100 on cdc7052: 20/20 green incl. the four `release` legs (published binary, FULL TURBO)
+- 2026-10-22 · refresh-on-hit on by default (owner: "refresh-on-hit: yes") · spec §7.3 · tri-state flag (unset = on for r2 read-write, silent no-op for github/fs/read), `--refresh-on-hit=false` / `HOARD_REFRESH_ON_HIT=false` / input `false` turns it off; action passes it only for r2 read-write; new stat `refresh_errors` + summary `Refresh errors: N`; write budget unchanged (≤1 copy per object per run, only when older than max-age-days / 2) · 128 unit pass, cargo test green with MinIO, action lint + 160 tests, dist 156 KB, e2e fs, fs+PACK=on and r2 PASS
 - 2026-10-22 · fix: `vp save`'s empty-cache line names the directory and says only `vp run` tasks are cached (keelstackhq/example-app#12: hull repos call `vp build/test` under turbo, so the task cache is empty by design) · cargo vp 44/44, fmt + clippy clean
 
 ## Blocked
 
 <!-- Task, what is missing, exact action a human must take. -->
 
-- **01-core-r2/Task 8 — real R2 lifecycle check.** MinIO silently drops `AbortIncompleteMultipartUpload`, so the
-  1-day abort clause is only tested through a verbatim proxy. Action: with a real R2 bucket and an R2 token with
-  *Admin Read & Write*, run `HOARD_R2_ACCESS_KEY_ID=… HOARD_R2_SECRET_ACCESS_KEY=… hoard serve --storage r2
-  --r2-account-id <id> --r2-bucket <bucket>` once, stop it, then `hoard doctor --storage r2 --r2-account-id <id>
-  --r2-bucket <bucket>` — it must print `✓ lifecycle rule hoard-cache- (7 days)`. If it says the rule differs, report
-  the output of `npx wrangler r2 bucket lifecycle list <bucket>`.
-  Partial evidence (2026-10-15): the self-test R2 leg ran against the repository's real bucket with
-  `r2-lifecycle: auto` and hoard started, so the rule was applied or already present; the `doctor` check of the
-  exact rule (including the 1-day abort) is still open.
-  In the same session, check immutable keys for large artifacts on R2: run `STORAGE=r2 tests/e2e/turbo.sh` is not
-  enough (MinIO); instead PUT the same >8 MiB artifact twice through `hoard serve --storage r2` (e.g. two parallel
-  `curl -X PUT --data-binary @big.bin` against `/v8/artifacts/abc`) and confirm the object is unchanged
-  (`If-None-Match: *` on CompleteMultipartUpload must be honoured by R2).
-- **02-github-action/Task 2 Step 3 — release dry run on GitHub.** The action `build` script now exists. Action: on a branch, set `version = "0.0.0-test"` in Cargo.toml (`cargo update -p keel-hoard`), push,
-  then `gh workflow run release.yml --ref <branch> -f version=0.0.0-test -f draft=true`. Check: five
-  `hoard-<target>.tar.gz` assets on the draft release; the `chore(release): v0.0.0-test` commit's
-  `action/src/checksums.generated.ts` lists the same five SHA-256 values as `sha256sum` of the assets; `v0` was NOT
-  moved. Afterwards delete the draft release, the `v0.0.0-test` tag and the branch (see docs/RELEASING.md).
-- **03-vite-plus-throughput/Task 3 Step 1 — does R2 reset an object's age on self-copy?** Refresh-on-hit uses
-  CopyObject onto itself (MinIO: yes). Action: with a test R2 bucket and token, run
-  `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=…
-  HOARD_TEST_R2_BUCKET=… cargo test --test r2 -- --ignored refresh_real_r2`. If it fails, tell me: refresh then
-  switches to a re-PUT of the same envelope and spec §7.3 records it. Until then refresh-on-hit stays off by default.
-- **03-vite-plus-throughput/Task 4 Steps 2–3 — run the rate-limit benchmark and decide on packing.** Action: in the
-  Actions tab run *bench* three times with `packages` = 100, 400 and 1000 (write-behind `auto`), copy the table from
-  each run's summary into `docs/benchmarks/2026-10-rate-limit.md` (template in docs/benchmarks/README.md). Rule: if
-  `throttled > 0` at ≤ 400 packages, packing is needed (tell me and I will write the spec section and plan);
-  otherwise add "packing not needed (bench 2026-10)" to spec §12.
+- ~~**Packing (spec §12) — design and plan.**~~ Done 2026-10-22 (spec §6.5, plan 04-packing, PR keelstackhq/hoard#9).
+- **Intermittent miss seen once in self-test (2026-10-22).** On PR #9 head 91141ea one of ten GitHub-cache `hit` legs
+  missed one of two packed artifacts; its re-run and every later run passed. Cause unknown; hoard now logs index
+  loads/writes and the self-test prints the hoard log on a failed check. Action: if it recurs, the log of that job
+  shows why — send it to an agent.
+- **Required check (owner).** Add `ci-ok` as the required status check in main's branch protection.
 
 ## Status
 
@@ -131,20 +127,18 @@ curl -s -X POST -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/shutd
 ./target/release/hoard vp restore --storage fs  # in a fresh checkout, after `pnpm install`
 ```
 
-In CI, once a release exists: `- uses: keelstackhq/hoard@v1`. The README
+In CI: `- uses: keelstackhq/hoard@v0`. The README
 lists every input and output.
 
 ### Blocked items for you, in a sensible order
 
 1. ~~**CI**~~ and ~~**self-test on real runners**~~: green on PR keelstackhq/hoard#1 (2026-10-15).
-2. **Release dry run:** `release.yml` with `0.0.0-test`, `draft=true`.
-3. **Real R2 checks:**
-   - the lifecycle rule with `hoard doctor`;
-   - immutable >8 MiB artifacts;
-   - `refresh_real_r2`, which decides whether self-copy resets the object's age.
-4. **Benchmark:** run `bench.yml` with 100, 400 and 1000 packages, then apply the packing decision (rule above).
+2. ~~**Release dry run**~~: passed 2026-10-21; the owner removed the leftovers.
+3. ~~**Real R2 checks**~~: all pass (2026-10-22, `r2-checks.yml`). Self-copy resets the age on R2, so
+   refresh-on-hit works as built; you chose to turn it on by default (2026-10-22, spec §7.3).
+4. ~~**Benchmark**~~: done 2026-10-21, packing needed; its spec section and plan are open (Blocked).
 
-After that, cut the first real release (`docs/RELEASING.md`).
+~~First real release~~: 0.1.0 released 2026-10-22 (`@v0`). 0.2.0 released 2026-10-22 with packing (`@v0`); 1.0 / `@v1` waits for packing to run in real use.
 
 ### Known limits and decisions to revisit
 

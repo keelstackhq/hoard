@@ -1,5 +1,5 @@
 //! A small client for the GitHub Actions cache service v2 (Twirp, JSON) and the Azure blob
-//! URLs it hands out, used for Vite+ archives on `storage=github`.
+//! URLs it hands out, used for Vite+ archives and packs on `storage=github`.
 //!
 //! Save: `CreateCacheEntry` → Put Block (32 MiB blocks) + Put Block List on the signed upload
 //! URL → `FinalizeCacheEntryUpload`. Restore: `GetCacheEntryDownloadURL` with `restore_keys`
@@ -67,6 +67,14 @@ fn http(what: &'static str) -> impl FnOnce(reqwest::Error) -> GhaError {
 /// Save and restore must agree on it; entries of other versions are invisible.
 pub fn vp_version(cache_version: &str) -> String {
     sha2::Sha256::digest(format!("hoard-vp-{cache_version}").as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The cache entry version for packs: SHA-256 (hex) of `hoard-pack-{cache_version}`.
+pub fn pack_version(cache_version: &str) -> String {
+    sha2::Sha256::digest(format!("hoard-pack-{cache_version}").as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
@@ -364,6 +372,50 @@ impl GhaTwirp {
             .bytes_stream()
             .map_err(|e| std::io::Error::other(e.without_url()));
         Ok((len, body))
+    }
+
+    /// A streaming GET of `len` bytes at `offset` of a signed download URL. Requires `206
+    /// Partial Content`: a `200` means the server ignored `Range` and is a protocol error.
+    pub async fn download_range(
+        &self,
+        url: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + Send + use<>, GhaError> {
+        let what = "range download";
+        let end =
+            offset
+                .checked_add(len)
+                .filter(|_| len > 0)
+                .ok_or_else(|| GhaError::Protocol {
+                    what,
+                    msg: format!("invalid range: offset {offset}, length {len}"),
+                })?
+                - 1;
+        let resp = self
+            .client
+            .get(url)
+            .header("x-ms-version", AZURE_VERSION)
+            .header("range", format!("bytes={offset}-{end}"))
+            .send()
+            .await
+            .map_err(http(what))?;
+        if resp.status().as_u16() == 200 {
+            return Err(GhaError::Protocol {
+                what,
+                msg: "the server ignored the Range header (HTTP 200)".into(),
+            });
+        }
+        blob_status(what, resp.status())?;
+        if resp.status().as_u16() != 206 {
+            return Err(GhaError::Status {
+                what,
+                status: resp.status().as_u16(),
+            });
+        }
+        Ok(resp
+            .bytes_stream()
+            .map_err(|e| std::io::Error::other(e.without_url())))
     }
 }
 

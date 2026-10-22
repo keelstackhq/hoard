@@ -61,6 +61,7 @@ fn header(size: u64) -> hoard::envelope::Header {
         duration_ms: None,
         tag: None,
         size,
+        hash: None,
     }
 }
 

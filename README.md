@@ -5,8 +5,8 @@ server to host. Artifacts go to the GitHub Actions cache (default, zero config) 
 Cloudflare R2 bucket. Part of [keelstackhq](https://github.com/keelstackhq): tools for
 bootstrapping projects.
 
-> **Not released yet.** `keelstackhq/hoard@v1` works once the first release is published. Until
-> then, the snippets below do not resolve.
+> hoard is 0.x: pin `@v0`. 1.0 (and the `@v1` tag) waits for artifact packing, which keeps large
+> monorepos under the GitHub cache upload rate limit.
 
 ## Quick start
 
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
-      - uses: keelstackhq/hoard@v1        # starts the cache, exports TURBO_API/TURBO_TOKEN/TURBO_TEAM
+      - uses: keelstackhq/hoard@v0        # starts the cache, exports TURBO_API/TURBO_TOKEN/TURBO_TEAM
       - run: pnpm turbo run build test lint
 ```
 
@@ -55,7 +55,7 @@ What the step does:
 The cache never fails your build. If storage is down or slow, a read is a miss and an upload is
 skipped (with a warning, so a broken cache does not look like a cold one).
 
-Pin a release tag (`@v1` or `@v1.2.3`), not `@main` or a commit: each action release can only
+Pin a release tag (`@v0` or `@v0.2.0`), not `@main` or a commit: each action release can only
 run the hoard binary of that same release.
 
 ## Choose a storage
@@ -99,7 +99,7 @@ quick start, so pull requests start warm.
 ### 3. Use them in the workflow
 
 ```yaml
-- uses: keelstackhq/hoard@v1
+- uses: keelstackhq/hoard@v0
   with:
     storage: r2
     r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
@@ -119,8 +119,8 @@ The job summary then shows `Storage: r2 (my-team-cache/cache/) · Lifecycle: 7 d
 - **Size cap.** At the end of a job, at most once a day, hoard deletes the oldest objects until
   the prefix fits in `max-size` (default 5 GB). Do not nest prefixes in one bucket (`cache/` and
   `cache/team/`): the outer prefix's size cap would delete the inner one's objects.
-- **Optional `refresh-on-hit: true`.** Renews objects that are still being read, so the lifecycle
-  rule does not expire artifacts in use.
+- **Refresh-on-hit (on by default).** Renews objects that are still being read, so the lifecycle
+  rule does not expire artifacts in use. Set `refresh-on-hit: false` to turn it off.
 
 ### Sign artifacts
 
@@ -173,7 +173,7 @@ drop the restored cache.
 - uses: actions/setup-node@v5
   with: { node-version: 24, cache: pnpm }
 - run: pnpm install --frozen-lockfile
-- uses: keelstackhq/hoard@v1     # after the install: restores node_modules/.vite/task-cache
+- uses: keelstackhq/hoard@v0     # after the install: restores node_modules/.vite/task-cache
 - run: pnpm exec vp run build  # post step saves the task cache
 ```
 
@@ -222,7 +222,7 @@ All inputs are optional. Inputs marked (r2) are used only with `storage: r2`.
 | `r2-lifecycle` | `auto` | `auto` (set the bucket's expiry rule), `verify` (fail if it is missing) or `manual` (r2). |
 | `max-age-days` | `7` | Delete R2 objects this many days after their last write, 1–36500 (r2). |
 | `max-size` | `5GB` | Size cap for the R2 prefix; the oldest objects are pruned above it (r2). |
-| `refresh-on-hit` | `false` | R2 only: reset the age of objects older than `max-age-days / 2` when a cache hit reads them (once per object per run), so artifacts in use never expire. |
+| `refresh-on-hit` | `true` | R2 only: reset the age of objects older than `max-age-days / 2` when a cache hit reads them (once per object per run), so artifacts in use never expire. Does nothing for `github` and `fs`. |
 | `vp-max-size` | `2GB` | Vite+ only: skip saving the task cache when it is larger than this (then run `vp cache clean`). |
 | `version` | empty | hoard binary version. Empty: this action's own release, the only one it can verify. |
 
@@ -249,7 +249,7 @@ jobs:
       hits: ${{ steps.hoard.outputs.hits }}
     steps:
       # … checkout, install …
-      - uses: keelstackhq/hoard@v1
+      - uses: keelstackhq/hoard@v0
         id: hoard
       - run: pnpm turbo run build
   report:
@@ -303,11 +303,19 @@ The full list with defaults is the table in
 off for `r2` and `fs`) answers each PUT once the artifact is spooled to disk and uploads it in
 the background; shutdown waits up to 120 s for the queue.
 
-`--refresh-on-hit` (`HOARD_REFRESH_ON_HIT=true`; R2 only) copies an object onto itself in the
-background when a cache hit reads it and it is older than `max-age-days / 2`, so artifacts in
-use do not expire. It is verified on MinIO; see
-[spec §7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-optional)
-for the one manual check against real R2.
+`--pack auto|on|off` (`HOARD_PACK`, default `auto`: on for `storage=github`, off for `fs`;
+ignored for `r2`) stores Turborepo artifacts as a few large packs plus one index instead of one
+cache entry each, so a job makes about one upload per 128 MiB of new artifacts, however many
+packages it builds. With `pack` on, `write-behind` is not used for Turborepo artifacts. See
+[spec §6.5](docs/superpowers/specs/2026-10-14-hoard-design.md#65-packing-turborepo-artifacts-pack-on).
+
+`--refresh-on-hit[=true|false]` (`HOARD_REFRESH_ON_HIT`; R2 only, on by default with
+`storage=r2` and `mode=read-write`) copies an object onto itself in the background when a cache
+hit reads it and it is older than `max-age-days / 2`, at most once per object per run, so
+artifacts in use do not expire. Turn it off with `--refresh-on-hit=false` or
+`HOARD_REFRESH_ON_HIT=false`. A failed refresh is logged and counted (`Refresh errors` in the
+summary), never fatal. It does nothing for `github` and `fs`. Verified on MinIO and real R2; see
+[spec §7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-on-by-default).
 
 ## Security
 

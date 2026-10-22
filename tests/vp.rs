@@ -410,6 +410,7 @@ async fn failed_extract_leaves_the_old_directory_intact() {
         duration_ms: None,
         tag: None,
         size: junk.len() as u64,
+        hash: None,
     };
     let body = futures::stream::iter([Ok(bytes::Bytes::from(junk))]);
     store.put(key, &header, body).await.unwrap();
@@ -947,7 +948,7 @@ fn binary_respects_mode() {
 async fn gha_archive_larger_than_a_block() {
     let (b, mock) = gha().await;
     let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
-    let data: Vec<u8> = (0..(hoard::vp::gha_twirp::BLOCK_SIZE + 1_000_000))
+    let data: Vec<u8> = (0..(hoard::gha_twirp::BLOCK_SIZE + 1_000_000))
         .map(|_| {
             x ^= x << 13;
             x ^= x >> 7;

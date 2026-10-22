@@ -1,7 +1,8 @@
 # Releasing hoard
 
 Releases are made by `.github/workflows/release.yml` (spec §10). It builds the five targets, bakes
-their SHA-256 checksums into `action/src/checksums.generated.ts`, rebuilds `action/dist/`, commits
+their SHA-256 checksums into `action/src/checksums.generated.ts`, rebuilds `action/dist/`, runs the
+action tests against them (the release push does not trigger CI), commits
 `chore(release): vX.Y.Z`, tags `vX.Y.Z`, creates the GitHub release with the five
 `hoard-<target>.tar.gz` assets, verifies them, and only then moves the major tag `vX`.
 
@@ -27,7 +28,8 @@ accept pushes from `github-actions[bot]`.
 
 ## The major tag `vX`
 
-Users pin the major tag (`uses: <owner>/hoard@v1`). The workflow moves `vX` only for a stable,
+Users pin the major tag (`uses: <owner>/hoard@v0` while hoard is 0.x; a 0.x release moves `v0`,
+1.0 and later move `v1`, `v2`, …). The workflow moves `vX` only for a stable,
 non-draft release, and only forward: if a newer stable `vX.*` tag exists (a backport release), `vX`
 stays where it is.
 

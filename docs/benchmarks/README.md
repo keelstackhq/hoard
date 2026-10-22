@@ -8,8 +8,9 @@ Question (spec §6.4, §12): does a cold build with hundreds of packages hit Git
 ### Run it
 
 1. Actions tab, workflow `bench`, **Run workflow**.
-2. Set `packages` (run 100, 400 and 1000, one run each) and `write-behind` (`auto` is the
-   default behaviour for the GitHub cache; `off` shows the synchronous case).
+2. Set `packages` (run 100, 400 and 1000, one run each), `write-behind` (`auto` is the
+   default behaviour for the GitHub cache; `off` shows the synchronous case) and `pack`
+   (`auto` = packing on for the GitHub cache, spec §6.5; `off` measures per-artifact uploads).
 3. When the run ends, open its summary. The `report` job prints one table row.
 
 What happens: the `cold` job generates the packages (`scripts/bench/generate-monorepo.mjs`:
@@ -27,6 +28,9 @@ Reading the numbers:
   queue and the upload is retried, so `rate_limited` can stay 0; the cost shows up as a long
   `drain` (time uploads kept running after the build; `timeout` if they had not finished after
   900 s) and, if the 120 s shutdown drain runs out, as `put_errors`.
+- With packing, artifacts go up as packs plus an index during hoard's shutdown, so the cold job
+  reads its counters from the `POST /_hoard/shutdown` reply and `drain` is the shutdown time;
+  `packs` is the number of pack uploads (one more upload for the index).
 - `hits` on the warm run should equal `packages`.
 
 ### Record the results
@@ -37,9 +41,9 @@ the template below) and add the run URL and date. Do not round or estimate.
 ```markdown
 # Rate-limit benchmark, October 2026
 
-| packages | write-behind | cold wall (s) | drain (s) | puts | rate_limited | throttled | put_errors | warm wall (s) | hits |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |  |  |  |
+| packages | write-behind | pack | cold wall (s) | drain (s) | puts | packs | rate_limited | throttled | put_errors | warm wall (s) | hits |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |  |  |  |  |  |  |
 
 Runs: <links>
 Decision: packing needed / not needed (see spec §12).
