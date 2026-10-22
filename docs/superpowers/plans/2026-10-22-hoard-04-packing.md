@@ -73,9 +73,9 @@
 
 **Files:** `src/config.rs` (`PackMode { Auto, On, Off }`, flag `--pack`, env `HOARD_PACK`, resolved `Config.pack: bool` = auto→github), `src/envelope.rs` (`Header.hash: Option<String>`, `#[serde(default, skip_serializing_if = "Option::is_none")]`; update every `Header {..}` literal), `src/stats.rs` (`packs` counter + snapshot field), `src/serve.rs` (summary line `Packs: N uploaded` after `Throttled`).
 
-- [ ] Step 1: failing tests — `--pack` auto on github only, `on`/`off` honoured, `HOARD_PACK=off`; envelope round-trips with `hash`, JSON without `hash` decodes to `None` and encodes without the key (existing exact-shape test unchanged); snapshot has `packs`; summary line order.
-- [ ] Step 2–4: FAIL → implement → PASS (whole `cargo test`).
-- [ ] Step 5: commit `feat: pack setting, envelope hash and packs counter`
+- [x] Step 1: failing tests — `--pack` auto on github only, `on`/`off` honoured, `HOARD_PACK=off`; envelope round-trips with `hash`, JSON without `hash` decodes to `None` and encodes without the key (existing exact-shape test unchanged); snapshot has `packs`; summary line order.
+- [x] Step 2–4: FAIL → implement → PASS (whole `cargo test`).
+- [x] Step 5: commit `feat: pack setting, envelope hash and packs counter`
 
 ### Task 3: Pack index model
 

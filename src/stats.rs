@@ -22,6 +22,8 @@ pub struct Stats {
     pub time_saved_ms: AtomicU64,
     /// R2 objects whose age was reset by refresh-on-hit.
     pub refreshed: AtomicU64,
+    /// Packs uploaded (spec §6.5).
+    pub packs: AtomicU64,
 }
 
 /// Point-in-time copy of [`Stats`].
@@ -39,6 +41,7 @@ pub struct StatsSnapshot {
     pub bytes_up: u64,
     pub time_saved_ms: u64,
     pub refreshed: u64,
+    pub packs: u64,
 }
 
 impl Stats {
@@ -57,6 +60,7 @@ impl Stats {
             bytes_up: load(&self.bytes_up),
             time_saved_ms: load(&self.time_saved_ms),
             refreshed: load(&self.refreshed),
+            packs: load(&self.packs),
         }
     }
 }
@@ -186,6 +190,7 @@ mod tests {
         st.time_saved_ms.fetch_add(950, Ordering::Relaxed);
         st.bytes_up.fetch_add(7, Ordering::Relaxed);
         st.refreshed.fetch_add(3, Ordering::Relaxed);
+        st.packs.fetch_add(4, Ordering::Relaxed);
         let snap = st.snapshot();
         assert_eq!(
             snap,
@@ -195,6 +200,7 @@ mod tests {
                 time_saved_ms: 950,
                 bytes_up: 7,
                 refreshed: 3,
+                packs: 4,
                 ..Default::default()
             }
         );
@@ -210,7 +216,8 @@ mod tests {
         assert_eq!(json["hits"], 5);
         assert_eq!(json["put_skipped_existing"], 0);
         assert_eq!(json["throttled"], 0);
-        assert_eq!(json.as_object().unwrap().len(), 12);
+        assert_eq!(json["packs"], 0);
+        assert_eq!(json.as_object().unwrap().len(), 13);
     }
 
     #[test]

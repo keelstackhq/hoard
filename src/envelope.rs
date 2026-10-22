@@ -15,6 +15,9 @@ pub struct Header {
     pub duration_ms: Option<u64>,
     pub tag: Option<String>,
     pub size: u64,
+    /// Artifact hash; only written into envelopes inside a pack (spec §6.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +86,7 @@ mod tests {
             duration_ms: Some(1234),
             tag: Some("c2lnbg==".into()),
             size: 10,
+            hash: None,
         };
         let mut blob = encode_header(&h);
         blob.extend_from_slice(b"0123456789");
@@ -116,6 +120,7 @@ mod tests {
             duration_ms: None,
             tag: None,
             size: 3,
+            hash: None,
         };
         let b = encode_header(&h);
         assert_eq!(
@@ -124,6 +129,26 @@ mod tests {
         );
         let (back, _) = decode_header(&b).unwrap();
         assert_eq!(back, h);
+    }
+
+    #[test]
+    fn hash_roundtrips_and_is_optional() {
+        let h = Header {
+            v: 1,
+            duration_ms: None,
+            tag: None,
+            size: 3,
+            hash: Some("abc123".into()),
+        };
+        let b = encode_header(&h);
+        assert_eq!(
+            &b[8..],
+            br#"{"v":1,"duration_ms":null,"tag":null,"size":3,"hash":"abc123"}"#
+        );
+        assert_eq!(decode_header(&b).unwrap().0, h);
+
+        let old = blob(r#"{"v":1,"duration_ms":null,"tag":null,"size":3}"#);
+        assert_eq!(decode_header(&old).unwrap().0.hash, None);
     }
 
     #[test]

@@ -538,6 +538,9 @@ async fn shutdown_work_within(
     if snapshot.throttled > 0 {
         extra_lines.push(format!("Throttled: {} responses (429)", snapshot.throttled));
     }
+    if snapshot.packs > 0 {
+        extra_lines.push(format!("Packs: {} uploaded", snapshot.packs));
+    }
     if let Some(path) = &cfg.summary_file {
         let md = render_summary(&snapshot, storage_line, &extra_lines);
         if let Err(e) = write_atomic(path, &md, false) {
@@ -681,6 +684,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_reports_packs_after_throttled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.fs_root = dir.path().join("store");
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Store::new(build_operator(&cfg).unwrap());
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+            write_behind: None,
+        };
+        let stats = Stats::default();
+        shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(!md.contains("Packs:"), "{md}");
+
+        stats
+            .throttled
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .packs
+            .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        let snap = shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
+        assert_eq!(snap.packs, 3);
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.ends_with("Throttled: 2 responses (429) · Packs: 3 uploaded\n"),
+            "{md}"
+        );
+    }
+
+    #[tokio::test]
     async fn summary_reports_refreshed_objects() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg =
@@ -778,6 +815,7 @@ mod tests {
             duration_ms: None,
             tag: None,
             size: 3,
+            hash: None,
         };
         let body = futures::stream::iter([Ok(bytes::Bytes::from_static(b"abc"))]);
         wb.enqueue("cache/turbo/v1/ab".into(), header, body)
@@ -846,6 +884,7 @@ mod tests {
             duration_ms: None,
             tag: None,
             size: 3,
+            hash: None,
         };
         let body = futures::stream::iter([Ok(bytes::Bytes::from_static(b"abc"))]);
         wb.enqueue("cache/turbo/v1/ab".into(), header, body)
@@ -909,6 +948,7 @@ mod tests {
             duration_ms: None,
             tag: None,
             size,
+            hash: None,
         }
     }
 

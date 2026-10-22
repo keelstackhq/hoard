@@ -405,6 +405,7 @@ pub async fn vp_save(
                 duration_ms: None,
                 tag: None,
                 size,
+                hash: None,
             };
             let body = file_stream(tokio::fs::File::open(&spool.0).await?);
             store.put(&key, &header, body).await?; // an existing key is success

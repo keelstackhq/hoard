@@ -410,6 +410,7 @@ async fn failed_extract_leaves_the_old_directory_intact() {
         duration_ms: None,
         tag: None,
         size: junk.len() as u64,
+        hash: None,
     };
     let body = futures::stream::iter([Ok(bytes::Bytes::from(junk))]);
     store.put(key, &header, body).await.unwrap();

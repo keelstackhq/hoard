@@ -29,6 +29,15 @@ pub enum WriteBehindMode {
     Off,
 }
 
+/// `pack`: pack Turborepo artifacts into a few large entries plus an index (spec §6.5).
+/// `auto` is on for `storage=github`; ignored (always off) for `r2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PackMode {
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum LifecycleMode {
     Auto,
@@ -175,6 +184,9 @@ pub struct ServeArgs {
     /// Upload PUTs in the background after spooling them to disk (auto: on for github).
     #[arg(long, env = "HOARD_WRITE_BEHIND", value_enum, default_value = "auto")]
     pub write_behind: WriteBehindMode,
+    /// Pack Turborepo artifacts into packs plus an index (auto: on for github; ignored for r2).
+    #[arg(long, env = "HOARD_PACK", value_enum, default_value = "auto")]
+    pub pack: PackMode,
     /// R2 only: on a GET hit, copy objects older than max-age-days / 2 onto themselves so the
     /// lifecycle rule does not expire what is still in use (at most once per object per run).
     #[arg(long, env = "HOARD_REFRESH_ON_HIT", value_parser = clap::builder::BoolishValueParser::new())]
@@ -207,6 +219,7 @@ impl fmt::Debug for ServeArgs {
             .field("max_age_days", &self.max_age_days)
             .field("max_size", &self.max_size)
             .field("write_behind", &self.write_behind)
+            .field("pack", &self.pack)
             .field("refresh_on_hit", &self.refresh_on_hit)
             .finish()
     }
@@ -287,6 +300,8 @@ pub struct Config {
     pub max_size: u64,
     /// PUTs are spooled and uploaded in the background (`write-behind`, `auto` resolved).
     pub write_behind: bool,
+    /// Turborepo artifacts are packed (`pack`, `auto` resolved; always false for `r2`).
+    pub pack: bool,
     /// `refresh-on-hit` as set; only `storage=r2` acts on it.
     pub refresh_on_hit: bool,
 }
@@ -309,6 +324,7 @@ impl fmt::Debug for Config {
             .field("max_age_days", &self.max_age_days)
             .field("max_size", &self.max_size)
             .field("write_behind", &self.write_behind)
+            .field("pack", &self.pack)
             .field("refresh_on_hit", &self.refresh_on_hit)
             .finish()
     }
@@ -391,6 +407,12 @@ impl TryFrom<ServeArgs> for Config {
                 WriteBehindMode::Auto => a.storage == Storage::Github,
                 WriteBehindMode::On => true,
                 WriteBehindMode::Off => false,
+            },
+            pack: match a.pack {
+                _ if a.storage == Storage::R2 => false,
+                PackMode::Auto => a.storage == Storage::Github,
+                PackMode::On => true,
+                PackMode::Off => false,
             },
             refresh_on_hit: a.refresh_on_hit,
         })
@@ -733,6 +755,51 @@ mod tests {
             "--write-behind",
             "auto"
         ]));
+    }
+    #[test]
+    fn pack_auto_is_on_only_for_github() {
+        let parse = |args: &[&str]| {
+            Config::try_from(ServeArgs::parse_from(args.iter().copied()))
+                .unwrap()
+                .pack
+        };
+        assert!(parse(&["serve", "--storage", "github"]));
+        assert!(!parse(&["serve", "--storage", "fs"]));
+        assert!(parse(&["serve", "--storage", "fs", "--pack", "on"]));
+        assert!(!parse(&["serve", "--storage", "github", "--pack", "off"]));
+        assert!(parse(&["serve", "--storage", "github", "--pack", "auto"]));
+    }
+    #[test]
+    fn pack_env_off_and_empty_env_is_unset() {
+        // `HOARD_PACK=off` is read through clap's env support; an empty value is removed by
+        // `drop_empty_hoard_env` before parsing, so it behaves as unset (auto).
+        let keys = empty_hoard_keys([(OsString::from("HOARD_PACK"), OsString::new())]);
+        assert_eq!(keys, vec![OsString::from("HOARD_PACK")]);
+        let a = ServeArgs::try_parse_from(["serve", "--storage", "github"]).unwrap();
+        assert_eq!(a.pack, PackMode::Auto);
+        let off =
+            ServeArgs::try_parse_from(["serve", "--storage", "github", "--pack=off"]).unwrap();
+        assert_eq!(off.pack, PackMode::Off);
+    }
+    #[test]
+    fn pack_is_false_for_r2() {
+        let c = Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "r2",
+            "--r2-account-id",
+            "acct",
+            "--r2-access-key-id",
+            "k",
+            "--r2-secret-access-key",
+            "s",
+            "--r2-bucket",
+            "b",
+            "--pack",
+            "on",
+        ]))
+        .unwrap();
+        assert!(!c.pack);
     }
     #[test]
     fn defaults() {

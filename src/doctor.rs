@@ -73,6 +73,7 @@ async fn round_trip(cfg: &Config, key: &str) -> anyhow::Result<()> {
         duration_ms: None,
         tag: None,
         size: BODY.len() as u64,
+        hash: None,
     };
     let body = futures::stream::iter([Ok(Bytes::from_static(BODY))]);
     if store.put(key, &header, body).await? != PutOutcome::Created {

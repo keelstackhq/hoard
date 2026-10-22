@@ -299,6 +299,12 @@ The full list with defaults is the table in
 off for `r2` and `fs`) answers each PUT once the artifact is spooled to disk and uploads it in
 the background; shutdown waits up to 120 s for the queue.
 
+`--pack auto|on|off` (`HOARD_PACK`, default `auto`: on for `storage=github`, off for `fs`;
+ignored for `r2`) stores Turborepo artifacts as a few large packs plus one index instead of one
+cache entry each, so a job makes about one upload per 128 MiB of new artifacts, however many
+packages it builds. With `pack` on, `write-behind` is not used for Turborepo artifacts. See
+[spec §6.5](docs/superpowers/specs/2026-10-14-hoard-design.md#65-packing-turborepo-artifacts-pack-on).
+
 `--refresh-on-hit` (`HOARD_REFRESH_ON_HIT=true`; R2 only) copies an object onto itself in the
 background when a cache hit reads it and it is older than `max-age-days / 2`, so artifacts in
 use do not expire. It is verified on MinIO; see

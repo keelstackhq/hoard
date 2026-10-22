@@ -112,6 +112,7 @@ mod tests {
             duration_ms: None,
             tag: None,
             size: 1,
+            hash: None,
         };
         assert!(store.put("cache/aa", &h, body).await.is_err());
         assert!(

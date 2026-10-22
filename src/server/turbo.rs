@@ -234,6 +234,7 @@ pub async fn put_artifact(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
         size,
+        hash: None,
     };
     if encode_header(&header).len() > PREFIX_LEN + MAX_HEADER_LEN {
         warn!(%hash, "PUT: artifact headers too large for the envelope, not caching");
