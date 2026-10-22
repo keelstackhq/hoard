@@ -19,34 +19,40 @@
 
 ## Decisions (made without the owner; cost if wrong in brackets)
 
-1. **Packing replaces write-behind for Turborepo artifacts on github** (`pack=auto` → on for github only). Write-behind stays for `pack=off` and r2. [If packs misbehave in the field: `HOARD_PACK=off` restores the old path; no data migration since no release exists yet.]
+1. **Packing replaces write-behind for Turborepo artifacts on github** (`pack=auto` → on for github only). Write-behind stays for `pack=off`, fs and r2. [If packs misbehave in the field: `HOARD_PACK=off` restores the old path; no data migration since no release exists yet.]
 2. **No per-artifact fallback on reads when `pack` is on.** A hash not in the index is a miss without a storage request. Saves one cache-service call per miss (cold builds) and keeps reads simple. [A job with `pack=off` on the same `cache-version` writes entries that `pack=on` jobs do not see; documented.]
 3. **One cumulative index per job, newest wins, merged again at shutdown.** No listing exists on the GitHub cache, so "newest by prefix" is the only discovery. [Two jobs finishing in the same second can drop one's entries; those tasks miss once and are re-packed.]
-4. **Pack target 128 MiB, at most 2 pack uploads in flight; spool cap 2 GB.** A job uploads `ceil(bytes/128 MiB) + 1` entries; the last pack (≤128 MiB) uploads well within the 120 s drain on hosted runners. [Very slow uploads could time out the drain; then that job's last pack is lost (counted `put_errors`).]
-5. **Index caps: 1000 packs, 200,000 entries, decoded ≤ 256 MiB.** Oldest packs are dropped first. Memory stays well under 100 MB. [A repo with >200k distinct live artifacts loses its oldest ones; they rebuild.]
-6. **Envelope header gets an optional `hash`**, written only inside packs and checked on read, so a wrong offset can never serve another task's artifact. Single-object envelopes are unchanged (field omitted).
-7. **Signed pack URLs are resolved lazily, once per pack per server**, and re-resolved once on 401/403 (an expired SAS).
-8. **Index load runs in the background**, readers wait for it at most 30 s after startup; startup and `/_hoard/health` are never delayed.
-9. **`pack=on` works on r2/fs via OpenDAL** (newest index = newest `last_modified`, then key). It is how the packing path is tested locally and in e2e; `auto` keeps r2 unpacked (no rate limit there, and per-object lifecycle is simpler).
-10. **No new action input.** Like `write-behind`, `pack` is set with `HOARD_PACK` in the job env (the action passes the full environment). [If users need it often, add an input later; additive.]
-11. **The bench reads final stats from `POST /_hoard/shutdown`** when packing is on (uploads happen at shutdown); the action's post step then only warns that the server already stopped.
+4. **Index keys carry the branch** (`turbo-index/{v}/{ref}/…`); a job loads its own ref's newest index plus the base ref's (`GITHUB_BASE_REF`), else the newest of any visible ref. Without this a PR, once it has its own index, would never see main's newer artifacts (review I1).
+5. **Pack target 128 MiB, at most 2 pack uploads in flight; spool cap 2 GB.** A job uploads about `ceil(bytes/128 MiB) + 1` entries.
+6. **Shutdown keeps 20 s of the 120 s drain for the index**, and writes an index of the packs that did finish; the index upload ignores the upload pause (tries once, retries once under a new key). Otherwise one late 429 would lose every pack of the job (review C2).
+7. **Pack and index keys are single-use**: `AlreadyExists` is a failure and every retry takes a fresh key, so the index can never point at an unfinalized reservation (review C1).
+8. **Bad entries heal**: a PUT for a hash whose pack is missing or whose read was corrupt is accepted again; corrupt entries and missing packs are dropped at the merge (review C3). A `429`/error on a URL lookup is only a miss, never "missing".
+9. **Index caps: LRU by `last used` per pack**, packs unused for 7 days dropped (GitHub evicts them anyway), then at most 1000 packs / 200,000 entries; decoded ≤ 64 MiB, decoded as a stream (review I2, I4). [A repo with >200k live artifacts loses its least recently used ones; they rebuild.]
+10. **Envelope header gets an optional `hash`**, written only inside packs and checked on read, so a wrong offset can never serve another task's artifact.
+11. **Signed pack URLs are resolved lazily, once per pack per server**, and re-resolved once on 401/403 (an expired SAS).
+12. **Index load runs in the background**; reads and the PUT duplicate check wait for it at most 10 s after startup (Turborepo's request timeout is 30 s; review I5).
+13. **`pack` works on github and fs; ignored on r2** (info line). fs makes the path testable locally and in e2e; R2 has no rate limit, and its lifecycle counts from the last write, which would expire packs in use.
+14. **No new action input.** Like `write-behind`, `pack` is set with `HOARD_PACK` in the job env (the action passes the full environment). [Additive later.]
+15. **The bench reads final stats from `POST /_hoard/shutdown`** when packing is on (uploads happen at shutdown); Task 7 checks the action's post step still writes the summary when the server already stopped.
+16. **Visibility regression accepted and documented**: concurrently running jobs no longer see each other's artifacts before shutdown; `needs:` chains still do (review I6).
+17. **Pack file copy kept** (spool files are copied into one pack file before upload) rather than streaming a concatenation: `upload_blocks` takes a path, and 128 MiB of extra temp disk is cheap.
 
 ## Global Constraints
 
-- Keys: pack `{prefix}turbo-pack/{cache_version}/{run_key}-{n}`, index `{prefix}turbo-index/{cache_version}/{run_key}`; `run_key` from `vp::default_run_key`. GitHub entry version: SHA-256 hex of `hoard-pack-{cache_version}`.
-- Index wire format exactly as spec §6.5 (zstd frame of JSON, `v: 1`, packs `[key, created_ms]` oldest first).
+- Keys: pack `{prefix}turbo-pack/{cache_version}/{run_key}-{n}`, index `{prefix}turbo-index/{cache_version}/{ref}/{run_key}-{m}`; `run_key` from `vp::default_run_key`; `ref`/`base` from `GITHUB_HEAD_REF`/`GITHUB_REF_NAME`/`GITHUB_BASE_REF`, else `local`, sanitised to `[A-Za-z0-9._-]`, ≤ 100 chars. GitHub entry version: SHA-256 hex of `hoard-pack-{cache_version}`.
+- Index wire format exactly as spec §6.5 (zstd frame of JSON, `v: 1`, packs `[key, created_ms, last_used_ms]`).
 - Never fail the build: every pack/index error is a warning + miss / `put_errors`; only bad config fails startup.
 - Stream, don't buffer: artifact bodies are streamed spool→pack file→upload and pack→response; only the index is held in memory (bounded).
 - No URL with `sig=` and no token in any log or error (`without_url()`, `redacted`).
-- Rate gate: pack and index uploads wait while paused; a 429 counts `throttled`, pauses, retries.
+- Rate gate: pack uploads wait while paused; a 429 counts `throttled`, pauses, retries under a new key.
 
 ## Review Focus
 
 1. **Wrong bytes served** — Range offsets off by one, or a stale index → envelope `hash`/`size` check makes it `corrupt` (miss). Test in Task 4.
-2. **Lost artifacts at shutdown** — the last partial pack must be sealed and uploaded before the index is written, and the index must include it. Test in Task 5.
+2. **Lost artifacts at shutdown** — the last partial pack must be sealed and uploaded before the index is written; a PUT still spooling when the drain starts is waited for; a hung pack upload must not prevent the index of the finished ones. Test in Task 5.
 3. **Concurrent jobs** — index B written after A loads: A's shutdown merge keeps B's entries. Test in Task 5.
-4. **Evicted pack** — URL lookup not found → miss, pack marked missing, left out of the next index. Test in Task 4/5.
-5. **Rate limit on a pack upload** — 429 → `throttled`, pause, retry, eventually uploaded. Test in Task 5.
+4. **Evicted pack / corrupt entry** — miss, not re-tried, dropped from the next index, and a PUT of that hash is accepted again. Test in Task 4/5.
+5. **Rate limit on a pack upload** — 429 → `throttled`, pause, retry under a new key, uploaded; the index never names the abandoned key. Test in Task 5.
 6. **Leaks** — no signed URL in logs on errors (mock `MOCKSIG`). Test in Task 1/4.
 
 ---
@@ -79,51 +85,64 @@
 ```rust
 pub struct Loc { pub offset: u64, pub len: u64, pub size: u64, pub duration_ms: Option<u64>, pub tag: Option<String> }
 pub struct Entry { pub pack: Arc<str>, pub loc: Loc }   // returned by lookups (clone)
-pub struct PackIndex { /* packs: Vec<(Arc<str>, u64 created_ms)>, entries: HashMap<String,(usize, Loc)> */ }
+pub struct PackIndex { /* packs: Vec<PackMeta{key: Arc<str>, created_ms, last_used_ms}>, entries: HashMap<String,(usize, Loc)> */ }
 impl PackIndex {
   pub fn get(&self, hash: &str) -> Option<Entry>;
   pub fn contains(&self, hash: &str) -> bool;
   pub fn len(&self) -> usize; pub fn pack_count(&self) -> usize;
   pub fn add_pack(&mut self, key: &str, created_ms: u64, entries: Vec<(String, Loc)>);
-  pub fn merge(&mut self, other: &PackIndex);            // union; for a hash in several packs the newest pack (created, key) wins
+  pub fn merge(&mut self, other: &PackIndex);            // union; newest pack (created, key) wins per hash; last_used = max
+  pub fn touch(&mut self, pack: &str, now_ms: u64);       // last_used = max(last_used, now)
+  pub fn remove_hashes(&mut self, hashes: &HashSet<String>);
   pub fn drop_packs(&mut self, missing: &HashSet<String>);
-  pub fn cap(&mut self, max_packs: usize, max_entries: usize); // drop oldest packs until both hold; also drops packs with no entries
+  pub fn cap(&mut self, now_ms: u64, max_unused: Duration, max_packs: usize, max_entries: usize); // drop packs unused > max_unused, then least recently used until both hold; drops packs with no entries
   pub fn encode(&self) -> Vec<u8>;                         // zstd(JSON), spec §6.5
-  pub fn decode(bytes: &[u8]) -> Result<Self, IndexError>; // ≤ 256 MiB decoded, v == 1, pack # in range
+  pub fn decode(bytes: &[u8]) -> Result<Self, IndexError>; // streaming zstd→serde_json::from_reader over a reader limited to 64 MiB; v == 1, pack # in range
 }
-pub const MAX_PACKS: usize = 1000; pub const MAX_ENTRIES: usize = 200_000;
+pub const MAX_PACKS: usize = 1000; pub const MAX_ENTRIES: usize = 200_000; pub const MAX_UNUSED: Duration = 7 days; pub const MAX_DECODED: u64 = 64 << 20;
 ```
-- [ ] Step 1: failing unit tests — encode/decode round-trip; exact JSON shape of a one-entry index (decompress and compare); merge newest-wins regardless of argument order; drop_packs removes entries and renumbers; cap drops oldest first; decode rejects garbage, `v:2`, out-of-range pack #, oversize (use a zstd bomb of zeros > cap).
+- [ ] Step 1: failing unit tests — encode/decode round-trip; exact JSON shape of a one-entry index (decompress and compare); merge newest-wins regardless of argument order, last_used = max; drop_packs/remove_hashes remove entries and renumber; cap drops unused-for-7-days packs, then least recently used; decode rejects garbage, `v:2`, out-of-range pack #, oversize (use a zstd bomb of zeros > cap).
 - [ ] Step 2–4. Step 5: commit `feat: pack index`
 
 ### Task 4: Pack backend and read path
 
-**Files:** Create `src/pack/backend.rs`, `src/pack/reader.rs`. Test: `tests/pack.rs` (fs + gha mock; MinIO when `HOARD_TEST_S3_ENDPOINT` is set).
+**Files:** Create `src/pack/backend.rs`, `src/pack/names.rs` (ref/base/key helpers), `src/pack/reader.rs`. Test: `tests/pack.rs` (fs + gha mock).
 
 **Interfaces (produces):**
 ```rust
-pub enum PackBackend { Store(opendal::Operator), Github { client: GhaTwirp, version: String, urls: Mutex<HashMap<String, String>> } }
-pub enum PackError { RateLimited { retry_after: Option<Duration> }, Other(String /* redacted, no URL */) }
-pub enum Uploaded { Created(u64), AlreadyExists }
-impl PackBackend {
-  pub fn from_config(cfg: &Config) -> anyhow::Result<Self>;            // github → GhaTwirp::from_env; r2/fs → store::build_operator
-  pub async fn newest(&self, prefix: &str, max_bytes: u64) -> Result<Option<(String, Vec<u8>)>, PackError>;
-  pub async fn upload(&self, key: &str, path: &Path) -> Result<Uploaded, PackError>;  // if-not-exists; github: create/upload_blocks/finalize
-  pub async fn read_range(&self, key: &str, offset: u64, len: u64) -> Result<Option<BodyStream>, PackError>; // None = pack not found
+// names.rs
+pub fn ref_segment(raw: &str) -> String;                       // [A-Za-z0-9._-], others → '_', ≤ 100 chars, empty → "_"
+pub struct PackNames { prefix, cache_version, run_key, ref_: String, base: Option<String> }
+impl PackNames {
+  pub fn from_env(prefix, cache_version, lookup: impl Fn(&str)->Option<String>) -> Self; // GITHUB_HEAD_REF > GITHUB_REF_NAME > "local"; GITHUB_BASE_REF; run_key = vp::default_run_key
+  pub fn pack_key(&self, n: u64) -> String; pub fn index_key(&self, m: u64) -> String;
+  pub fn index_prefixes(&self) -> (String /*ref*/, Option<String> /*base*/, String /*any*/);
 }
-pub struct PackReader { /* backend, index: watch/OnceCell<PackIndex>, deadline, missing: Mutex<HashSet<String>> */ }
+// backend.rs
+pub enum PackBackend { Store(opendal::Operator), Github { client: GhaTwirp, version: String, urls: Mutex<HashMap<String, String>> } }
+pub enum PackError { RateLimited { retry_after: Option<Duration> }, Exists, Other(String /* redacted, no URL */) }
+impl PackBackend {
+  pub fn from_config(cfg: &Config) -> anyhow::Result<Self>;   // github → GhaTwirp::from_env; fs → store::build_operator
+  pub async fn newest(&self, prefix: &str, max_bytes: u64) -> Result<Option<(String, Vec<u8>)>, PackError>; // compressed bytes ≤ max_bytes
+  pub async fn upload(&self, key: &str, path: &Path) -> Result<u64, PackError>;  // if-not-exists; existing key → Err(Exists); github: create/upload_blocks/finalize
+  pub async fn read_range(&self, key: &str, offset: u64, len: u64) -> Result<Option<BodyStream>, PackError>; // Ok(None) only when the pack is reported not found
+}
+// reader.rs
+pub struct PackReader { /* backend, names, index: tokio::sync::OnceCell / watch<Option<PackIndex>>, deadline: Instant, missing, corrupt: Mutex<HashSet<String>>, touched: Mutex<HashMap<String,u64>> */ }
 pub enum PackGet { Hit(Header, BodyStream), Miss, Corrupt }
 impl PackReader {
-  pub fn start(backend: Arc<PackBackend>, index_prefix: String, load: bool, wait: Duration) -> Arc<Self>; // spawns the load
-  pub async fn lookup(&self, hash: &str) -> Option<Entry>;   // waits for the load (≤ wait); None if pack missing
-  pub async fn get(&self, hash: &str) -> Result<PackGet, PackError>; // Range read; checks envelope hash+size; not found → mark missing, Miss
-  pub async fn loaded(&self) -> PackIndex;  // snapshot for the writer's merge
-  pub fn missing(&self) -> HashSet<String>;
+  pub fn start(backend: Arc<PackBackend>, names: Arc<PackNames>, load: bool, wait: Duration) -> Arc<Self>; // spawns the load
+  pub async fn load_newest(backend: &PackBackend, names: &PackNames) -> PackIndex; // ref + base, else any; merged; errors → warning + empty (also used by the writer's shutdown merge)
+  pub async fn wait_loaded(&self);
+  pub async fn lookup(&self, hash: &str) -> Option<Entry>;  // waits (≤ deadline); None if pack missing or hash corrupt
+  pub async fn get(&self, hash: &str) -> PackGet;           // Range read; checks envelope hash+size; not found → mark missing; other errors → Miss (warn)
+  pub async fn loaded(&self) -> PackIndex;                  // snapshot incl. last_used touches
+  pub fn missing(&self) -> HashSet<String>; pub fn corrupt(&self) -> HashSet<String>;
 }
 ```
 Header parsing from the range stream: reuse the store's prefix-decoding helper if one exists (`store.rs` `open`), else factor one out (`envelope::read_header(stream) -> (Header, rest)`), bounded to 4104 bytes.
 
-- [ ] Step 1: failing tests — fs: write a pack file + index by hand (via `PackIndex`), `PackReader` finds hash, `get` streams exact body; `newest` picks the newer of two indexes; an entry whose offset points at another envelope → `Corrupt`; deleted pack → `Miss` and `missing()` contains it, second lookup is `None` without a storage call; gha mock: same round trip, URL resolved once for two GETs from one pack, 403 once → re-resolved; load timeout → empty index; no `MOCKSIG` in any error string.
+- [ ] Step 1: failing tests — names: ref precedence, sanitising, prefixes end with `/`; fs: write a pack file + index by hand (via `PackIndex`), `PackReader` finds hash, `get` streams exact body; `newest` picks the newer of two indexes; ref + base indexes are merged, "any" used only when both are absent; an entry whose offset points at another envelope → `Corrupt`, hash in `corrupt()`, next lookup `None`; deleted pack → `Miss`, `missing()` contains it, second lookup is `None` without a storage call; upload to an existing key → `Exists`; gha mock: same round trip, URL resolved once for two GETs from one pack, 403 once → re-resolved, 429 on lookup → `Miss` but not missing; load slower than the wait → empty index; no `MOCKSIG` in any error string.
 - [ ] Step 2–4. Step 5: commit `feat: pack backend and Range reads`
 
 ### Task 5: Pack writer, drain and index write
@@ -132,24 +151,28 @@ Header parsing from the range stream: reuse the store's prefix-decoding helper i
 
 **Interfaces (produces):**
 ```rust
-pub struct PackWriter { /* backend, reader, stats, gate, spool_dir, keys (prefix, cache_version, run_key), state: Mutex<{accepted: HashSet, unsealed: Vec<Spooled>, unsealed_bytes, spooled_bytes, closed, seq}>, uploads: JoinSet, new_index: Mutex<PackIndex> */ }
+pub struct PackWriter { /* backend, reader, names, stats, gate, spool_dir, state: Mutex<{accepted: HashSet, unsealed: Vec<Spooled>, unsealed_bytes, spooled_bytes, closed, seq_pack, seq_index}>, spooling: watch<u64>, uploads: Mutex<JoinSet>, new_index: Mutex<PackIndex> */ }
 pub enum Accepted<S> { Spooled, Duplicate, NotCached(&'static str) }
 pub struct PackDrain { pub packs: u64, pub dropped: u64, pub index_written: bool }
 impl PackWriter {
-  pub fn new(backend, reader: Arc<PackReader>, stats, gate, spool_dir, prefix, cache_version, run_key) -> Self;
+  pub fn new(backend, reader: Arc<PackReader>, names: Arc<PackNames>, stats, gate, spool_dir) -> Self;
   pub fn with_target(self, bytes: u64) -> Self; pub fn with_spool_cap(self, bytes: u64) -> Self; // tests
   pub async fn put(&self, hash: &str, header: Header, body: S) -> io::Result<Accepted<S>>;
-  pub async fn drain(&self, timeout: Duration) -> PackDrain;  // seal rest, wait uploads, merge + write index, remove spool dir
+  pub async fn drain(&self, timeout: Duration) -> PackDrain;  // see below
 }
 ```
-Behaviour exactly as spec §6.5: duplicate if in reader's index or accepted; spool with `ExactLength`; seal at target into `pack-<n>` (write `encode_header(header with hash)` + body per item, record offsets, delete spool files); upload task waits on the gate, 429 → `throttled` + pause + retry, other error → `put_errors += items`; success → `puts += items`, `bytes_up += Σsize`, `packs += 1`, entries added to `new_index`. Drain: close, seal, await uploads (abort + count dropped on timeout), if `new_index` non-empty or reader has missing packs: `newest` again → merge(loaded, newest, new) → drop missing → cap → upload `turbo-index/{v}/{run_key}` (gate-aware).
+Behaviour exactly as spec §6.5:
+- `put`: wait for the reader's load; Duplicate if accepted, or `reader.lookup(hash)` is Some (lookup already excludes missing packs / corrupt hashes); NotCached when closed or over the spool cap (one warning); spool with `ExactLength` (count in `spooling` while writing); push to `unsealed`; if `unsealed_bytes >= target` take the list out under the lock and seal outside it.
+- seal: write `pack-<n>` (per item `encode_header(header with hash)` + body from the spool file, record offset/len), delete spool files, spawn the upload task (≤ 2 concurrent via semaphore).
+- upload task: wait on the gate; `upload(names.pack_key(next n))`; 429 → `throttled`, `gate.on_rate_limited`, retry with a new n; `Exists`/other error → `put_errors += items` (warn); success → `puts += items`, `bytes_up += Σsize`, `packs += 1`, `new_index.add_pack(...)`. Pack file deleted afterwards.
+- drain(timeout): `closed = true`; wait for `spooling == 0`; seal the rest; wait for uploads until `timeout - 20 s` (min 0), abort the rest and count their items as `dropped` + `put_errors`; if `new_index` non-empty or reader has missing/corrupt: `idx = load_newest()`, merge reader.loaded(), merge new_index, drop missing, remove corrupt, cap(now, 7 days, 1000, 200k), encode, write to a temp file, `upload(index_key(m))` ignoring the gate, on failure one retry with m+1 (429 counts `throttled`); if the index fails, warn and add the new packs' items to `put_errors` (subtracting from `puts`? no: count as put_errors only; keep `puts` = uploaded); remove the spool dir.
 
-- [ ] Step 1: failing tests (fs backend, small target e.g. 1 KiB) — 3 PUTs below target → no upload before drain, one pack + one index after, a fresh reader sees all 3; PUTs over target → 2 packs; duplicate hash → `Duplicate`; drain with nothing new and nothing missing → no index written; concurrent index written by "another job" between load and drain is merged; mock 429 on first pack upload (gha mock `fail_with(429)` once) → `throttled == 1`, still uploaded; failing backend → `put_errors == n`, no index entry for them; spool cap → `NotCached`; drain timeout with a hung upload → dropped counted.
+- [ ] Step 1: failing tests (fs backend, small target e.g. 1 KiB) — 3 PUTs below target → no upload before drain, one pack + one index after, a fresh reader sees all 3; PUTs over target → 2 packs; duplicate hash → `Duplicate`; hash whose pack is missing → accepted again; drain with nothing new and nothing missing → no index written; index written by "another job" between load and drain is merged; gha mock 429 on the first pack's CreateCacheEntry (one-shot) → `throttled == 1`, uploaded under key `-2`, index names only `-2`; failing backend → `put_errors == n`, no index entry for them; spool cap → `NotCached`; a hung pack upload (gated mock / slow layer) with drain timeout 25 s… (use a test-only `with_index_reserve(Duration)` so tests run fast) → its items dropped, the finished pack is still in the written index; a PUT still spooling when drain starts is included.
 - [ ] Step 2–4. Step 5: commit `feat: pack writer with shutdown index merge`
 
 ### Task 6: Wire packing into the server
 
-**Files:** `src/server/mod.rs` (`AppState.packs: Option<Arc<Packs>>` where `Packs { reader, writer: Option<PackWriter> }`), `src/server/turbo.rs` (HEAD/GET/query/PUT branch on `packs`), `src/serve.rs` (start: `pack` on and mode ≠ off → backend + reader (load unless `no_reads`) + writer when read-write; write-behind not started; shutdown: drain packs before prune; summary `Packs: N uploaded`; info line on start). Test: `tests/http.rs` (pack on fs), `tests/e2e/turbo.sh` (`PACK=on`), `.github/workflows/ci.yml` (one more e2e step with `PACK=on`).
+**Files:** `src/server/mod.rs` (`AppState.packs: Option<Arc<Packs>>` where `Packs { reader, writer: Option<PackWriter> }`), `src/server/turbo.rs` (HEAD/GET/query/PUT branch on `packs`), `src/serve.rs` (start: `pack` on, storage ≠ r2 (info line otherwise) and mode ≠ off → backend + names + reader (load unless `no_reads`) + writer when read-write; write-behind not started; shutdown: drain packs before prune; summary `Packs: N uploaded`; info line on start). Test: `tests/http.rs` (pack on fs), `tests/e2e/turbo.sh` (`PACK=on`), `.github/workflows/ci.yml` (one more e2e step with `PACK=on`).
 
 - [ ] Step 1: failing tests — HTTP on fs with pack on: PUT 3 → GET misses before shutdown; shutdown; new server on same root → HEAD 200 with headers, GET body equal, batch query lists all; `mode=read` server reads packs, PUT 403; `no-reads` → misses; second job adds 1 artifact → index has 4; stats `puts`, `packs`; e2e `PACK=on tests/e2e/turbo.sh` second run FULL TURBO.
 - [ ] Step 2–4 (run e2e fs, fs+PACK=on, r2). Step 5: commit `feat: serve Turborepo artifacts from packs`
