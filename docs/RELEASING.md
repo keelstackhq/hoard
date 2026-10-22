@@ -1,7 +1,8 @@
 # Releasing hoard
 
 Releases are made by `.github/workflows/release.yml` (spec §10). It builds the five targets, bakes
-their SHA-256 checksums into `action/src/checksums.generated.ts`, rebuilds `action/dist/`, commits
+their SHA-256 checksums into `action/src/checksums.generated.ts`, rebuilds `action/dist/`, runs the
+action tests against them (the release push does not trigger CI), commits
 `chore(release): vX.Y.Z`, tags `vX.Y.Z`, creates the GitHub release with the five
 `hoard-<target>.tar.gz` assets, verifies them, and only then moves the major tag `vX`.
 
