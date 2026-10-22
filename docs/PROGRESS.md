@@ -31,29 +31,12 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-21 · 02-github-action/Task 2 Step 3 (release dry run) · release run 39659790600 (attempt 2; attempt 1's two macOS jobs got no runner and were cancelled after 15 min, nothing published) · five `hoard-<target>.tar.gz` assets on draft pre-release v0.0.0-test; `sha256sum` of each equals `action/src/checksums.generated.ts` in `chore(release): v0.0.0-test` (c5f9775); x86_64 musl binary is static and prints `hoard 0.0.0-test`; no `v0` tag created · cleanup of release, tag and branch needs the owner (see Blocked)
 - 2026-10-21 · 03-vite-plus-throughput/Task 4 Steps 2–3 (rate-limit bench + packing decision) · runs 39659795765 (100), 39662254202 (400), 39664353368 (1000) · 100: throttled 0; 400: throttled 1, rate_limited 22, warm hits 378/400; 1000: throttled 0 (slower build, ~146 uploads/min) → **packing needed**, recorded in spec §12; results in `docs/benchmarks/2026-10-rate-limit.md` · packing spec section + plan not written yet
 - 2026-10-22 · **0.1.0 released** · release run 39749863566 → `chore(release): v0.1.0` (5c32424), tags `v0.1.0` and `v0` on it · release v0.1.0 (stable) has the five `hoard-<target>.tar.gz`, their digests equal `checksums.generated.ts` (`VERSION = "0.1.0"`); x86_64 musl binary is static and prints `hoard 0.1.0` · docs pin `@v0` (0.x); 1.0 and `v1` wait for packing; self-test gains a `release` variant (published binary)
+- 2026-10-22 · real-R2 owner checks (01-core-r2/Task 8, 03-vite-plus-throughput/Task 3 Step 1) · new `.github/workflows/r2-checks.yml`, run 39752184290 on the repository's R2 bucket · `hoard doctor`: `✓ lifecycle rule hoard-cache- (7 days)` (verify requires the 1-day multipart abort) and `✓ bucket read/write`; immutable >8 MiB: one 20 MiB key PUT twice in a row and another PUT twice in parallel, all 200, GET returns the first / one complete body, stats `puts 2, put_skipped_existing 2, put_errors 0` (the parallel loser was refused by R2's conditional create, so R2 honours If-None-Match on CompleteMultipartUpload); `refresh_real_r2` passes: self-copy moves last_modified forward (…826 → …829), so CopyObject refresh resets the object's age on R2
 
 ## Blocked
 
 <!-- Task, what is missing, exact action a human must take. -->
 
-- **01-core-r2/Task 8 — real R2 lifecycle check.** MinIO silently drops `AbortIncompleteMultipartUpload`, so the
-  1-day abort clause is only tested through a verbatim proxy. Action: with a real R2 bucket and an R2 token with
-  *Admin Read & Write*, run `HOARD_R2_ACCESS_KEY_ID=… HOARD_R2_SECRET_ACCESS_KEY=… hoard serve --storage r2
-  --r2-account-id <id> --r2-bucket <bucket>` once, stop it, then `hoard doctor --storage r2 --r2-account-id <id>
-  --r2-bucket <bucket>` — it must print `✓ lifecycle rule hoard-cache- (7 days)`. If it says the rule differs, report
-  the output of `npx wrangler r2 bucket lifecycle list <bucket>`.
-  Partial evidence (2026-10-15): the self-test R2 leg ran against the repository's real bucket with
-  `r2-lifecycle: auto` and hoard started, so the rule was applied or already present; the `doctor` check of the
-  exact rule (including the 1-day abort) is still open.
-  In the same session, check immutable keys for large artifacts on R2: run `STORAGE=r2 tests/e2e/turbo.sh` is not
-  enough (MinIO); instead PUT the same >8 MiB artifact twice through `hoard serve --storage r2` (e.g. two parallel
-  `curl -X PUT --data-binary @big.bin` against `/v8/artifacts/abc`) and confirm the object is unchanged
-  (`If-None-Match: *` on CompleteMultipartUpload must be honoured by R2).
-- **03-vite-plus-throughput/Task 3 Step 1 — does R2 reset an object's age on self-copy?** Refresh-on-hit uses
-  CopyObject onto itself (MinIO: yes). Action: with a test R2 bucket and token, run
-  `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=…
-  HOARD_TEST_R2_BUCKET=… cargo test --test r2 -- --ignored refresh_real_r2`. If it fails, tell me: refresh then
-  switches to a re-PUT of the same envelope and spec §7.3 records it. Until then refresh-on-hit stays off by default.
 - **Packing (spec §12) — design and plan.** The bench showed `throttled > 0` at 400 packages, so packing is needed.
   Action: write the packing spec section and a plan (one pack + index per job, HTTP Range reads), as promised in
   03-vite-plus-throughput/Task 4 Step 3. Until it ships, a cold build of ~400+ packages on the GitHub cache loses
@@ -134,10 +117,8 @@ lists every input and output.
 
 1. ~~**CI**~~ and ~~**self-test on real runners**~~: green on PR keelstackhq/hoard#1 (2026-10-15).
 2. ~~**Release dry run**~~: passed 2026-10-21; the owner removed the leftovers.
-3. **Real R2 checks:**
-   - the lifecycle rule with `hoard doctor`;
-   - immutable >8 MiB artifacts;
-   - `refresh_real_r2`, which decides whether self-copy resets the object's age.
+3. ~~**Real R2 checks**~~: all pass (2026-10-22, `r2-checks.yml`). Self-copy resets the age on R2, so
+   refresh-on-hit works as built; whether to turn it on by default is your call (spec §7.3).
 4. ~~**Benchmark**~~: done 2026-10-21, packing needed; its spec section and plan are open (Blocked).
 
 ~~First real release~~: 0.1.0 released 2026-10-22 (`@v0`). 1.0 / `@v1` waits for packing.
