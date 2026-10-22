@@ -395,19 +395,39 @@ fn start_write_behind(
     )))
 }
 
-/// The refresh-on-hit helper (spec §7.3): only for `storage=r2` in `read-write` mode, since a
-/// refresh is a write. Asking for it elsewhere is ignored with one info line.
-fn start_refresher(cfg: &Config, stats: &Arc<Stats>) -> Option<Arc<Refresher>> {
-    if !cfg.refresh_on_hit {
-        return None;
+/// What `refresh-on-hit` does in this run (spec §7.3).
+#[derive(Debug, PartialEq, Eq)]
+enum RefreshPlan {
+    On,
+    /// Off by choice, or not set where it does not apply (silent).
+    Off,
+    /// Set to true where it does not apply: one info line, nothing else.
+    Ignored,
+}
+
+/// `refresh-on-hit` applies only to `storage=r2` in `read-write` mode, since a refresh is a
+/// write; there it is on unless set to false. Elsewhere it does nothing.
+fn refresh_plan(cfg: &Config) -> RefreshPlan {
+    let applies = cfg.storage == Storage::R2 && cfg.mode == Mode::ReadWrite;
+    match (cfg.refresh_on_hit, applies) {
+        (Some(false), _) => RefreshPlan::Off,
+        (_, true) => RefreshPlan::On,
+        (None, false) => RefreshPlan::Off,
+        (Some(true), false) => RefreshPlan::Ignored,
     }
-    let r2 = match (&cfg.r2, cfg.storage, cfg.mode) {
-        (Some(r2), Storage::R2, Mode::ReadWrite) => r2,
-        _ => {
+}
+
+/// The refresh-on-hit helper (spec §7.3), when [`refresh_plan`] says it is on.
+fn start_refresher(cfg: &Config, stats: &Arc<Stats>) -> Option<Arc<Refresher>> {
+    match refresh_plan(cfg) {
+        RefreshPlan::On => {}
+        RefreshPlan::Off => return None,
+        RefreshPlan::Ignored => {
             info!("refresh-on-hit is ignored: it needs storage=r2 and mode=read-write");
             return None;
         }
-    };
+    }
+    let r2 = cfg.r2.as_ref()?;
     let client = r2_client(&r2.endpoint(), &r2.access_key_id, &r2.secret_access_key);
     let threshold = Refresher::threshold_for(cfg.max_age_days);
     info!(
@@ -619,6 +639,9 @@ async fn shutdown_work_within(
     }
     if snapshot.refreshed > 0 {
         extra_lines.push(format!("Refreshed: {} objects", snapshot.refreshed));
+    }
+    if snapshot.refresh_errors > 0 {
+        extra_lines.push(format!("Refresh errors: {}", snapshot.refresh_errors));
     }
     if snapshot.rate_limited > 0 {
         extra_lines.push(format!(
@@ -858,6 +881,71 @@ mod tests {
         let md = std::fs::read_to_string(&summary).unwrap();
         assert!(
             md.ends_with("Throttled: 2 responses (429) · Packs: 3 uploaded\n"),
+            "{md}"
+        );
+    }
+
+    fn refresh_cfg(storage: Storage, mode: Mode, set: Option<bool>) -> Config {
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.storage = storage;
+        cfg.mode = mode;
+        cfg.refresh_on_hit = set;
+        cfg
+    }
+
+    /// Spec §7.3: on by default for r2 read-write; a silent no-op for github and fs (and r2
+    /// read-only) unless asked for by name; `false` turns it off.
+    #[test]
+    fn refresh_on_hit_default_is_on_for_r2_and_silent_elsewhere() {
+        use RefreshPlan::*;
+        let rw = Mode::ReadWrite;
+        for set in [None, Some(true)] {
+            assert_eq!(refresh_plan(&refresh_cfg(Storage::R2, rw, set)), On);
+        }
+        assert_eq!(
+            refresh_plan(&refresh_cfg(Storage::R2, rw, Some(false))),
+            Off
+        );
+        for storage in [Storage::Github, Storage::Fs] {
+            assert_eq!(refresh_plan(&refresh_cfg(storage, rw, None)), Off);
+            assert_eq!(refresh_plan(&refresh_cfg(storage, rw, Some(false))), Off);
+            assert_eq!(refresh_plan(&refresh_cfg(storage, rw, Some(true))), Ignored);
+        }
+        let ro = Mode::Read;
+        assert_eq!(refresh_plan(&refresh_cfg(Storage::R2, ro, None)), Off);
+        assert_eq!(
+            refresh_plan(&refresh_cfg(Storage::R2, ro, Some(true))),
+            Ignored
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_reports_refresh_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            Config::try_from(ServeArgs::parse_from(["serve", "--storage", "fs"])).unwrap();
+        cfg.fs_root = dir.path().join("store");
+        let summary = dir.path().join("summary.md");
+        cfg.summary_file = Some(summary.clone());
+        let store = Store::new(build_operator(&cfg).unwrap());
+        let cache = ShutdownCache {
+            store: &store,
+            prefix: "cache/",
+            write_behind: None,
+            packs: None,
+        };
+        let stats = Stats::default();
+        stats
+            .refreshed
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .refresh_errors
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        shutdown_work(&cfg, cache, &stats, "Storage: r2", vec![]).await;
+        let md = std::fs::read_to_string(&summary).unwrap();
+        assert!(
+            md.ends_with("Storage: r2 · Refreshed: 2 objects · Refresh errors: 1\n"),
             "{md}"
         );
     }

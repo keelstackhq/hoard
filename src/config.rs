@@ -189,8 +189,16 @@ pub struct ServeArgs {
     pub pack: PackMode,
     /// R2 only: on a GET hit, copy objects older than max-age-days / 2 onto themselves so the
     /// lifecycle rule does not expire what is still in use (at most once per object per run).
-    #[arg(long, env = "HOARD_REFRESH_ON_HIT", value_parser = clap::builder::BoolishValueParser::new())]
-    pub refresh_on_hit: bool,
+    /// Default: on for storage=r2 with mode=read-write; `--refresh-on-hit=false` turns it off.
+    #[arg(
+        long,
+        env = "HOARD_REFRESH_ON_HIT",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true"
+    )]
+    pub refresh_on_hit: Option<bool>,
 }
 
 fn redact<T>(v: &Option<T>) -> Option<&'static str> {
@@ -302,8 +310,9 @@ pub struct Config {
     pub write_behind: bool,
     /// Turborepo artifacts are packed (`pack`, `auto` resolved; always false for `r2`).
     pub pack: bool,
-    /// `refresh-on-hit` as set; only `storage=r2` acts on it.
-    pub refresh_on_hit: bool,
+    /// `refresh-on-hit` as set (`None` = not set: on where it applies); only `storage=r2` with
+    /// `mode=read-write` acts on it (spec §7.3).
+    pub refresh_on_hit: Option<bool>,
 }
 
 impl fmt::Debug for Config {
@@ -718,8 +727,20 @@ mod tests {
                 .unwrap()
                 .refresh_on_hit
         };
-        assert!(!parse(&["serve", "--storage", "fs"]));
-        assert!(parse(&["serve", "--storage", "fs", "--refresh-on-hit"]));
+        // Unset: the default (on where it applies, spec §7.3); set: as given.
+        assert_eq!(parse(&["serve", "--storage", "fs"]), None);
+        assert_eq!(
+            parse(&["serve", "--storage", "fs", "--refresh-on-hit"]),
+            Some(true)
+        );
+        for v in ["true", "yes", "1"] {
+            let arg = format!("--refresh-on-hit={v}");
+            assert_eq!(parse(&["serve", "--storage", "fs", &arg]), Some(true));
+        }
+        for v in ["false", "no", "0"] {
+            let arg = format!("--refresh-on-hit={v}");
+            assert_eq!(parse(&["serve", "--storage", "fs", &arg]), Some(false));
+        }
     }
     #[test]
     fn no_reads_flag() {

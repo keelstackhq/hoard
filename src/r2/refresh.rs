@@ -120,6 +120,9 @@ impl Refresher {
                 }
                 Ok(false) => {}
                 Err(e) => {
+                    this.stats
+                        .refresh_errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     warn!(%key, error = %redacted(&e), "R2 refresh failed; the object keeps its age")
                 }
             }
@@ -155,6 +158,30 @@ impl Refresher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refresh that fails (here: storage unreachable) is counted and logged, never fatal.
+    #[tokio::test]
+    async fn failed_refresh_is_counted() {
+        let stats = Arc::new(Stats::default());
+        let client = crate::r2::lifecycle::r2_client("http://127.0.0.1:1", "k", "s");
+        let r = Arc::new(Refresher::new(
+            client,
+            "bucket".into(),
+            Duration::ZERO,
+            stats.clone(),
+        ));
+        r.on_hit("cache/turbo/v1/aa");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while stats.snapshot().refresh_errors == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no refresh error counted"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let s = stats.snapshot();
+        assert_eq!((s.refresh_errors, s.refreshed), (1, 0));
+    }
 
     #[test]
     fn copy_source_is_percent_encoded() {

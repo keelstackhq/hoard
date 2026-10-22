@@ -50,9 +50,9 @@ inputs:
     required: false
     default: 5GB
   refresh-on-hit:
-    description: "R2 only: when a cache hit reads an object older than max-age-days / 2, copy it onto itself so the lifecycle rule does not expire what is still in use (true or false)."
+    description: "R2 only: when a cache hit reads an object older than max-age-days / 2, copy it onto itself (at most once per object per run) so the lifecycle rule does not expire what is still in use (true or false). Does nothing for github and fs."
     required: false
-    default: "false"
+    default: "true"
   vp-max-size:
     description: "Vite+ only: skip saving the task cache when it is larger than this, e.g. 2GB (then run `vp cache clean`)."
     required: false

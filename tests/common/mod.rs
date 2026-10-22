@@ -76,7 +76,7 @@ pub fn fs_config(root: impl AsRef<std::path::Path>) -> Config {
         max_size: 1 << 30,
         write_behind: false,
         pack: false,
-        refresh_on_hit: false,
+        refresh_on_hit: None,
     }
 }
 

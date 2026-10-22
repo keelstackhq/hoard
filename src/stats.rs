@@ -22,6 +22,8 @@ pub struct Stats {
     pub time_saved_ms: AtomicU64,
     /// R2 objects whose age was reset by refresh-on-hit.
     pub refreshed: AtomicU64,
+    /// Refresh-on-hit attempts that failed (logged; the object keeps its age).
+    pub refresh_errors: AtomicU64,
     /// Packs uploaded (spec §6.5).
     pub packs: AtomicU64,
 }
@@ -41,6 +43,7 @@ pub struct StatsSnapshot {
     pub bytes_up: u64,
     pub time_saved_ms: u64,
     pub refreshed: u64,
+    pub refresh_errors: u64,
     pub packs: u64,
 }
 
@@ -60,6 +63,7 @@ impl Stats {
             bytes_up: load(&self.bytes_up),
             time_saved_ms: load(&self.time_saved_ms),
             refreshed: load(&self.refreshed),
+            refresh_errors: load(&self.refresh_errors),
             packs: load(&self.packs),
         }
     }
@@ -217,7 +221,8 @@ mod tests {
         assert_eq!(json["put_skipped_existing"], 0);
         assert_eq!(json["throttled"], 0);
         assert_eq!(json["packs"], 0);
-        assert_eq!(json.as_object().unwrap().len(), 13);
+        assert_eq!(json["refresh_errors"], 0);
+        assert_eq!(json.as_object().unwrap().len(), 14);
     }
 
     #[test]
