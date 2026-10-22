@@ -765,13 +765,23 @@ fn binary_restore_without_a_cache_drops_an_old_fingerprint() {
 fn binary_skips_print_one_line() {
     let store = tempfile::tempdir().unwrap();
     let fs_root = store.path().to_str().unwrap().to_string();
+    // The empty line names the directory and says why it is usually empty: Vite Task caches
+    // only `vp run` tasks (a repo that calls `vp build` under turbo has nothing to save).
+    // `--workspace` defaults to `.`, so the path is relative to the working directory.
     let (ws, _) = empty_target();
+    let dir = Path::new(".").join("node_modules/.vite/task-cache");
     let mut c = hoard(ws.path());
     c.args(["save", "--storage", "fs", "--fs-root", &fs_root]);
     let (code, out, _) = run(c);
     assert_eq!(
-        (code, out.trim()),
-        (0, "skipped: cache directory is empty or missing")
+        (code, out.trim().to_string()),
+        (
+            0,
+            format!(
+                "skipped: cache directory is empty or missing ({}); Vite Task caches only `vp run` tasks, not direct `vp build`/`vp test` calls",
+                dir.display()
+            )
+        )
     );
 
     let (ws, _) = cache_with(&[("db", &[0u8; 2000])]);

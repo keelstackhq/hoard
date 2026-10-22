@@ -28,6 +28,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-15 · **Milestone 3 reviewed** · whole-branch review 4f28859..99e1034 (0 Critical, 3 Important, 15 Minor) → fix wave 1e158e1..1b7a69d + flaky-test fix f977bfd, re-reviews clean · cargo all green twice in a row (108 unit, 44 vp, 45 r2, 18 write-behind …); 150 MB stream OK; action 157/157 incl. real binary; dist 159 KB fresh; actionlint clean; bench 6/6; e2e fs + r2 PASS; no openssl
 - 2026-10-15 · Naming decided by the owner: `keelstackhq/hoard` (README, spec, plan updated; npm scope `@keelstack` of the private action package unchanged)
 - 2026-10-15 · 01-core-r2 CI + 02-github-action/Task 5 Step 2 (first runs on GitHub, PR keelstackhq/hoard#1) · 82a2472 (fix for the `fetch_update` deprecation on Rust 1.99) · ci run 38691600578: `rust`, `e2e`, `action` green; self-test run 38691600620: all 12 jobs green — every `hit` job passed its `FULL TURBO` and `hits > 0` checks on Linux x64/arm64, macOS, Windows (GitHub cache) and Linux (real R2 bucket, `r2-lifecycle: auto` started without error); `vp hit` restored the task cache and logged `vp run: cache hit`
+- 2026-10-22 · fix: `vp save`'s empty-cache line names the directory and says only `vp run` tasks are cached (keelstackhq/example-app#12: hull repos call `vp build/test` under turbo, so the task cache is empty by design) · cargo vp 44/44, fmt + clippy clean
 
 ## Blocked
 
