@@ -137,7 +137,7 @@ lists every input and output.
    refresh-on-hit works as built; you chose to turn it on by default (2026-10-22, spec §7.3).
 4. ~~**Benchmark**~~: done 2026-10-21, packing needed; its spec section and plan are open (Blocked).
 
-~~First real release~~: 0.1.0 released 2026-10-22 (`@v0`). 0.2.0 released 2026-10-22 with packing (`@v0`); 1.0 / `@v1` waits for packing to run in real use.
+~~First real release~~: 0.1.0 released 2026-10-22 (`@v0`). 0.2.0 released 2026-10-22 with packing (`@v0`). 0.3.0 (pending release) turns refresh-on-hit on by default for R2 read-write; turn it off with `refresh-on-hit: false` (`HOARD_REFRESH_ON_HIT=false`); 1.0 / `@v1` waits for packing to run in real use.
 
 ### Known limits and decisions to revisit
 
