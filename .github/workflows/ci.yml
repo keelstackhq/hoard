@@ -83,3 +83,20 @@ jobs:
             echo "::error::action/dist is $size bytes, over the 200 KB limit: trim dependencies or bundle settings in action/"
             exit 1
           fi
+  ci-ok:
+    needs: [rust, e2e, action]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          RUST: ${{ needs.rust.result }}
+          E2E: ${{ needs.e2e.result }}
+          ACTION: ${{ needs.action.result }}
+        run: |
+          echo "rust: $RUST, e2e: $E2E, action: $ACTION"
+          for r in "$RUST" "$E2E" "$ACTION"; do
+            if [ "$r" != "success" ]; then
+              exit 1
+            fi
+          done

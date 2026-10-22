@@ -4,7 +4,7 @@ Date: 2026-10-14 · Status: draft for implementation · Idea: `monorepo-ci-cache
 
 Names: GitHub org `keelstackhq` (tools for bootstrapping projects), repo `keelstackhq/hoard`, binary
 `hoard`, Rust package `keel-hoard` (the crate name `hoard` is taken), npm scope `@keelstack`, env
-prefix `HOARD_`. Usage: `uses: keelstackhq/hoard@v1`.
+prefix `HOARD_`. Usage: `uses: keelstackhq/hoard@v0`.
 
 ## 1. Goal
 
@@ -26,14 +26,14 @@ laptops). An R2 bucket must never grow without limit.
 GitHub cache (default):
 
 ```yaml
-- uses: keelstackhq/hoard@v1
+- uses: keelstackhq/hoard@v0
 - run: pnpm turbo run build test lint
 ```
 
 Cloudflare R2:
 
 ```yaml
-- uses: keelstackhq/hoard@v1
+- uses: keelstackhq/hoard@v0
   with:
     storage: r2
     r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
@@ -468,12 +468,10 @@ changes). Details:
 - Needs `s3:GetObject` and `s3:PutObject` on the prefix (`CopyObject`), which `hoard` already
   needs for writes.
 
-**Unverified on real R2.** The self-copy is tested on MinIO (last-modified moves forward, the
-body is unchanged). Whether Cloudflare R2 resets the age with a self-copy has not been checked
-yet; run once by hand:
-`HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=… HOARD_TEST_R2_BUCKET=… cargo test --test r2 -- --ignored refresh_real_r2`.
-If R2 does not move `Last-Modified`, switch `refresh_object` to a re-PUT of the same envelope
-and record the finding here.
+**Verified on real R2 (2026-10-22).** `refresh_real_r2` (run by `.github/workflows/r2-checks.yml`)
+showed that a self-copy on Cloudflare R2 moves `Last-Modified` forward and keeps the body, so it
+resets the lifecycle age as on MinIO. If that ever changes, switch `refresh_object` to a re-PUT of
+the same envelope.
 
 ## 8. Modes and trust
 
@@ -507,7 +505,7 @@ Storage: r2 (my-team-cache/cache/) · Lifecycle: 7 days ✓ · Pruned: 18 object
 
 ## 10. The GitHub Action (`action/`)
 
-`action.yml` at the repo root (so `uses: keelstackhq/hoard@v1` works): `runs.using: node24`,
+`action.yml` at the repo root (so `uses: keelstackhq/hoard@v0` works): `runs.using: node24`,
 `main: action/dist/main.js`, `post: action/dist/post.js`, `post-if: always()`. Source in
 `action/src/`, bundled with esbuild; committed `action/dist/` < 200 KB. Inputs mirror §4.2 plus
 `version` (binary version, default = the action's own release; any other value fails, because the
@@ -614,10 +612,12 @@ Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-appl
 `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
 
 Release (`.github/workflows/release.yml`, `workflow_dispatch` with `version` and `draft`; see
-`docs/RELEASING.md`): build the five targets, write the checksums file, rebuild `dist/`, commit
+`docs/RELEASING.md`): build the five targets, write the checksums file, rebuild `dist/`, run the
+action tests (the bot's push does not trigger CI), commit
 `chore(release): vX.Y.Z` and push it with tag `vX.Y.Z` → create the GitHub release → verify it has
 exactly the five assets → only then move `vX` to it. `vX` moves only for stable, non-draft releases
 and only forward (never below the newest stable `vX.*` tag, so a backport leaves it alone).
+hoard stays 0.x (users pin `@v0`) until artifact packing lands; 1.0 and the `v1` tag follow it.
 
 ## 11. Testing
 
@@ -639,14 +639,11 @@ and only forward (never below the newest stable `vX.*` tag, so a backport leaves
 ## 12. Later
 
 - Vite+ remote protocol adapter (`/fetch`, `/blob/{id}`, `/store`, CBOR) once released upstream.
-- Packing many small artifacts into one GitHub cache entry per job if large repos hit 200
-  uploads/min (milestone 3, gated by a benchmark: needed if `throttled > 0` at 400 packages or
-  fewer, see `docs/benchmarks/`). **Packing needed (bench 2026-10):** a cold build of 400
-  packages got a `429` (`throttled` 1) and skipped 22 uploads during the pause (`rate_limited`
-  22), so the warm run had 378 of 400 hits. 100 packages stayed under the limit, and so did 1000
-  slower packages (about 146 uploads/min): the limit is uploads per minute, not package count
-  (`docs/benchmarks/2026-10-rate-limit.md`). The design (one pack + index per job, HTTP Range
-  reads) gets its own spec section and plan before any code.
+- ~~Packing~~ (milestone 4, done): the bench showed `throttled > 0` at 400 packages (a `429`,
+  22 uploads skipped, 378 of 400 warm hits), so packing was built (§6.5; plan
+  `docs/superpowers/plans/2026-10-22-hoard-04-packing.md`). With it, 400 and 1000 packages make
+  one pack + one index per job, `throttled` 0 and every warm task hits
+  (`docs/benchmarks/2026-10-rate-limit.md`). Required before 1.0.
 - Nx adapter.
 
 ## 13. Milestones

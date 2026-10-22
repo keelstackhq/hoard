@@ -5,8 +5,8 @@ server to host. Artifacts go to the GitHub Actions cache (default, zero config) 
 Cloudflare R2 bucket. Part of [keelstackhq](https://github.com/keelstackhq): tools for
 bootstrapping projects.
 
-> **Not released yet.** `keelstackhq/hoard@v1` works once the first release is published. Until
-> then, the snippets below do not resolve.
+> hoard is 0.x: pin `@v0`. 1.0 (and the `@v1` tag) waits for artifact packing, which keeps large
+> monorepos under the GitHub cache upload rate limit.
 
 ## Quick start
 
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version: 24, cache: pnpm }
       - run: pnpm install --frozen-lockfile
-      - uses: keelstackhq/hoard@v1        # starts the cache, exports TURBO_API/TURBO_TOKEN/TURBO_TEAM
+      - uses: keelstackhq/hoard@v0        # starts the cache, exports TURBO_API/TURBO_TOKEN/TURBO_TEAM
       - run: pnpm turbo run build test lint
 ```
 
@@ -55,7 +55,7 @@ What the step does:
 The cache never fails your build. If storage is down or slow, a read is a miss and an upload is
 skipped (with a warning, so a broken cache does not look like a cold one).
 
-Pin a release tag (`@v1` or `@v1.2.3`), not `@main` or a commit: each action release can only
+Pin a release tag (`@v0` or `@v0.1.0`), not `@main` or a commit: each action release can only
 run the hoard binary of that same release.
 
 ## Choose a storage
@@ -99,7 +99,7 @@ quick start, so pull requests start warm.
 ### 3. Use them in the workflow
 
 ```yaml
-- uses: keelstackhq/hoard@v1
+- uses: keelstackhq/hoard@v0
   with:
     storage: r2
     r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
@@ -173,7 +173,7 @@ drop the restored cache.
 - uses: actions/setup-node@v5
   with: { node-version: 24, cache: pnpm }
 - run: pnpm install --frozen-lockfile
-- uses: keelstackhq/hoard@v1     # after the install: restores node_modules/.vite/task-cache
+- uses: keelstackhq/hoard@v0     # after the install: restores node_modules/.vite/task-cache
 - run: pnpm exec vp run build  # post step saves the task cache
 ```
 
@@ -245,7 +245,7 @@ jobs:
       hits: ${{ steps.hoard.outputs.hits }}
     steps:
       # … checkout, install …
-      - uses: keelstackhq/hoard@v1
+      - uses: keelstackhq/hoard@v0
         id: hoard
       - run: pnpm turbo run build
   report:

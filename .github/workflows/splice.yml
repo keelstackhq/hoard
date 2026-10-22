@@ -1,0 +1,28 @@
+name: splice
+# Keeps the splice channels in .splice/channels/ (org decisions, D-004) up to date: opens or
+# refreshes one PR on branch splice/update. See the "Update bot" section of keelstackhq/splice.
+on:
+  schedule: [{ cron: "17 6 * * 1" }]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: splice
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # Run right after checkout: untracked files left by earlier steps would be committed.
+      - uses: keelstackhq/splice/action@v1
+        with:
+          scope: all
+          # A GITHUB_TOKEN push does not trigger CI on the bot PR; SPLICE_BOT_TOKEN does.
+          token: ${{ secrets.SPLICE_BOT_TOKEN || github.token }}
