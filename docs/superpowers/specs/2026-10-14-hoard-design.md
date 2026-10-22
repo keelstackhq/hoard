@@ -108,6 +108,7 @@ secrets as `""`).
 | `vp-max-size` | `2GB` | `vp save` only: when the regular files of the task-cache directory add up to more, the save is skipped with a hint to run `vp cache clean` (hoard never edits Vite+'s SQLite cache). Same units as `max-size` |
 | `workspace`, `os-arch`, `run-key` | `.`, this machine, run id | `vp restore` / `vp save` only (§4.1) |
 | `refresh-on-hit` | off | Boolean flag (`HOARD_REFRESH_ON_HIT=true`, also `yes`/`no`, `1`/`0`; action input of the same name): `storage=r2` with `mode=read-write` only, ignored elsewhere with one info log (§7.3) |
+| `pack` | `auto` | `auto` \| `on` \| `off`; `auto` = on for `storage=github`, off for `r2`/`fs`. Turborepo artifacts are packed into a few large entries plus an index instead of one entry each (§6.5). When on, `write-behind` is not used for Turborepo artifacts |
 | `write-behind` | `auto` | `auto` \| `on` \| `off`; `auto` = on for `storage=github`, off for `r2`/`fs`. PUTs are answered once spooled to disk and uploaded in the background (§5) |
 
 R2 endpoint: `https://<account_id>.r2.cloudflarestorage.com` unless `r2-endpoint` overrides it,
@@ -126,6 +127,7 @@ Bound to `127.0.0.1` only. Every route except `/_hoard/health` requires
 | `GET /v8/artifacts/{hash}` | `200` streaming body (`application/octet-stream`, `Content-Length`, artifact headers) or `404`. With `no-reads`: always `404`, counted as a miss, store not read. |
 | `PUT /v8/artifacts/{hash}` | Stream body to the store; `200 {"urls":[]}`. Existing key → also `200`. `mode=read`/`off` → `403` with `{"error":{"code":"read_only","message":"hoard is in read-only mode"}}` (code `off`, message `hoard is off (mode=off)` for `off`), the error shape Turborepo prints. The code is never `forbidden` or `remote_caching_*`: Turborepo answers those by disabling the remote cache for the whole run, reads included. Needs `Content-Length` (becomes the envelope `size`); missing, a body of a different length, or a header over 4096 bytes → not stored, `200`, counted as `put_errors`. A backend rate limit → `200`, counted as `rate_limited`, and uploads pause (§6.4): while paused, a PUT (after the auth, hash and mode checks) is answered `200` and counted as `rate_limited` without touching the store or reading the body. |
 | `PUT` with `write-behind` on (`mode=read-write` only) | After the same checks (auth, hash, mode, rate-limit pause, `Content-Length`, header size), the body is streamed to a spool file in `<RUNNER_TEMP or ./.hoard>/hoard-spool-<random>` (created at startup, removed on shutdown) and length-checked; then `200`. A spool error (disk full, a short or long body) → no file kept, `200`, counted as `put_errors`. A hash already queued or uploading is not spooled again: `200`, counted as `put_skipped_existing`. A body that would push the spool past 2 GB, or a PUT that arrives after the shutdown drain started, is uploaded synchronously as without write-behind (one warning the first time the spool is full). Up to 8 background uploads run at once, each an if-not-exists write of the complete envelope streamed from the spool file (the spool file is deleted after the attempt); they count `puts`/`bytes_up` (on upload, not on enqueue), `put_skipped_existing` or `put_errors`. They obey the rate-limit pause: a queued upload waits while uploads are paused, and a `429` pauses uploads and retries the item once the pause ends (not counted as `rate_limited`, which counts only PUTs the handler skipped; an item that never gets through is dropped at shutdown and counted as `put_errors`). While the spool dir is missing, PUTs are uploaded synchronously. A GET/HEAD of a hash that is still queued is a miss (Turborepo has the artifact locally). Shutdown (`/_hoard/shutdown`, SIGTERM, Ctrl-C) drains the queue for at most 120 s (and within the 270 s shutdown budget) before the prune and the summary; uploads still running then are aborted (no object is left at their keys) and counted as `put_errors`. |
+| `HEAD`/`GET`/`PUT` and the batch query with `pack` on | As above (auth, validation, modes, `no-reads`, never failing the build), but artifacts live in packs (§6.5): reads use only the pack index (HEAD and the batch query make no storage request; GET is one Range read of a pack), and a PUT is spooled and later uploaded as part of a pack. `write-behind` does not apply. The shutdown drain (120 s) seals and uploads the last pack and writes the index. |
 | `POST /v8/artifacts/events` | Accept (body ignored); `200` |
 | `POST /v8/artifacts` | Body `{"hashes":[…]}` → `200` JSON object mapping each found hash to `{"size":<u64>,"taskDurationMs":<u64\|null>}`; missing hashes are left out (`{}` with `mode=off` or `no-reads`) |
 | `GET /_hoard/health` | `200 ok` (no auth) |
@@ -210,12 +212,14 @@ exactly one upload:
 ```
 bytes 0..4   magic  "HRD1"
 bytes 4..8   u32 big-endian header length N (≤ 4096)
-bytes 8..8+N JSON header {"v":1,"duration_ms":<u64|null>,"tag":<string|null>,"size":<u64>}
+bytes 8..8+N JSON header {"v":1,"duration_ms":<u64|null>,"tag":<string|null>,"size":<u64>[,"hash":<string>]}
 rest         the artifact body exactly as Turborepo sent it (already zstd; never recompress)
 ```
 
 Decoding a blob with a wrong magic, `N > 4096`, or invalid JSON is a miss (and counted as
-`corrupt`), not an error.
+`corrupt`), not an error. `hash` is only written into envelopes inside a pack (§6.5), where the
+reader checks it against the requested hash; single-object envelopes leave it out, and a reader
+ignores it when absent.
 
 ### 6.3 Store interface
 
@@ -281,6 +285,88 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
 - Respect `ACTIONS_CACHE_MODE`: the action maps it to `--mode` (`read` → `read`, `none` → `off`,
   `write-only` → `read-write` with reads disabled via `--no-reads`); the binary only reads `--mode`
   and `--no-reads`.
+
+### 6.5 Packing (Turborepo artifacts, `pack` on)
+
+The GitHub cache allows 200 uploads/min per repository. One entry per artifact hits that limit
+on a cold build of a few hundred packages (`docs/benchmarks/2026-10-rate-limit.md`: 233
+uploads/min, one `429`, 22 artifacts lost at 400 packages). With packing, a job uploads its
+new Turborepo artifacts as a few large **packs** plus one **index**, so a job makes
+`ceil(new bytes / 128 MiB) + 1` uploads, whatever its package count, and a job whose tasks all
+hit makes none. `pack` defaults to on for `storage=github` only; `on` also works for `r2` and
+`fs` (tests, e2e) through OpenDAL. Vite+ archives are unaffected.
+
+Keys (`run_key` as for `vp`, §4.1: `${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-<8 hex>`, else
+`local-<unix secs>-<8 hex>`):
+
+- pack `{prefix}turbo-pack/{cache_version}/{run_key}-{n}` (`n` = 1, 2, … within the server);
+- index `{prefix}turbo-index/{cache_version}/{run_key}`.
+
+On `storage=github` both go through the Twirp client (§6.4, `src/gha_twirp.rs`) with entry
+version SHA-256 (hex) of `hoard-pack-{cache_version}`; on r2/fs through the OpenDAL operator
+(if-not-exists writes, so keys stay immutable).
+
+**Pack** = the HRD1 envelopes (§6.2, each with `"hash"` set) of its artifacts, back to back.
+Each artifact is exactly the byte range `[offset, offset + len)`.
+
+**Index** = one zstd frame of JSON:
+`{"v":1,"packs":[["<pack key>",<created, unix ms>],…],"entries":{"<hash>":[<pack #>,<offset>,<len>,<size>,<duration_ms|null>,<tag|null>],…}}`
+(`packs` sorted oldest first by created time, then key; `pack #` indexes `packs`; `size` is the
+artifact body length). Decoded size is
+capped at 256 MiB; an index that does not decode is ignored with a warning (no packed hits
+this job). Every index is cumulative: it holds the entries of the index the job loaded, of
+the newest index at shutdown and of the packs the job uploaded.
+
+Startup (any mode except `off`, and not with `no-reads`): a background task loads the newest
+index: on github `GetCacheEntryDownloadURL` with `key` and `restore_keys` both
+`{prefix}turbo-index/{cache_version}/` (GitHub returns the newest matching entry of the
+branch, else of the base branch), then one GET; on r2/fs the newest object under that prefix
+(by last-modified, then key). The server answers health at once; reads wait for the load, at
+most 30 s after startup, and a load that fails or times out leaves the index empty (warning).
+
+Reads (`HEAD`, `GET`, batch query) use only the index, never a per-artifact key:
+
+- a hash not in the index, or whose pack is known missing, is a miss;
+- `HEAD` and the batch query answer from the index entry, without a storage request;
+- `GET` reads `[offset, offset + len)` of the pack with one HTTP Range request. On github the
+  pack's signed download URL is resolved once per pack per server (`GetCacheEntryDownloadURL`
+  with the exact key) and reused; a `401`/`403` from the blob resolves it once more. The
+  envelope's `hash` and `size` must equal the requested hash and the index entry, else the
+  read is `corrupt` (miss). A pack that is not found (evicted, pruned) is marked missing: its
+  hashes miss for the rest of the run and its entries are left out of the next index.
+
+Writes (`mode=read-write`): `PUT` runs the usual checks (auth, hash, mode, rate-limit pause,
+`Content-Length`, header size); a hash that is in the loaded index or already accepted by this
+server is `put_skipped_existing` without reading the body. Otherwise the body is spooled to
+`<RUNNER_TEMP or ./.hoard>/hoard-spool-<random>` and length-checked, then `200` (a spool
+error → `put_errors`). When the spooled, unsealed bytes reach 128 MiB, they are **sealed**
+into a pack file (the spool files are then deleted) and uploaded in the background, at most 2
+packs at a time. Pack uploads obey the rate-limit pause: a `429` counts `throttled`, pauses
+uploads and retries the pack after the pause. A pack upload that fails otherwise counts its
+artifacts as `put_errors`. A PUT that would push the spool past 2 GB, or one that arrives
+after the shutdown drain started, is not cached and counts `put_errors` (one warning). A
+GET/HEAD of a hash that is spooled but not yet in an uploaded pack is a miss.
+
+Shutdown (within the drain's 120 s, §5): stop accepting PUTs, seal the remaining spool into a
+last pack, wait for the pack uploads, then, if this server uploaded a pack or found a pack
+missing, write the index: load the newest index again (another job may have written one since
+startup), merge it with the loaded index and the new entries (for a hash in several packs the
+newest pack wins), drop missing packs, then the oldest packs while there are more than 1000
+packs or 200,000 entries, and upload it under this server's index key. Artifacts count as
+`puts`/`bytes_up` when their pack is uploaded; `packs` counts uploaded packs. Packs or an index
+still uploading when the drain times out are aborted and their artifacts counted as
+`put_errors`; an index that cannot be written loses this job's packs for later jobs (warning).
+
+Limits and trade-offs:
+
+- Parallel jobs of a run each write an index; the next job loads the newest one. The
+  merge-on-write above keeps entries of jobs that finished earlier; a job that finished at the
+  same time can lose its entries until a later job rebuilds them (each miss is re-packed).
+- A pack expires as a whole (GitHub evicts entries not read for 7 days or over the 10 GB
+  quota; R2 lifecycle/size cap). Reading any artifact of a pack resolves its URL, which keeps
+  it in use.
+- Index entries are written by this repository's own jobs, but the `hash` check guards against
+  a stale or wrong offset serving another artifact.
 
 ## 7. R2 auto-cleanup (bucket must not grow endlessly)
 
@@ -376,11 +462,11 @@ and record the finding here.
 ## 9. Stats and job summary
 
 `Stats { hits, misses, puts, put_skipped_existing, put_errors, rate_limited, throttled, corrupt,
-bytes_down, bytes_up, time_saved_ms, refreshed }` — `time_saved_ms` sums `duration_ms` of every hit;
-`refreshed` counts R2 objects renewed by refresh-on-hit (§7.3).
+bytes_down, bytes_up, time_saved_ms, refreshed, packs }` — `time_saved_ms` sums `duration_ms` of every hit;
+`refreshed` counts R2 objects renewed by refresh-on-hit (§7.3); `packs` counts packs uploaded (§6.5).
 The storage line is `Storage: github`, `Storage: r2 (<bucket>/<prefix>)` or `Storage: fs (<root>)`;
 when `put_errors > 0` the line ends with `Upload errors: N` (so a broken storage never looks like
-a cold cache), then, when `refreshed > 0`, with `Refreshed: N objects`, then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`, then, when `throttled > 0`, with `Throttled: N responses (429)`. When the
+a cold cache), then, when `refreshed > 0`, with `Refreshed: N objects`, then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`, then, when `throttled > 0`, with `Throttled: N responses (429)`, then, when `packs > 0`, with `Packs: N uploaded`. When the
 write-behind drain timed out, `Upload queue: N dropped at shutdown` comes right after the
 startup lines (before the prune line); the dropped uploads are also in `Upload errors`.
 
