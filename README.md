@@ -184,6 +184,10 @@ Details:
 - Nothing is uploaded when the cache did not change since the restore. On r2 and fs, the archive
   it replaces is deleted.
 - A cache larger than `vp-max-size` (default 2 GB) is not saved; run `vp cache clean`.
+- Only tasks run through `vp run` use the task cache. When packages call `vp build`, `vp test` or
+  `vp lint` directly (for example under turbo, which then caches them through hoard), the
+  directory stays empty: restore prints `no cache found` and save prints `skipped: cache
+  directory is empty or missing (…)`. That is expected and costs one cache lookup.
 - Only the checkout root (`GITHUB_WORKSPACE`) is looked at; a repository checked out with
   `actions/checkout`'s `path:` is not.
 - An absolute `VITE_CACHE_PATH` is used only when it is set at job or workflow level, where the

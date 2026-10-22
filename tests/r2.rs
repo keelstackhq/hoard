@@ -1244,6 +1244,11 @@ fn get_hit_refreshes_old_object_once_per_run() {
         let count = |m: &str| log.iter().filter(|l| **l == format!("{m} {key}")).count();
         assert_eq!(count("HEAD"), 1, "{log:?}");
         assert_eq!(count("PUT"), 1, "{log:?}");
+        // The proxy logs the copy when it arrives; the counter moves only once MinIO answers.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while f.t.stats.snapshot().refreshed == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert_eq!(f.t.stats.snapshot().refreshed, 1);
         // A later hit in the same run does not refresh again.
         assert_eq!(f.get("aa").await, 200);

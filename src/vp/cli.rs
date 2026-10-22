@@ -193,9 +193,11 @@ impl VpJob {
                             human_bytes(bytes),
                             human_bytes(j.max_size)
                         ),
-                        SaveOutcome::SkippedEmpty => {
-                            "skipped: cache directory is empty or missing".into()
-                        }
+                        // Usually nothing ran through `vp run`: say so, and where hoard looked.
+                        SaveOutcome::SkippedEmpty => format!(
+                            "skipped: cache directory is empty or missing ({}); Vite Task caches only `vp run` tasks, not direct `vp build`/`vp test` calls",
+                            j.dir.display()
+                        ),
                     })
             } else {
                 // Only a successful restore leaves a fingerprint for save.
