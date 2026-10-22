@@ -4,7 +4,7 @@ Date: 2026-10-14 · Status: draft for implementation · Idea: `monorepo-ci-cache
 
 Names: GitHub org `keelstackhq` (tools for bootstrapping projects), repo `keelstackhq/hoard`, binary
 `hoard`, Rust package `keel-hoard` (the crate name `hoard` is taken), npm scope `@keelstack`, env
-prefix `HOARD_`. Usage: `uses: keelstackhq/hoard@v1`.
+prefix `HOARD_`. Usage: `uses: keelstackhq/hoard@v0`.
 
 ## 1. Goal
 
@@ -26,14 +26,14 @@ laptops). An R2 bucket must never grow without limit.
 GitHub cache (default):
 
 ```yaml
-- uses: keelstackhq/hoard@v1
+- uses: keelstackhq/hoard@v0
 - run: pnpm turbo run build test lint
 ```
 
 Cloudflare R2:
 
 ```yaml
-- uses: keelstackhq/hoard@v1
+- uses: keelstackhq/hoard@v0
   with:
     storage: r2
     r2-account-id: ${{ secrets.R2_ACCOUNT_ID }}
@@ -396,7 +396,7 @@ Storage: r2 (my-team-cache/cache/) · Lifecycle: 7 days ✓ · Pruned: 18 object
 
 ## 10. The GitHub Action (`action/`)
 
-`action.yml` at the repo root (so `uses: keelstackhq/hoard@v1` works): `runs.using: node24`,
+`action.yml` at the repo root (so `uses: keelstackhq/hoard@v0` works): `runs.using: node24`,
 `main: action/dist/main.js`, `post: action/dist/post.js`, `post-if: always()`. Source in
 `action/src/`, bundled with esbuild; committed `action/dist/` < 200 KB. Inputs mirror §4.2 plus
 `version` (binary version, default = the action's own release; any other value fails, because the
@@ -507,6 +507,7 @@ Release (`.github/workflows/release.yml`, `workflow_dispatch` with `version` and
 `chore(release): vX.Y.Z` and push it with tag `vX.Y.Z` → create the GitHub release → verify it has
 exactly the five assets → only then move `vX` to it. `vX` moves only for stable, non-draft releases
 and only forward (never below the newest stable `vX.*` tag, so a backport leaves it alone).
+hoard stays 0.x (users pin `@v0`) until artifact packing lands; 1.0 and the `v1` tag follow it.
 
 ## 11. Testing
 

@@ -30,6 +30,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-15 · 01-core-r2 CI + 02-github-action/Task 5 Step 2 (first runs on GitHub, PR keelstackhq/hoard#1) · 82a2472 (fix for the `fetch_update` deprecation on Rust 1.99) · ci run 38691600578: `rust`, `e2e`, `action` green; self-test run 38691600620: all 12 jobs green — every `hit` job passed its `FULL TURBO` and `hits > 0` checks on Linux x64/arm64, macOS, Windows (GitHub cache) and Linux (real R2 bucket, `r2-lifecycle: auto` started without error); `vp hit` restored the task cache and logged `vp run: cache hit`
 - 2026-10-21 · 02-github-action/Task 2 Step 3 (release dry run) · release run 39659790600 (attempt 2; attempt 1's two macOS jobs got no runner and were cancelled after 15 min, nothing published) · five `hoard-<target>.tar.gz` assets on draft pre-release v0.0.0-test; `sha256sum` of each equals `action/src/checksums.generated.ts` in `chore(release): v0.0.0-test` (c5f9775); x86_64 musl binary is static and prints `hoard 0.0.0-test`; no `v0` tag created · cleanup of release, tag and branch needs the owner (see Blocked)
 - 2026-10-21 · 03-vite-plus-throughput/Task 4 Steps 2–3 (rate-limit bench + packing decision) · runs 39659795765 (100), 39662254202 (400), 39664353368 (1000) · 100: throttled 0; 400: throttled 1, rate_limited 22, warm hits 378/400; 1000: throttled 0 (slower build, ~146 uploads/min) → **packing needed**, recorded in spec §12; results in `docs/benchmarks/2026-10-rate-limit.md` · packing spec section + plan not written yet
+- 2026-10-22 · **0.1.0 released** · release run 39749863566 → `chore(release): v0.1.0` (5c32424), tags `v0.1.0` and `v0` on it · release v0.1.0 (stable) has the five `hoard-<target>.tar.gz`, their digests equal `checksums.generated.ts` (`VERSION = "0.1.0"`); x86_64 musl binary is static and prints `hoard 0.1.0` · docs pin `@v0` (0.x); 1.0 and `v1` wait for packing; self-test gains a `release` variant (published binary)
 
 ## Blocked
 
@@ -48,9 +49,6 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   enough (MinIO); instead PUT the same >8 MiB artifact twice through `hoard serve --storage r2` (e.g. two parallel
   `curl -X PUT --data-binary @big.bin` against `/v8/artifacts/abc`) and confirm the object is unchanged
   (`If-None-Match: *` on CompleteMultipartUpload must be honoured by R2).
-- **Release dry run cleanup (2026-10-21).** The dry run passed, but this agent session may not delete releases,
-  tags or branches. Action: delete the draft release v0.0.0-test (id 419979464), then the tag and the branch:
-  `gh release delete v0.0.0-test --yes --cleanup-tag && git push origin --delete claude/release-dry-run-0.0.0-test`.
 - **03-vite-plus-throughput/Task 3 Step 1 — does R2 reset an object's age on self-copy?** Refresh-on-hit uses
   CopyObject onto itself (MinIO: yes). Action: with a test R2 bucket and token, run
   `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=…
@@ -129,20 +127,20 @@ curl -s -X POST -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/shutd
 ./target/release/hoard vp restore --storage fs  # in a fresh checkout, after `pnpm install`
 ```
 
-In CI, once a release exists: `- uses: keelstackhq/hoard@v1`. The README
+In CI: `- uses: keelstackhq/hoard@v0`. The README
 lists every input and output.
 
 ### Blocked items for you, in a sensible order
 
 1. ~~**CI**~~ and ~~**self-test on real runners**~~: green on PR keelstackhq/hoard#1 (2026-10-15).
-2. ~~**Release dry run**~~: passed 2026-10-21; delete the leftover draft release, tag and branch (Blocked).
+2. ~~**Release dry run**~~: passed 2026-10-21; the owner removed the leftovers.
 3. **Real R2 checks:**
    - the lifecycle rule with `hoard doctor`;
    - immutable >8 MiB artifacts;
    - `refresh_real_r2`, which decides whether self-copy resets the object's age.
 4. ~~**Benchmark**~~: done 2026-10-21, packing needed; its spec section and plan are open (Blocked).
 
-After that, cut the first real release (`docs/RELEASING.md`).
+~~First real release~~: 0.1.0 released 2026-10-22 (`@v0`). 1.0 / `@v1` waits for packing.
 
 ### Known limits and decisions to revisit
 
