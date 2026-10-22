@@ -1,0 +1,116 @@
+name: r2-checks
+# The real-R2 checks that MinIO cannot answer (docs/PROGRESS.md, Blocked):
+#   doctor       `hoard doctor` verifies the lifecycle rule (expire after max-age-days, abort
+#                incomplete multipart uploads after 1 day) and a bucket round-trip;
+#   immutable    the same >8 MiB (multipart) artifact key PUT twice, one after the other and in
+#                parallel, keeps the first complete body (If-None-Match on R2);
+#   refresh      `refresh_real_r2`: does CopyObject onto itself reset an object's age on R2?
+# Uses the R2_* repository secrets, through env vars only. Objects are written under a per-run
+# cache version, so the lifecycle rule expires them.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: [.github/workflows/r2-checks.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-checks
+  cancel-in-progress: false
+
+env:
+  HOARD_STORAGE: r2
+  HOARD_R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+  HOARD_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  HOARD_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  HOARD_R2_BUCKET: ${{ secrets.R2_BUCKET }}
+
+jobs:
+  doctor-and-immutable:
+    # Fork PRs get no secrets.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the secrets
+        run: |
+          [ -n "$HOARD_R2_ACCESS_KEY_ID" ] || { echo "::error::R2_* repository secrets are missing"; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo build --release
+      - name: Immutable >8 MiB keys
+        env:
+          HOARD_CACHE_VERSION: r2check-${{ github.run_id }}-${{ github.run_attempt }}
+          HOARD_WRITE_BEHIND: "off" # each PUT answers after its upload finished
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/r2check"
+          mkdir -p "$work"
+          target/release/hoard serve --port-file "$work/port" --token-file "$work/token" >"$work/hoard.log" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 300); do [ -s "$work/port" ] && break; kill -0 "$pid" || break; sleep 0.1; done
+          [ -s "$work/port" ] || { cat "$work/hoard.log"; echo "::error::hoard serve did not start"; exit 1; }
+          token="$(cat "$work/token")"
+          echo "::add-mask::$token"
+          base="http://127.0.0.1:$(cat "$work/port")"
+          put() { curl -fsS -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $token" \
+            -H 'Content-Type: application/octet-stream' --data-binary "@$2" "$base/v8/artifacts/$1"; }
+          get_sha() { curl -fsS -H "Authorization: Bearer $token" "$base/v8/artifacts/$1" | sha256sum | cut -d' ' -f1; }
+          for f in a b c d; do head -c $((20 * 1024 * 1024)) /dev/urandom >"$work/$f.bin"; done
+          sha() { sha256sum "$work/$1.bin" | cut -d' ' -f1; }
+          fail=0
+
+          # 1. Sequential: the second PUT to an existing key is a success and changes nothing.
+          h1="$(printf '%x' "$GITHUB_RUN_ID")a1"
+          echo "sequential PUT a: $(put "$h1" "$work/a.bin")"
+          echo "sequential PUT b: $(put "$h1" "$work/b.bin")"
+          got="$(get_sha "$h1")"
+          if [ "$got" = "$(sha a)" ]; then echo "✓ sequential: key keeps the first body"
+          else echo "::error::sequential: GET returned $got, expected the first body $(sha a)"; fail=1; fi
+
+          # 2. Parallel: two multipart uploads race; the key must hold one complete body.
+          h2="$(printf '%x' "$GITHUB_RUN_ID")b2"
+          put "$h2" "$work/c.bin" >"$work/c.code" & p1=$!
+          put "$h2" "$work/d.bin" >"$work/d.code" & p2=$!
+          wait "$p1"; wait "$p2"
+          echo "parallel PUT c: $(cat "$work/c.code"), d: $(cat "$work/d.code")"
+          got="$(get_sha "$h2")"
+          if [ "$got" = "$(sha c)" ] || [ "$got" = "$(sha d)" ]; then echo "✓ parallel: key holds one complete body"
+          else echo "::error::parallel: GET returned $got, neither body (c $(sha c), d $(sha d))"; fail=1; fi
+
+
+          echo "stats: $(curl -fsS -H "Authorization: Bearer $token" "$base/_hoard/stats")"
+          curl -fsS -o /dev/null -X POST -H "Authorization: Bearer $token" "$base/_hoard/shutdown" || true
+          wait "$pid" || true
+          echo "--- hoard log ---"; cat "$work/hoard.log"
+          exit "$fail"
+      - name: hoard doctor (lifecycle rule incl. 1-day multipart abort)
+        if: ${{ !cancelled() }} # run even when the immutability check failed
+        run: target/release/hoard doctor
+
+  refresh:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: refresh_real_r2 (does self-copy reset an object's age?)
+        env:
+          HOARD_TEST_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          HOARD_TEST_R2_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+          HOARD_TEST_R2_SECRET: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          HOARD_TEST_R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: cargo test --test r2 -- --ignored --exact refresh_real_r2 --nocapture

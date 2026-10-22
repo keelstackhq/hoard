@@ -357,12 +357,10 @@ changes). Details:
 - Needs `s3:GetObject` and `s3:PutObject` on the prefix (`CopyObject`), which `hoard` already
   needs for writes.
 
-**Unverified on real R2.** The self-copy is tested on MinIO (last-modified moves forward, the
-body is unchanged). Whether Cloudflare R2 resets the age with a self-copy has not been checked
-yet; run once by hand:
-`HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=… HOARD_TEST_R2_BUCKET=… cargo test --test r2 -- --ignored refresh_real_r2`.
-If R2 does not move `Last-Modified`, switch `refresh_object` to a re-PUT of the same envelope
-and record the finding here.
+**Verified on real R2 (2026-10-22).** `refresh_real_r2` (run by `.github/workflows/r2-checks.yml`)
+showed that a self-copy on Cloudflare R2 moves `Last-Modified` forward and keeps the body, so it
+resets the lifecycle age as on MinIO. If that ever changes, switch `refresh_object` to a re-PUT of
+the same envelope.
 
 ## 8. Modes and trust
 
