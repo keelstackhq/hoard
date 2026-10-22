@@ -31,6 +31,17 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-21 · 02-github-action/Task 2 Step 3 (release dry run) · release run 39659790600 (attempt 2; attempt 1's two macOS jobs got no runner and were cancelled after 15 min, nothing published) · five `hoard-<target>.tar.gz` assets on draft pre-release v0.0.0-test; `sha256sum` of each equals `action/src/checksums.generated.ts` in `chore(release): v0.0.0-test` (c5f9775); x86_64 musl binary is static and prints `hoard 0.0.0-test`; no `v0` tag created · cleanup of release, tag and branch needs the owner (see Blocked)
 - 2026-10-21 · 03-vite-plus-throughput/Task 4 Steps 2–3 (rate-limit bench + packing decision) · runs 39659795765 (100), 39662254202 (400), 39664353368 (1000) · 100: throttled 0; 400: throttled 1, rate_limited 22, warm hits 378/400; 1000: throttled 0 (slower build, ~146 uploads/min) → **packing needed**, recorded in spec §12; results in `docs/benchmarks/2026-10-rate-limit.md` · packing spec section + plan not written yet
 
+- 2026-10-22 · ci: `ci-ok` aggregate job (PR keelstackhq/hoard#5, merged) · 2ecc3ac · actionlint clean; ci run green incl. ci-ok
+- 2026-10-22 · 04-packing/design · ae72a62, c50fcb3 · spec §6.5 + plan; opus design review (3 Critical, 6 Important) folded in, decisions recorded in the plan
+- 2026-10-22 · 04-packing/Task 1 shared Twirp client + Range reads · 8bb6c1d · 8 gha_twirp + 44 vp pass
+- 2026-10-22 · 04-packing/Task 2 pack setting, envelope hash, packs stat · 55cf151 · 113 unit pass
+- 2026-10-22 · 04-packing/Task 3 pack index · 4e5db71 · 123 unit pass (10 index)
+- 2026-10-22 · 04-packing/Task 4 pack backend + Range reads · 6cd654d · 20 pack tests (fs + GitHub mock)
+- 2026-10-22 · 04-packing/Task 5 pack writer + shutdown index merge · 319e658 · 34 pack tests, 3× no flakes
+- 2026-10-22 · 04-packing/Task 6 server wiring · 6251b7a · 4 http_pack; e2e fs, fs+PACK=on, r2 PASS
+- 2026-10-22 · 04-packing/Task 7 bench + docs · 09e962f, 91141ea; whole-branch review fixes 2303f84; diagnostics f1e1f41 · cargo all green (37 pack); CI + self-test (10 legs on the GitHub cache) green
+- 2026-10-22 · 04-packing/Task 8 bench with packing · runs 39755912769 (400), 39756606113 (1000) · 400 and 1000: 1 pack, throttled 0, rate_limited 0, put_errors 0, warm hits 400/400 and 1000/1000 → goal met
+
 ## Blocked
 
 <!-- Task, what is missing, exact action a human must take. -->
@@ -56,10 +67,12 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
   `HOARD_TEST_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com HOARD_TEST_R2_KEY=… HOARD_TEST_R2_SECRET=…
   HOARD_TEST_R2_BUCKET=… cargo test --test r2 -- --ignored refresh_real_r2`. If it fails, tell me: refresh then
   switches to a re-PUT of the same envelope and spec §7.3 records it. Until then refresh-on-hit stays off by default.
-- **Packing (spec §12) — design and plan.** The bench showed `throttled > 0` at 400 packages, so packing is needed.
-  Action: write the packing spec section and a plan (one pack + index per job, HTTP Range reads), as promised in
-  03-vite-plus-throughput/Task 4 Step 3. Until it ships, a cold build of ~400+ packages on the GitHub cache loses
-  some uploads to the 429 pause (22 of 400 in the bench); R2 is not affected.
+- ~~**Packing (spec §12) — design and plan.**~~ Done 2026-10-22 (spec §6.5, plan 04-packing, PR keelstackhq/hoard#9).
+- **Intermittent miss seen once in self-test (2026-10-22).** On PR #9 head 91141ea one of ten GitHub-cache `hit` legs
+  missed one of two packed artifacts; its re-run and every later run passed. Cause unknown; hoard now logs index
+  loads/writes and the self-test prints the hoard log on a failed check. Action: if it recurs, the log of that job
+  shows why — send it to an agent.
+- **Required check (owner).** Add `ci-ok` as the required status check in main's branch protection.
 
 ## Status
 

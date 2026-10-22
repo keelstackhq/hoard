@@ -182,9 +182,9 @@ Behaviour exactly as spec §6.5:
 
 **Files:** `.github/workflows/bench.yml` (input `pack` auto/on/off → `HOARD_PACK`; when packing is on read final stats from `POST /_hoard/shutdown`; report column `pack`), `README.md` (`--pack`), `docs/benchmarks/README.md` if it lists columns, `CLAUDE.md` layout (`pack/`, `gha_twirp.rs`), `docs/PROGRESS.md`.
 
-- [ ] Step 1: actionlint clean; local fs smoke: `hoard serve --pack on` + generator 50 packages twice → 50 hits.
-- [ ] Step 2: commit `ci: bench packing; docs`
+- [x] Step 1: actionlint clean; local fs smoke: `hoard serve --pack on` + generator 50 packages twice → 50 hits.
+- [x] Step 2: commit `ci: bench packing; docs`
 
 ### Task 8: Bench on GitHub
 
-- [ ] Run `bench.yml` on the PR branch with 400 and 1000 packages (`pack: auto`), one at a time; record rows in `docs/benchmarks/2026-10-rate-limit.md` (new table "with packing"); goal `throttled = 0`, `rate_limited = 0`, warm hits = packages. Commit `docs: rate-limit benchmark with packing`.
+- [x] Run `bench.yml` on the PR branch with 400 and 1000 packages (`pack: auto`), one at a time; record rows in `docs/benchmarks/2026-10-rate-limit.md` (new table "with packing"); goal `throttled = 0`, `rate_limited = 0`, warm hits = packages. Commit `docs: rate-limit benchmark with packing`.
