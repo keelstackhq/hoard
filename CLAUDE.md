@@ -17,10 +17,14 @@ src/               Rust crate (lib + bin "hoard")
   key.rs           hash validation, key layout {prefix}{tool}/{version}/{hash}
   envelope.rs      HRD1 blob format (header + raw artifact body)
   store.rs         Store over an OpenDAL Operator (ghac | s3→R2 | fs)
+  gha_twirp.rs     GitHub cache v2 Twirp client (vp archives, packs, Range reads)
+  pack/            packing (spec §6.5): index, names, backend, reader, writer
+  writebehind.rs   spooled background uploads (pack=off)
+  ratelimit.rs     429 pause gate; redact.rs: secret-free errors; doctor.rs
   server/          axum router: Turborepo /v8 API, auth, /_hoard/*
-  r2/              lifecycle rule (aws-sdk-s3) and size-cap prune
+  r2/              lifecycle rule (aws-sdk-s3), size-cap prune, refresh-on-hit
   vp/              Vite+ task-cache restore/save
-tests/             integration tests (http.rs, r2.rs, vp.rs), e2e/, fixtures/
+tests/             integration tests (http.rs, http_pack.rs, pack.rs, r2.rs, vp.rs, …), e2e/, fixtures/
 action.yml         GitHub Action entry (repo root)
 action/            TypeScript action source (src/, test/) and committed dist/
 scripts/           release and benchmark helpers
@@ -35,6 +39,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 cargo test                                       # unit + integration
 cargo test -- --ignored                          # large-artifact streaming test
 tests/e2e/turbo.sh                               # real turbo, fs storage
+PACK=on tests/e2e/turbo.sh                       # real turbo, fs storage, packing
 STORAGE=r2 tests/e2e/turbo.sh                    # real turbo, MinIO as R2
 pnpm --dir action install && pnpm --dir action lint && pnpm --dir action test
 pnpm --dir action build                          # must keep action/dist < 200 KB
