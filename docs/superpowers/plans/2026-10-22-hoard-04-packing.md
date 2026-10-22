@@ -142,8 +142,8 @@ impl PackReader {
 ```
 Header parsing from the range stream: reuse the store's prefix-decoding helper if one exists (`store.rs` `open`), else factor one out (`envelope::read_header(stream) -> (Header, rest)`), bounded to 4104 bytes.
 
-- [ ] Step 1: failing tests — names: ref precedence, sanitising, prefixes end with `/`; fs: write a pack file + index by hand (via `PackIndex`), `PackReader` finds hash, `get` streams exact body; `newest` picks the newer of two indexes; ref + base indexes are merged, "any" used only when both are absent; an entry whose offset points at another envelope → `Corrupt`, hash in `corrupt()`, next lookup `None`; deleted pack → `Miss`, `missing()` contains it, second lookup is `None` without a storage call; upload to an existing key → `Exists`; gha mock: same round trip, URL resolved once for two GETs from one pack, 403 once → re-resolved, 429 on lookup → `Miss` but not missing; load slower than the wait → empty index; no `MOCKSIG` in any error string.
-- [ ] Step 2–4. Step 5: commit `feat: pack backend and Range reads`
+- [x] Step 1: failing tests — names: ref precedence, sanitising, prefixes end with `/`; fs: write a pack file + index by hand (via `PackIndex`), `PackReader` finds hash, `get` streams exact body; `newest` picks the newer of two indexes; ref + base indexes are merged, "any" used only when both are absent; an entry whose offset points at another envelope → `Corrupt`, hash in `corrupt()`, next lookup `None`; deleted pack → `Miss`, `missing()` contains it, second lookup is `None` without a storage call; upload to an existing key → `Exists`; gha mock: same round trip, URL resolved once for two GETs from one pack, 403 once → re-resolved, 429 on lookup → `Miss` but not missing; load slower than the wait → empty index; no `MOCKSIG` in any error string.
+- [x] Step 2–4. Step 5: commit `feat: pack backend and Range reads`
 
 ### Task 5: Pack writer, drain and index write
 

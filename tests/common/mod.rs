@@ -4,6 +4,7 @@
 pub mod failing_layer;
 pub mod gha_mock;
 pub mod lifecycle_proxy;
+pub mod pack;
 pub mod store_checks;
 
 use hoard::config::{Config, LifecycleMode, Mode, R2Config, Storage};

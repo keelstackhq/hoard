@@ -55,6 +55,8 @@ pub struct MockState {
     pub fail_blob_get_next: Option<(u16, usize)>,
     /// Blob GETs answer 200 with the whole blob even when `Range` is sent.
     pub ignore_range: bool,
+    /// Every Twirp call waits this long before it is handled.
+    pub twirp_delay: Option<std::time::Duration>,
 }
 
 /// Takes one failure off a one-shot counter, if any is left.
@@ -96,6 +98,10 @@ impl GhaMock {
     pub fn fail_next_blob_get(&self, status: u16, n: usize) {
         self.state.lock().unwrap().fail_blob_get_next = Some((status, n));
     }
+    /// Delays every Twirp call by `d`.
+    pub fn delay_twirp(&self, d: std::time::Duration) {
+        self.state.lock().unwrap().twirp_delay = Some(d);
+    }
     /// Makes blob GETs ignore `Range` (answer 200 with the whole blob).
     pub fn ignore_range(&self, on: bool) {
         self.state.lock().unwrap().ignore_range = on;
@@ -124,6 +130,10 @@ async fn twirp(
     body: Bytes,
 ) -> Response {
     let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let delay = s.state.lock().unwrap().twirp_delay;
+    if let Some(d) = delay {
+        tokio::time::sleep(d).await;
+    }
     let mut st = s.state.lock().unwrap();
     st.requests.push(MockRequest {
         method: "POST".into(),
