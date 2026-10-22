@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 pub const MAX_PACKS: usize = 1000;
 /// Most entries an index may hold after `cap`.
 pub const MAX_ENTRIES: usize = 200_000;
-/// A pack not used for this long is dropped by `cap`.
-pub const MAX_UNUSED: Duration = Duration::from_secs(7 * 24 * 3600);
+/// A pack not used for this long is dropped by `cap`. Jobs that only read write no index, so
+/// `last used` can lag behind real use; an evicted pack is detected on read.
+pub const MAX_UNUSED: Duration = Duration::from_secs(30 * 24 * 3600);
 /// Decoded (JSON) size limit of an index.
 pub const MAX_DECODED: u64 = 64 << 20;
 
@@ -536,7 +537,7 @@ mod tests {
         );
         i.add_pack("k3", now - day, vec![("h3".into(), loc(0))]);
         i.touch("k1", now - 2 * day + 1); // k1 now used more recently than k2
-        i.touch("old", now - 8 * day);
+        i.touch("old", now - 31 * day);
 
         let mut c = i.clone();
         c.cap(now, MAX_UNUSED, 10, 100);

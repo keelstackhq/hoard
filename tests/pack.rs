@@ -358,14 +358,27 @@ async fn offset_into_the_middle_of_an_envelope_is_corrupt() {
 }
 
 #[tokio::test]
-async fn truncated_pack_is_a_miss_or_corrupt_never_a_short_hit() {
+async fn truncated_pack_is_a_miss_not_corrupt_and_never_a_short_hit() {
     let dir = tempfile::tempdir().unwrap();
     let (backend, op) = fs_backend(dir.path());
     let n = names("", &[]);
     let built = build_pack(&[("aa", &[1u8; 100])]);
     let idx = put_pack(&backend, &n.pack_key(1), &built, 1).await;
     put_index(&backend, &n.index_key(1), &idx).await;
-    // The pack lost its tail.
+
+    // The pack ends inside the envelope header: a read problem, a plain miss.
+    op.write(&n.pack_key(1), built.bytes[..12].to_vec())
+        .await
+        .unwrap();
+    let r = PackReader::start(backend.clone(), n.clone(), true, WAIT);
+    assert!(matches!(r.get("aa").await, PackGet::Miss));
+    assert!(r.corrupt().is_empty() && r.missing().is_empty());
+    assert!(
+        r.lookup("aa").await.is_some(),
+        "still indexed, not remembered"
+    );
+
+    // The pack lost its tail: the body stream errors, never a short hit.
     op.write(
         &n.pack_key(1),
         built.bytes[..built.bytes.len() - 40].to_vec(),
@@ -375,8 +388,10 @@ async fn truncated_pack_is_a_miss_or_corrupt_never_a_short_hit() {
     let r = PackReader::start(backend, n, true, WAIT);
     match r.get("aa").await {
         PackGet::Hit(_, body) => assert!(collect(body).await.is_err(), "short body must error"),
-        PackGet::Miss | PackGet::Corrupt => {}
+        PackGet::Miss => {}
+        PackGet::Corrupt => panic!("a truncated read is not corrupt"),
     }
+    assert!(r.corrupt().is_empty());
 }
 
 #[tokio::test]
@@ -516,6 +531,24 @@ async fn gha_429_on_lookup_is_a_miss_but_not_missing() {
         b"alpha",
         "the next GET retries the lookup"
     );
+}
+
+#[tokio::test]
+async fn gha_stream_ending_inside_the_header_is_a_miss_not_corrupt() {
+    let (_mock, backend) = gha().await;
+    let n = names("", &[]);
+    let built = build_pack(&[("aa", &[1u8; 100])]);
+    let mut idx = PackIndex::default();
+    idx.add_pack(&n.pack_key(1), 1, built.entries.clone());
+    // The service holds only the first 12 bytes of the pack; the Range read ends early.
+    put_bytes(&backend, &n.pack_key(1), &built.bytes[..12])
+        .await
+        .unwrap();
+    put_index(&backend, &n.index_key(1), &idx).await;
+    let r = PackReader::start(backend, n, true, WAIT);
+    assert!(matches!(r.get("aa").await, PackGet::Miss));
+    assert!(r.corrupt().is_empty() && r.missing().is_empty());
+    assert!(r.lookup("aa").await.is_some());
 }
 
 #[tokio::test]
@@ -1007,7 +1040,7 @@ async fn writer_failing_backend_counts_put_errors_and_indexes_nothing() {
 }
 
 #[tokio::test]
-async fn writer_index_failure_counts_the_packs_artifacts_as_put_errors() {
+async fn writer_index_failure_moves_the_packs_artifacts_to_put_errors() {
     let (mock, backend) = gha().await;
     let w = writer_over(backend, names("", &[]));
     w.reader.wait_loaded().await;
@@ -1019,7 +1052,8 @@ async fn writer_index_failure_counts_the_packs_artifacts_as_put_errors() {
     let d = w.writer.drain(Duration::from_secs(30)).await;
     assert_eq!((d.packs, d.dropped, d.index_written), (1, 0, false));
     let s = w.snap();
-    assert_eq!((s.puts, s.packs, s.put_errors), (2, 1, 2));
+    assert_eq!((s.puts, s.packs, s.put_errors), (0, 1, 2));
+    assert_eq!(s.bytes_up, 0);
     let creates = twirp_calls(&mock, "CreateCacheEntry");
     let index_keys: Vec<_> = creates
         .iter()
@@ -1158,4 +1192,69 @@ async fn writer_waits_for_a_put_still_spooling() {
     let r = w.fresh_reader().await;
     assert_eq!(hit(&r, "slow").await.1, b"slow-body");
     assert_eq!(hit(&r, "fast").await.1, b"fast-body");
+}
+
+#[tokio::test]
+async fn writer_heals_a_corrupt_entry_that_this_job_packs_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (backend, _op) = fs_backend(dir.path());
+    let n = names("", &[]);
+    let built = build_pack(&[("aa", b"first"), ("bb", b"second body")]);
+    put_bytes(&backend, "turbo-pack/v1/prev-1", &built.bytes)
+        .await
+        .unwrap();
+    let loc = |h: &str| {
+        built
+            .entries
+            .iter()
+            .find(|(k, _)| k == h)
+            .unwrap()
+            .1
+            .clone()
+    };
+    let mut idx = PackIndex::default();
+    // "aa" points at bb's envelope: corrupt. "bb" is fine.
+    idx.add_pack(
+        "turbo-pack/v1/prev-1",
+        now_ms(),
+        vec![("aa".into(), loc("bb")), ("bb".into(), loc("bb"))],
+    );
+    put_index(&backend, "turbo-index/v1/local/prev-1", &idx).await;
+
+    let w = writer_over(backend, n);
+    assert!(matches!(w.reader.get("aa").await, PackGet::Corrupt));
+    assert_eq!(w.put("aa", b"first").await, Accepted::Spooled);
+    let d = w.writer.drain(Duration::from_secs(30)).await;
+    assert_eq!((d.packs, d.index_written), (1, true));
+    let r = w.fresh_reader().await;
+    assert!(
+        r.loaded()
+            .await
+            .get("aa")
+            .unwrap()
+            .pack
+            .contains("turbo-pack/v1/")
+    );
+    assert_eq!(hit(&r, "aa").await.1, b"first");
+}
+
+#[tokio::test]
+async fn writer_failed_pack_upload_does_not_keep_its_hashes_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let op = hoard::store::build_operator(&common::fs_config(dir.path()))
+        .unwrap()
+        .layer(common::failing_layer::FailingWrites::new(
+            opendal::ErrorKind::Unexpected,
+        ));
+    let backend = Arc::new(PackBackend::Store(op));
+    let w = writer_over(backend, names("", &[]));
+    for h in ["a1", "a2", "a3"] {
+        assert_eq!(w.put(h, &data(1, 500)).await, Accepted::Spooled);
+    }
+    wait_for(|| w.snap().put_errors == 3).await;
+    assert_eq!(
+        w.put("a1", &data(1, 500)).await,
+        Accepted::Spooled,
+        "the failed pack's hash is not a duplicate"
+    );
 }

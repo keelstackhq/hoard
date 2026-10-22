@@ -293,7 +293,9 @@ on a cold build of a few hundred packages (`docs/benchmarks/2026-10-rate-limit.m
 uploads/min, one `429`, 22 artifacts lost at 400 packages). With packing, a job uploads its
 new Turborepo artifacts as a few large **packs** plus one **index**, so a job makes about
 `ceil(new bytes / 128 MiB) + 1` uploads, whatever its package count, and a job whose tasks all
-hit makes none. `pack` is `auto` (on for `storage=github`), `on` or `off`. It works with
+hit makes none. `pack` is `auto` (on for `storage=github`), `on` or `off`. With `pack` on, a pack backend that
+cannot be built (e.g. missing GitHub cache env) is a startup error, never a fallback to
+per-artifact storage. It works with
 `github` and `fs` (tests, e2e); with `storage=r2` it is ignored with one info line (R2 has no
 rate limit, and its lifecycle rule counts age from the last write, which would expire a whole
 pack that is still in use). Vite+ archives are unaffected; `refresh-on-hit` is r2-only, so it
@@ -366,15 +368,18 @@ spooling, seal the rest into a last pack, and wait for the pack uploads, but at 
 before the drain deadline; packs still uploading then are aborted and their artifacts counted
 as `put_errors`. Then, if a pack was uploaded or a pack was found missing or an entry corrupt,
 write the index of everything that did finish: load the newest indexes again as at startup
-(another job may have written one since), merge them with the loaded index and the new entries
-(for a hash in several packs the newest pack wins; `last used` is the latest seen), drop
-missing packs and corrupt entries, drop packs not used for 7 days (GitHub evicts those
-anyway), then drop the least recently used packs while there are more than 1000 packs or
+(another job may have written one since), merge them with the loaded index, drop missing
+packs and corrupt entries from that (so a hash that was corrupt and was packed again by this
+job keeps its new entry), then add the new entries (for a hash in several packs the newest
+pack wins; `last used` is the latest seen), drop packs whose `last used` is more than 30 days
+old (jobs that only read write no index, so `last used` can lag; an evicted pack is detected
+on read), then drop the least recently used packs while there are more than 1000 packs or
 200,000 entries, and upload it under this server's index key. The index upload is tried once
 more under a new key on a failure and is not held back by an upload pause (a `429` still
-counts `throttled`). Artifacts count as `puts`/`bytes_up` when their pack is uploaded; `packs`
+counts `throttled`). Artifacts count as `puts`/`bytes_up` when their pack is uploaded (and never also
+as `put_errors`; a pack that fails or is aborted leaves its hashes free for a later PUT); `packs`
 counts uploaded packs. If the index cannot be written, this job's packs are lost to later jobs
-(warning, and their artifacts are counted as `put_errors`).
+(warning, and their artifacts are moved from `puts` to `put_errors`).
 
 Limits and trade-offs:
 

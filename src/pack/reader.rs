@@ -255,8 +255,8 @@ type Rest = futures::stream::Chain<
 
 /// Parses the envelope header from the start of `stream` (at most `PREFIX_LEN +
 /// MAX_HEADER_LEN` bytes are buffered). Returns the header, its length in bytes and the rest
-/// of the stream (the bytes after the header). `Ok(None)`: not a valid envelope (also a
-/// stream that ends inside the header). `Err`: a read error.
+/// of the stream (the bytes after the header). `Ok(None)`: a complete but invalid header.
+/// `Err`: a read error, also a stream that ends inside the header (a truncated pack).
 async fn read_header(mut stream: BodyStream) -> std::io::Result<Option<(Header, usize, Rest)>> {
     let mut head: Vec<u8> = Vec::with_capacity(PREFIX_LEN + 256);
     let mut pending = Bytes::new();
@@ -286,7 +286,12 @@ async fn read_header(mut stream: BodyStream) -> std::io::Result<Option<(Header, 
         }
         match stream.next().await {
             Some(chunk) => pending = chunk?,
-            None => return Ok(None),
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the pack ended inside the envelope header",
+                ));
+            }
         }
     }
 }

@@ -27,7 +27,7 @@
 6. **Shutdown keeps 20 s of the 120 s drain for the index**, and writes an index of the packs that did finish; the index upload ignores the upload pause (tries once, retries once under a new key). Otherwise one late 429 would lose every pack of the job (review C2).
 7. **Pack and index keys are single-use**: `AlreadyExists` is a failure and every retry takes a fresh key, so the index can never point at an unfinalized reservation (review C1).
 8. **Bad entries heal**: a PUT for a hash whose pack is missing or whose read was corrupt is accepted again; corrupt entries and missing packs are dropped at the merge (review C3). A `429`/error on a URL lookup is only a miss, never "missing".
-9. **Index caps: LRU by `last used` per pack**, packs unused for 7 days dropped (GitHub evicts them anyway), then at most 1000 packs / 200,000 entries; decoded ≤ 64 MiB, decoded as a stream (review I2, I4). [A repo with >200k live artifacts loses its least recently used ones; they rebuild.]
+9. **Index caps: LRU by `last used` per pack**, packs whose `last used` is more than 30 days old dropped (jobs that only read write no index, so `last used` can lag; an evicted pack is detected on read), then at most 1000 packs / 200,000 entries; decoded ≤ 64 MiB, decoded as a stream (review I2, I4). [A repo with >200k live artifacts loses its least recently used ones; they rebuild.]
 10. **Envelope header gets an optional `hash`**, written only inside packs and checked on read, so a wrong offset can never serve another task's artifact.
 11. **Signed pack URLs are resolved lazily, once per pack per server**, and re-resolved once on 401/403 (an expired SAS).
 12. **Index load runs in the background**; reads and the PUT duplicate check wait for it at most 10 s after startup (Turborepo's request timeout is 30 s; review I5).
@@ -36,6 +36,7 @@
 15. **The bench reads final stats from `POST /_hoard/shutdown`** when packing is on (uploads happen at shutdown); Task 7 checks the action's post step still writes the summary when the server already stopped.
 16. **Visibility regression accepted and documented**: concurrently running jobs no longer see each other's artifacts before shutdown; `needs:` chains still do (review I6).
 17. **Pack file copy kept** (spool files are copied into one pack file before upload) rather than streaming a concatenation: `upload_blocks` takes a path, and 128 MiB of extra temp disk is cheap.
+18. **Review fixes (whole-branch review)**: corrupt-entry healing order, no fallback to per-artifact storage when pack is on, disjoint puts/put_errors, accepted set cleanup, truncated reads are misses, 30-day unused cutoff.
 
 ## Global Constraints
 
@@ -99,7 +100,7 @@ impl PackIndex {
   pub fn encode(&self) -> Vec<u8>;                         // zstd(JSON), spec §6.5
   pub fn decode(bytes: &[u8]) -> Result<Self, IndexError>; // streaming zstd→serde_json::from_reader over a reader limited to 64 MiB; v == 1, pack # in range
 }
-pub const MAX_PACKS: usize = 1000; pub const MAX_ENTRIES: usize = 200_000; pub const MAX_UNUSED: Duration = 7 days; pub const MAX_DECODED: u64 = 64 << 20;
+pub const MAX_PACKS: usize = 1000; pub const MAX_ENTRIES: usize = 200_000; pub const MAX_UNUSED: Duration = 30 days; pub const MAX_DECODED: u64 = 64 << 20;
 ```
 - [x] Step 1: failing unit tests — encode/decode round-trip; exact JSON shape of a one-entry index (decompress and compare); merge newest-wins regardless of argument order, last_used = max; drop_packs/remove_hashes remove entries and renumber; cap drops unused-for-7-days packs, then least recently used; decode rejects garbage, `v:2`, out-of-range pack #, oversize (use a zstd bomb of zeros > cap).
 - [x] Step 2–4. Step 5: commit `feat: pack index`
@@ -165,7 +166,7 @@ Behaviour exactly as spec §6.5:
 - `put`: wait for the reader's load; Duplicate if accepted, or `reader.lookup(hash)` is Some (lookup already excludes missing packs / corrupt hashes); NotCached when closed or over the spool cap (one warning); spool with `ExactLength` (count in `spooling` while writing); push to `unsealed`; if `unsealed_bytes >= target` take the list out under the lock and seal outside it.
 - seal: write `pack-<n>` (per item `encode_header(header with hash)` + body from the spool file, record offset/len), delete spool files, spawn the upload task (≤ 2 concurrent via semaphore).
 - upload task: wait on the gate; `upload(names.pack_key(next n))`; 429 → `throttled`, `gate.on_rate_limited`, retry with a new n; `Exists`/other error → `put_errors += items` (warn); success → `puts += items`, `bytes_up += Σsize`, `packs += 1`, `new_index.add_pack(...)`. Pack file deleted afterwards.
-- drain(timeout): `closed = true`; wait for `spooling == 0`; seal the rest; wait for uploads until `timeout - 20 s` (min 0), abort the rest and count their items as `dropped` + `put_errors`; if `new_index` non-empty or reader has missing/corrupt: `idx = load_newest()`, merge reader.loaded(), merge new_index, drop missing, remove corrupt, cap(now, 7 days, 1000, 200k), encode, write to a temp file, `upload(index_key(m))` ignoring the gate, on failure one retry with m+1 (429 counts `throttled`); if the index fails, warn and add the new packs' items to `put_errors` (subtracting from `puts`? no: count as put_errors only; keep `puts` = uploaded); remove the spool dir.
+- drain(timeout): `closed = true`; wait for `spooling == 0`; seal the rest; wait for uploads until `timeout - 20 s` (min 0), abort the rest and count their items as `dropped` + `put_errors`; if `new_index` non-empty or reader has missing/corrupt: `idx = load_newest()`, merge reader.loaded(), drop missing, remove corrupt, then merge new_index, cap(now, 30 days, 1000, 200k), encode, write to a temp file, `upload(index_key(m))` ignoring the gate, on failure one retry with m+1 (429 counts `throttled`); if the index fails, warn and move the new packs' items from `puts` to `put_errors` (`packs` stays); remove the spool dir.
 
 - [x] Step 1: failing tests (fs backend, small target e.g. 1 KiB) — 3 PUTs below target → no upload before drain, one pack + one index after, a fresh reader sees all 3; PUTs over target → 2 packs; duplicate hash → `Duplicate`; hash whose pack is missing → accepted again; drain with nothing new and nothing missing → no index written; index written by "another job" between load and drain is merged; gha mock 429 on the first pack's CreateCacheEntry (one-shot) → `throttled == 1`, uploaded under key `-2`, index names only `-2`; failing backend → `put_errors == n`, no index entry for them; spool cap → `NotCached`; a hung pack upload (gated mock / slow layer) with drain timeout 25 s… (use a test-only `with_index_reserve(Duration)` so tests run fast) → its items dropped, the finished pack is still in the written index; a PUT still spooling when drain starts is included.
 - [x] Step 2–4. Step 5: commit `feat: pack writer with shutdown index merge`

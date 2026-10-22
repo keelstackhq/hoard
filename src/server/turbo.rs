@@ -293,7 +293,11 @@ pub async fn put_artifact(
     // shutdown. Nothing is written to the store per artifact.
     if let Some(packs) = &s.packs {
         let Some(writer) = &packs.writer else {
-            warn!(%hash, "PUT: packing has no writer, not cached");
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                warn!("PUT: packing has no writer (spool dir unusable); artifacts are not cached");
+            }
             inc(&s.stats.put_errors, 1);
             return put_ok();
         };

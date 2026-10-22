@@ -459,3 +459,26 @@ async fn serve_drains_write_behind_queue_on_sigterm() {
     assert!(md.contains("| 0 | 0 | 7 B |"), "{md}");
     assert_eq!(spool_dirs(), 0, "spool dir removed on shutdown");
 }
+
+/// With packing on, missing GitHub env is still a startup error (no fallback to per-artifact
+/// storage or to a cache that silently does nothing).
+#[test]
+fn serve_github_pack_on_without_results_url_fails_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = hoard_without_actions_env()
+        .args(["serve", "--storage", "github", "--pack", "on"])
+        .env("ACTIONS_RUNTIME_TOKEN", "secret-tok-123")
+        .env("HOARD_PORT_FILE", dir.path().join("port"))
+        .env("HOARD_TOKEN_FILE", dir.path().join("token"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "ACTIONS_RESULTS_URL is not set: run hoard through the GitHub Action, or use --storage r2|fs"
+        ),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("port").exists());
+}

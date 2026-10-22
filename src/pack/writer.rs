@@ -93,10 +93,12 @@ struct Inner {
     /// PUTs between admission and the end of their `put` call (spooling, and sealing).
     spooling: watch::Sender<u64>,
     uploads: Mutex<Option<JoinSet<()>>>,
-    /// Artifacts in packs whose upload has not finished.
+    /// Artifacts in packs whose upload has not finished; decremented where the outcome is counted,
+    /// so an aborted upload is never counted twice.
     unfinished: AtomicU64,
     /// Artifacts in packs uploaded successfully.
     uploaded_items: AtomicU64,
+    uploaded_bytes: AtomicU64,
     packs: AtomicU64,
     new_index: Mutex<PackIndex>,
     next_file: AtomicU64,
@@ -176,6 +178,8 @@ struct SealedPack {
     path: PathBuf,
     entries: Vec<(String, Loc)>,
     bytes: u64,
+    /// The upload succeeded: the hashes stay accepted.
+    uploaded: AtomicBool,
 }
 
 impl Drop for SealedPack {
@@ -183,6 +187,12 @@ impl Drop for SealedPack {
         remove_file(&self.path);
         let mut st = lock(&self.inner.state);
         st.spooled_bytes = st.spooled_bytes.saturating_sub(self.bytes);
+        if !self.uploaded.load(Ordering::Relaxed) {
+            // Failed or aborted: a later PUT of these hashes is not a duplicate.
+            for (hash, _) in &self.entries {
+                st.accepted.remove(hash);
+            }
+        }
     }
 }
 
@@ -221,6 +231,7 @@ impl PackWriter {
                 uploads: Mutex::new(Some(JoinSet::new())),
                 unfinished: AtomicU64::new(0),
                 uploaded_items: AtomicU64::new(0),
+                uploaded_bytes: AtomicU64::new(0),
                 packs: AtomicU64::new(0),
                 new_index: Mutex::default(),
                 next_file: AtomicU64::new(0),
@@ -381,6 +392,7 @@ impl PackWriter {
             path,
             entries,
             bytes,
+            uploaded: AtomicBool::new(false),
         };
         // Frees the spool files (and their bytes, now counted by the pack).
         drop(items);
@@ -393,12 +405,7 @@ impl PackWriter {
         while set.try_join_next().is_some() {}
         inner.unfinished.fetch_add(n, Ordering::Relaxed);
         let inner = inner.clone();
-        set.spawn(async move {
-            upload_pack(&inner, &pack).await;
-            inner
-                .unfinished
-                .fetch_sub(pack.entries.len() as u64, Ordering::Relaxed);
-        });
+        set.spawn(async move { upload_pack(&inner, &pack).await });
     }
 
     /// Shutdown: stops accepting PUTs, waits for those still spooling, seals the rest, waits
@@ -476,9 +483,14 @@ impl PackWriter {
 
     /// The index could not be written: this job's packs are unknown to later jobs.
     fn index_failed(&self) {
-        let n = self.inner.uploaded_items.load(Ordering::Relaxed);
+        let stats = &self.inner.stats;
+        let n = self.inner.uploaded_items.swap(0, Ordering::Relaxed);
+        let bytes = self.inner.uploaded_bytes.swap(0, Ordering::Relaxed);
         if n > 0 {
-            self.inner.stats.put_errors.fetch_add(n, Ordering::Relaxed);
+            // Move them: `puts` and `put_errors` stay disjoint. `packs` stays: they were uploaded.
+            stats.puts.fetch_sub(n, Ordering::Relaxed);
+            stats.bytes_up.fetch_sub(bytes, Ordering::Relaxed);
+            stats.put_errors.fetch_add(n, Ordering::Relaxed);
         }
     }
 
@@ -494,9 +506,11 @@ impl PackWriter {
         }
         let mut idx = PackReader::load_newest(&inner.backend, &inner.names).await;
         idx.merge(&inner.reader.loaded().await);
-        idx.merge(&new);
+        // Missing packs and corrupt entries are dropped before this job's packs are merged in:
+        // a hash read as corrupt and packed again by this job must keep its new entry.
         idx.drop_packs(&missing);
         idx.remove_hashes(&corrupt);
+        idx.merge(&new);
         idx.cap(now_ms(), MAX_UNUSED, MAX_PACKS, MAX_ENTRIES);
         let bytes = match tokio::task::spawn_blocking(move || idx.encode()).await {
             Ok(b) => b,
@@ -579,11 +593,15 @@ async fn write_pack_file(path: &Path, items: &[Spooled]) -> io::Result<Vec<(Stri
 /// One pack upload: wait for a permit and an open gate, upload under a fresh key, retry under
 /// another after a 429, count the outcome, add the pack to the new index on success.
 async fn upload_pack(inner: &Arc<Inner>, pack: &SealedPack) {
-    let Ok(_permit) = inner.permits.acquire().await else {
-        return;
-    };
     let stats = &inner.stats;
     let items = pack.entries.len() as u64;
+    // The outcome and the `unfinished` decrement happen together (no await between them), so
+    // the drain deadline cannot abort an upload that already counted its artifacts.
+    let finish = || inner.unfinished.fetch_sub(items, Ordering::Relaxed);
+    let Ok(_permit) = inner.permits.acquire().await else {
+        finish();
+        return;
+    };
     loop {
         loop {
             let wait = inner.gate.remaining_pause(std::time::Instant::now());
@@ -601,7 +619,12 @@ async fn upload_pack(inner: &Arc<Inner>, pack: &SealedPack) {
                 stats.packs.fetch_add(1, Ordering::Relaxed);
                 inner.packs.fetch_add(1, Ordering::Relaxed);
                 inner.uploaded_items.fetch_add(items, Ordering::Relaxed);
+                inner
+                    .uploaded_bytes
+                    .fetch_add(pack.bytes, Ordering::Relaxed);
                 lock(&inner.new_index).add_pack(&key, now_ms(), pack.entries.clone());
+                pack.uploaded.store(true, Ordering::Relaxed);
+                finish();
             }
             Err(PackError::RateLimited { retry_after }) => {
                 stats.throttled.fetch_add(1, Ordering::Relaxed);
@@ -613,6 +636,7 @@ async fn upload_pack(inner: &Arc<Inner>, pack: &SealedPack) {
             Err(e) => {
                 warn!(error = %redacted(&e), "cannot upload a pack; {items} artifacts not cached");
                 stats.put_errors.fetch_add(items, Ordering::Relaxed);
+                finish();
             }
         }
         return;

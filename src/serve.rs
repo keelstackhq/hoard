@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -227,7 +227,14 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
 
     let stats = Arc::new(Stats::default());
     let rate_gate = Arc::new(RateGate::default());
-    let packs = start_packs(&cfg, &prefix, &stats, &rate_gate);
+    let packs = start_packs(
+        &cfg,
+        &prefix,
+        &stats,
+        &rate_gate,
+        PackBackend::from_config,
+        default_spool_dir(),
+    )?;
     // Packing replaces write-behind for Turborepo artifacts.
     let write_behind = if packs.is_some() {
         None
@@ -302,25 +309,22 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
 
 /// Packing (spec §6.5) when `pack` is on and the server does anything (`mode` is not `off`):
 /// the backend, the pack names from the process environment, the reader (loads the newest index
-/// unless `no-reads`) and, in `read-write` mode, the writer with a fresh spool dir. Problems
-/// are warnings: the server then runs without packs (a miss for every read) and the cache
-/// never fails the build.
+/// unless `no-reads`) and, in `read-write` mode, the writer with the fresh spool dir
+/// `spool_dir`. A backend that cannot be built is a setup error (missing GitHub env, bad
+/// config), never a fallback to per-artifact storage. A spool dir that cannot be created is a
+/// warning: the server keeps packs without a writer, so PUTs count `put_errors`.
 fn start_packs(
     cfg: &Config,
     prefix: &str,
     stats: &Arc<Stats>,
     gate: &Arc<RateGate>,
-) -> Option<Arc<Packs>> {
+    make_backend: impl FnOnce(&Config) -> anyhow::Result<PackBackend>,
+    spool_dir: PathBuf,
+) -> anyhow::Result<Option<Arc<Packs>>> {
     if !cfg.pack || cfg.mode == Mode::Off {
-        return None;
+        return Ok(None);
     }
-    let backend = match PackBackend::from_config(cfg) {
-        Ok(b) => Arc::new(b),
-        Err(e) => {
-            warn!(error = %redacted(&e), "cannot start packing; running without a cache for artifacts");
-            return None;
-        }
-    };
+    let backend = Arc::new(make_backend(cfg)?);
     let names = Arc::new(PackNames::from_env(prefix, &cfg.cache_version, |k| {
         std::env::var(k).ok().filter(|v| !v.is_empty())
     }));
@@ -331,7 +335,7 @@ fn start_packs(
         PACK_INDEX_WAIT,
     );
     let writer = if cfg.mode == Mode::ReadWrite {
-        let dir = default_spool_dir();
+        let dir = spool_dir;
         match std::fs::create_dir_all(&dir) {
             Ok(()) => Some(PackWriter::new(
                 backend,
@@ -357,7 +361,7 @@ fn start_packs(
         "pack on: Turborepo artifacts are packed into a few large entries and become readable \
          after this server shuts down"
     );
-    Some(Arc::new(Packs { reader, writer }))
+    Ok(Some(Arc::new(Packs { reader, writer })))
 }
 
 /// The write-behind queue when `write-behind` is on and the server writes (`read-write`): a
@@ -642,6 +646,57 @@ mod tests {
     use super::*;
     use crate::config::ServeArgs;
     use clap::Parser;
+
+    fn fs_pack_cfg(dir: &Path) -> Config {
+        Config::try_from(ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "fs",
+            "--fs-root",
+            dir.to_str().unwrap(),
+            "--pack",
+            "on",
+        ]))
+        .unwrap()
+    }
+
+    /// A pack backend that cannot be built is a startup error, not a fallback.
+    #[tokio::test]
+    async fn pack_on_with_a_failing_backend_is_a_startup_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = fs_pack_cfg(dir.path());
+        let err = start_packs(
+            &cfg,
+            "",
+            &Arc::new(Stats::default()),
+            &Arc::new(RateGate::default()),
+            |_| anyhow::bail!("ACTIONS_RESULTS_URL is not set: fix it"),
+            dir.path().join("spool"),
+        )
+        .err()
+        .expect("must fail");
+        assert!(err.to_string().contains("ACTIONS_RESULTS_URL is not set"));
+    }
+
+    /// A spool dir that cannot be created keeps packs on, without a writer.
+    #[tokio::test]
+    async fn pack_on_with_an_unusable_spool_dir_keeps_packs_without_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = fs_pack_cfg(dir.path());
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, b"x").unwrap();
+        let packs = start_packs(
+            &cfg,
+            "",
+            &Arc::new(Stats::default()),
+            &Arc::new(RateGate::default()),
+            PackBackend::from_config,
+            blocker.join("spool"),
+        )
+        .unwrap()
+        .expect("packs stay on");
+        assert!(packs.writer.is_none());
+    }
 
     /// A prune slower than the bound becomes a summary line, never an error.
     // Sends S3 requests to a server that never answers, so no pooled connection outlives the
