@@ -2,11 +2,15 @@
 # End-to-end: a real Turborepo build round-trips through hoard's cache.
 #   tests/e2e/turbo.sh                 fs storage
 #   STORAGE=r2 tests/e2e/turbo.sh      MinIO as R2 (docker compose up -d --wait minio)
+#   PACK=on tests/e2e/turbo.sh         fs storage with packing: the artifacts of run 1 become
+#                                      readable only after that server shut down, so run 2 is
+#                                      served by a second server on the same store
 # HOARD_BIN overrides the binary (default: cargo build --release).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 storage="${STORAGE:-fs}"
+pack="${PACK:-off}"
 hoard="${HOARD_BIN:-}"
 if [ -z "$hoard" ]; then
 	(cd "$root" && cargo build --release)
@@ -39,6 +43,11 @@ fail() {
 	exit 1
 }
 
+[ "$pack" = on ] && [ "$storage" != fs ] && fail "PACK=on needs STORAGE=fs"
+case "$pack" in on | off) ;; *) fail "PACK must be on or off, got '$pack'" ;; esac
+mkdir -p "$work/tmp"
+export RUNNER_TEMP="$work/tmp"
+
 cp -R "$root/tests/fixtures/turbo-repo" "$work/repo"
 rm -rf "$work/repo/node_modules" "$work/repo/.turbo"
 
@@ -58,24 +67,41 @@ r2)
 	;;
 *) fail "STORAGE must be fs or r2, got '$storage'" ;;
 esac
+[ "$pack" = on ] && serve_args+=(--pack on)
 
-"$hoard" serve "${serve_args[@]}" >"$work/hoard.log" 2>&1 &
-server_pid=$!
+start_server() {
+	rm -f "$work/port" "$work/token"
+	"$hoard" serve "${serve_args[@]}" >>"$work/hoard.log" 2>&1 &
+	server_pid=$!
+	# The port file is the readiness signal: hoard writes the token file first, then the port file.
+	for _ in $(seq 1 100); do
+		[ -s "$work/port" ] && break
+		kill -0 "$server_pid" 2>/dev/null || fail "hoard exited during startup"
+		sleep 0.1
+	done
+	[ -s "$work/port" ] || fail "hoard did not write its port file"
+	[ -s "$work/token" ] || fail "hoard wrote its port file but no token file"
+	eval "$("$hoard" env --port-file "$work/port" --token-file "$work/token")"
+	export TURBO_API TURBO_TOKEN TURBO_TEAM
+	token="$TURBO_TOKEN"
+	base="http://127.0.0.1:$(cat "$work/port")"
+}
 
-# The port file is the readiness signal: hoard writes the token file first, then the port file.
-for _ in $(seq 1 100); do
-	[ -s "$work/port" ] && break
-	kill -0 "$server_pid" 2>/dev/null || fail "hoard exited during startup"
-	sleep 0.1
-done
-[ -s "$work/port" ] || fail "hoard did not write its port file"
-[ -s "$work/token" ] || fail "hoard wrote its port file but no token file"
+stop_server() {
+	curl -sS -f -X POST -H "Authorization: Bearer $token" "$base/_hoard/shutdown" >/dev/null ||
+		fail "shutdown request failed"
+	wait "$server_pid" || fail "hoard did not exit 0"
+	server_pid=""
+}
 
-eval "$("$hoard" env --port-file "$work/port" --token-file "$work/token")"
-export TURBO_API TURBO_TOKEN TURBO_TEAM
+stat_field() {
+	curl -sS -H "Authorization: Bearer $token" "$base/_hoard/stats" |
+		node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0, "utf8"))[process.argv[1]]))' "$1"
+}
+
+start_server
+
 export TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 TURBO_NO_UPDATE_NOTIFIER=1
-token="$TURBO_TOKEN"
-base="http://127.0.0.1:$(cat "$work/port")"
 
 cd "$work/repo"
 pnpm install --frozen-lockfile >"$work/install.log" 2>&1 || {
@@ -92,6 +118,17 @@ grep -q "Remote caching enabled" "$work/run1.log" || {
 	fail "turbo did not enable remote caching"
 }
 
+if [ "$pack" = on ]; then
+	# Packs and their index are written at shutdown; the next job's server reads them.
+	puts="$(stat_field puts)"
+	stop_server
+	echo "--- summary (run 1) ---"
+	cat "$work/summary.md"
+	[ "$puts" = 0 ] || fail "expected puts == 0 before shutdown with pack on, got $puts"
+	grep -q 'Packs: 1 uploaded' "$work/summary.md" || fail "summary lacks 'Packs: 1 uploaded'"
+	start_server
+fi
+
 # Only the remote cache can serve the second run.
 rm -rf .turbo node_modules/.cache/turbo packages/*/dist
 
@@ -103,14 +140,14 @@ cat "$work/run2.log"
 grep -q "FULL TURBO" "$work/run2.log" || fail "second run was not FULL TURBO"
 [ -f packages/b/dist/out.txt ] || fail "packages/b/dist/out.txt was not restored"
 
-stats="$(curl -sS -H "Authorization: Bearer $token" "$base/_hoard/stats")"
-puts="$(printf '%s' "$stats" | node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0, "utf8")).puts))')"
-[ "$puts" = 2 ] || fail "expected puts == 2, got $puts (stats: $stats)"
+if [ "$pack" = on ]; then
+	[ "$(stat_field puts)" = 0 ] || fail "expected puts == 0 in run 2, got $(stat_field puts)"
+else
+	puts="$(stat_field puts)"
+	[ "$puts" = 2 ] || fail "expected puts == 2, got $puts"
+fi
 
-curl -sS -f -X POST -H "Authorization: Bearer $token" "$base/_hoard/shutdown" >/dev/null ||
-	fail "shutdown request failed"
-wait "$server_pid" || fail "hoard did not exit 0"
-server_pid=""
+stop_server
 
 echo "--- summary ---"
 cat "$work/summary.md"
@@ -123,4 +160,4 @@ if [ "$storage" = r2 ]; then
 fi
 
 ok=1
-echo "e2e ($storage): PASS"
+echo "e2e ($storage, pack=$pack): PASS"

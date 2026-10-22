@@ -81,6 +81,7 @@ pub fn fs_config(root: impl AsRef<std::path::Path>) -> Config {
 }
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use hoard::ratelimit::RateGate;
 use hoard::server::{AppState, router};
@@ -97,6 +98,8 @@ pub struct TestServer {
     pub rate_gate: Arc<RateGate>,
     /// The write-behind queue, when the server has one.
     pub write_behind: Option<Arc<WriteBehind>>,
+    /// The pack reader and writer, when the server has pack on.
+    pub packs: Option<Arc<hoard::pack::Packs>>,
     /// Receives a reply channel when `POST /_hoard/shutdown` is called; the handler answers
     /// once the reply is sent (or dropped).
     pub shutdown:
@@ -167,6 +170,42 @@ pub async fn spawn_write_behind_server(
     spawn_server(parts, Mode::ReadWrite, false, dir).await
 }
 
+/// A server with pack on over the fs store rooted at `shared/store` (several servers may share
+/// one root, like successive CI jobs). `env` feeds the pack names (run key, ref). The writer
+/// exists in read-write mode; its spool dir is under the server's own tempdir.
+pub async fn spawn_pack_server(
+    shared: &std::path::Path,
+    mode: Mode,
+    no_reads: bool,
+    env: &[(&str, &str)],
+) -> TestServer {
+    let dir = tempfile::tempdir().unwrap();
+    let op = build_operator(&fs_config(shared)).unwrap();
+    let mut parts = ServerParts::new(Arc::new(Store::new(op.clone())));
+    let backend = Arc::new(hoard::pack::backend::PackBackend::Store(op));
+    let names = pack::names("cache/", env);
+    let reader = hoard::pack::reader::PackReader::start(
+        backend.clone(),
+        names.clone(),
+        !no_reads,
+        Duration::from_secs(10),
+    );
+    let writer = (mode == Mode::ReadWrite).then(|| {
+        let spool = dir.path().join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        hoard::pack::writer::PackWriter::new(
+            backend,
+            reader.clone(),
+            names,
+            parts.stats.clone(),
+            parts.rate_gate.clone(),
+            spool,
+        )
+    });
+    parts.packs = Some(Arc::new(hoard::pack::Packs { reader, writer }));
+    spawn_server(parts, mode, no_reads, dir).await
+}
+
 /// A read-write server over `store` that refreshes R2 objects on a GET hit through `refresher`.
 pub async fn spawn_refresh_server(
     store: Store,
@@ -186,6 +225,7 @@ struct ServerParts {
     stats: Arc<Stats>,
     rate_gate: Arc<RateGate>,
     write_behind: Option<Arc<WriteBehind>>,
+    packs: Option<Arc<hoard::pack::Packs>>,
     refresh: Option<Arc<hoard::r2::refresh::Refresher>>,
 }
 
@@ -196,6 +236,7 @@ impl ServerParts {
             stats: Arc::default(),
             rate_gate: Arc::default(),
             write_behind: None,
+            packs: None,
             refresh: None,
         }
     }
@@ -222,6 +263,7 @@ async fn spawn_server(
         prefix: "cache/".into(),
         cache_version: "v1".into(),
         write_behind: parts.write_behind.clone(),
+        packs: parts.packs.clone(),
         refresh: parts.refresh.clone(),
         shutdown: tx,
     };
@@ -237,6 +279,7 @@ async fn spawn_server(
         store: parts.store,
         rate_gate: parts.rate_gate,
         write_behind: parts.write_behind,
+        packs: parts.packs,
         shutdown: rx,
         addr,
         _dir: dir,

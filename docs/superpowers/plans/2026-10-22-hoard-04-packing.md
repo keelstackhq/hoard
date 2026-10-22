@@ -174,8 +174,8 @@ Behaviour exactly as spec §6.5:
 
 **Files:** `src/server/mod.rs` (`AppState.packs: Option<Arc<Packs>>` where `Packs { reader, writer: Option<PackWriter> }`), `src/server/turbo.rs` (HEAD/GET/query/PUT branch on `packs`), `src/serve.rs` (start: `pack` on, storage ≠ r2 (info line otherwise) and mode ≠ off → backend + names + reader (load unless `no_reads`) + writer when read-write; write-behind not started; shutdown: drain packs before prune; summary `Packs: N uploaded`; info line on start). Test: `tests/http.rs` (pack on fs), `tests/e2e/turbo.sh` (`PACK=on`), `.github/workflows/ci.yml` (one more e2e step with `PACK=on`).
 
-- [ ] Step 1: failing tests — HTTP on fs with pack on: PUT 3 → GET misses before shutdown; shutdown; new server on same root → HEAD 200 with headers, GET body equal, batch query lists all; `mode=read` server reads packs, PUT 403; `no-reads` → misses; second job adds 1 artifact → index has 4; stats `puts`, `packs`; e2e `PACK=on tests/e2e/turbo.sh` second run FULL TURBO.
-- [ ] Step 2–4 (run e2e fs, fs+PACK=on, r2). Step 5: commit `feat: serve Turborepo artifacts from packs`
+- [x] Step 1: failing tests — HTTP on fs with pack on: PUT 3 → GET misses before shutdown; shutdown; new server on same root → HEAD 200 with headers, GET body equal, batch query lists all; `mode=read` server reads packs, PUT 403; `no-reads` → misses; second job adds 1 artifact → index has 4; stats `puts`, `packs`; e2e `PACK=on tests/e2e/turbo.sh` second run FULL TURBO.
+- [x] Step 2–4 (run e2e fs, fs+PACK=on, r2). Step 5: commit `feat: serve Turborepo artifacts from packs`
 
 ### Task 7: Bench and docs
 

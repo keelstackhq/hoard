@@ -69,8 +69,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Serve(args) => {
+            let pack_ignored = args.storage == hoard::config::Storage::R2
+                && args.pack == hoard::config::PackMode::On;
             let cfg = Config::try_from(args)?;
             init_logging();
+            if pack_ignored {
+                tracing::info!(
+                    "pack is ignored for storage=r2: R2 has no upload rate limit; artifacts are stored one by one"
+                );
+            }
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?

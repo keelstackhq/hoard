@@ -13,6 +13,11 @@ use tracing::{info, warn};
 use crate::config::{
     Config, LifecycleMode, Mode, Storage, TokenPaths, default_port_file, default_token_file,
 };
+use crate::pack::Packs;
+use crate::pack::backend::PackBackend;
+use crate::pack::names::PackNames;
+use crate::pack::reader::PackReader;
+use crate::pack::writer::PackWriter;
 use crate::r2::lifecycle::{LifecycleError, ensure_lifecycle, fix_command, r2_client, rule_id};
 use crate::r2::prune::prune;
 use crate::r2::refresh::Refresher;
@@ -33,6 +38,10 @@ pub const GITHUB_PREFIX: &str = "hoard/";
 /// marker is only written on completion, so an interrupted prune runs again next time.
 /// Known limitation: if the LIST alone takes longer than this, the marker is never written.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// How long reads and the PUT duplicate check wait for the pack index to load at startup
+/// (Turborepo's request timeout is 30 s).
+const PACK_INDEX_WAIT: Duration = Duration::from_secs(10);
 
 /// Upper bound for all shutdown work together (drain, then prune, then the summary). The
 /// GitHub Action waits 300 s for the shutdown reply; staying under it keeps the summary.
@@ -218,7 +227,13 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
 
     let stats = Arc::new(Stats::default());
     let rate_gate = Arc::new(RateGate::default());
-    let write_behind = start_write_behind(&cfg, &store, &stats, &rate_gate);
+    let packs = start_packs(&cfg, &prefix, &stats, &rate_gate);
+    // Packing replaces write-behind for Turborepo artifacts.
+    let write_behind = if packs.is_some() {
+        None
+    } else {
+        start_write_behind(&cfg, &store, &stats, &rate_gate)
+    };
     let refresh = start_refresher(&cfg, &stats);
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<oneshot::Sender<StatsSnapshot>>(8);
     let state = AppState {
@@ -231,6 +246,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         prefix: prefix.clone(),
         cache_version: cfg.cache_version.clone(),
         write_behind: write_behind.clone(),
+        packs: packs.clone(),
         refresh,
         shutdown: shutdown_tx,
     };
@@ -267,6 +283,7 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
         store: &store_for_shutdown,
         prefix: &prefix,
         write_behind: write_behind.as_deref(),
+        packs: packs.as_deref(),
     };
     let final_stats = shutdown_work(&cfg, cache, &stats, &storage_line, startup_lines).await;
     remove_if_present(&cfg.port_file);
@@ -281,6 +298,66 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let _ = stop_tx.send(());
     server.await.context("server task failed")??;
     Ok(())
+}
+
+/// Packing (spec §6.5) when `pack` is on and the server does anything (`mode` is not `off`):
+/// the backend, the pack names from the process environment, the reader (loads the newest index
+/// unless `no-reads`) and, in `read-write` mode, the writer with a fresh spool dir. Problems
+/// are warnings: the server then runs without packs (a miss for every read) and the cache
+/// never fails the build.
+fn start_packs(
+    cfg: &Config,
+    prefix: &str,
+    stats: &Arc<Stats>,
+    gate: &Arc<RateGate>,
+) -> Option<Arc<Packs>> {
+    if !cfg.pack || cfg.mode == Mode::Off {
+        return None;
+    }
+    let backend = match PackBackend::from_config(cfg) {
+        Ok(b) => Arc::new(b),
+        Err(e) => {
+            warn!(error = %redacted(&e), "cannot start packing; running without a cache for artifacts");
+            return None;
+        }
+    };
+    let names = Arc::new(PackNames::from_env(prefix, &cfg.cache_version, |k| {
+        std::env::var(k).ok().filter(|v| !v.is_empty())
+    }));
+    let reader = PackReader::start(
+        backend.clone(),
+        names.clone(),
+        !cfg.no_reads,
+        PACK_INDEX_WAIT,
+    );
+    let writer = if cfg.mode == Mode::ReadWrite {
+        let dir = default_spool_dir();
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => Some(PackWriter::new(
+                backend,
+                reader.clone(),
+                names,
+                stats.clone(),
+                gate.clone(),
+                dir,
+            )),
+            Err(e) => {
+                warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "cannot create the pack spool dir; artifacts are not cached"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    info!(
+        "pack on: Turborepo artifacts are packed into a few large entries and become readable \
+         after this server shuts down"
+    );
+    Some(Arc::new(Packs { reader, writer }))
 }
 
 /// The write-behind queue when `write-behind` is on and the server writes (`read-write`): a
@@ -409,6 +486,7 @@ struct ShutdownCache<'a> {
     store: &'a Store,
     prefix: &'a str,
     write_behind: Option<&'a WriteBehind>,
+    packs: Option<&'a Packs>,
 }
 
 /// Shutdown hook for `storage=r2`, `mode=read-write` (spec §7.2): enforce `max-size`, bounded
@@ -517,6 +595,15 @@ async fn shutdown_work_within(
             ));
         }
     }
+    if let Some(writer) = cache.packs.and_then(|p| p.writer.as_ref()) {
+        let report = writer.drain(bounds.drain.min(bounds.budget)).await;
+        if report.dropped > 0 {
+            extra_lines.push(format!(
+                "Upload queue: {} dropped at shutdown",
+                report.dropped
+            ));
+        }
+    }
     let prune_bound = bounds
         .prune
         .min(bounds.budget.saturating_sub(start.elapsed()));
@@ -589,6 +676,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let start = std::time::Instant::now();
         let lines = prune_on_shutdown_within(&cfg, cache, Duration::from_millis(200)).await;
@@ -656,6 +744,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let stats = Stats::default();
         shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
@@ -696,6 +785,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let stats = Stats::default();
         shutdown_work(&cfg, cache, &stats, "Storage: github", vec![]).await;
@@ -730,6 +820,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let stats = Stats::default();
         shutdown_work(&cfg, cache, &stats, "Storage: r2", vec![]).await;
@@ -759,6 +850,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         let stats = Stats::default();
         stats
@@ -825,6 +917,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: Some(&wb),
+            packs: None,
         };
         let start = std::time::Instant::now();
         let bounds = ShutdownBounds {
@@ -894,6 +987,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: Some(&wb),
+            packs: None,
         };
         let bounds = ShutdownBounds {
             budget: Duration::from_millis(600),
@@ -976,6 +1070,7 @@ mod tests {
             store: &store,
             prefix: "cache/",
             write_behind: None,
+            packs: None,
         };
         assert!(
             prune_on_shutdown_within(&cfg, cache, PRUNE_TIMEOUT)
