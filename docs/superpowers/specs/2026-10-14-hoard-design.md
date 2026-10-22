@@ -260,7 +260,7 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   the server is not GHES, else v1) and the endpoint (v2: `ACTIONS_RESULTS_URL`; v1:
   `ACTIONS_CACHE_URL`, else `ACTIONS_RESULTS_URL`).
 - Cache entries are versioned `hoard-{cache_version}`, so different cache versions never collide.
-- Vite+ archives (§6.1) use a small Twirp JSON client (`src/vp/gha_twirp.rs`) instead of OpenDAL:
+- Vite+ archives (§6.1) use a small Twirp JSON client (`src/gha_twirp.rs`) instead of OpenDAL:
   `CreateCacheEntry` → Put Block (32 MiB blocks, base64 block ids of equal length, at most one
   block in memory) and Put Block List on the signed upload URL (`x-ms-version: 2025-01-05`) →
   `FinalizeCacheEntryUpload` with the size; restore is `GetCacheEntryDownloadURL` with

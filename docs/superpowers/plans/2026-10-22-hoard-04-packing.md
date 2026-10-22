@@ -13,7 +13,7 @@
 ## Facts checked (2026-10-22)
 
 - Benchmark (`docs/benchmarks/2026-10-rate-limit.md`): 400 packages → 233 uploads/min, 1 × 429, 22 artifacts lost; 1000 packages → 146 uploads/min, no 429. The limit is per minute, so it is the upload *rate*, not the package count, that matters.
-- GitHub cache service v2 (Twirp, `src/vp/gha_twirp.rs`): `GetCacheEntryDownloadURL` with `restore_keys` returns the newest entry whose key starts with a restore key, first in the current branch, then in the base/default branch. Entries are immutable; `CreateCacheEntry` on an existing key answers `ok: false`. The signed download URL is an Azure blob SAS URL; Azure blob GET honours `Range: bytes=a-b` (206). Range GETs go to blob storage, not to the cache service, so only URL lookups count against 1,500 downloads/min.
+- GitHub cache service v2 (Twirp, `src/gha_twirp.rs`): `GetCacheEntryDownloadURL` with `restore_keys` returns the newest entry whose key starts with a restore key, first in the current branch, then in the base/default branch. Entries are immutable; `CreateCacheEntry` on an existing key answers `ok: false`. The signed download URL is an Azure blob SAS URL; Azure blob GET honours `Range: bytes=a-b` (206). Range GETs go to blob storage, not to the cache service, so only URL lookups count against 1,500 downloads/min.
 - GitHub evicts entries not accessed for 7 days and the least recently used ones above 10 GB per repo; resolving a download URL counts as an access.
 - Turborepo (2.x) remote cache: `HEAD /v8/artifacts/{hash}` before running a task, `GET` on a hit, `PUT` after a miss; `POST /v8/artifacts` (batch query) for dry runs. Artifacts are already zstd tarballs; we never recompress.
 
@@ -59,9 +59,9 @@
 - `pub fn pack_version(cache_version: &str) -> String` (SHA-256 hex of `hoard-pack-{v}`)
 - `pub async fn download_range(&self, url: &str, offset: u64, len: u64) -> Result<impl Stream<Item = io::Result<Bytes>> + Send + use<>, GhaError>` — `Range: bytes={offset}-{offset+len-1}`, requires `206` (a `200` means the server ignored Range → `GhaError::Protocol`), 401/403 → `GhaError::Status{status}`.
 
-- [ ] Step 1: failing tests — upload a blob through the mock (create/upload_blocks/finalize), `get_download_url` exact key, `download_range(url, 3, 5)` yields bytes 3..8; wrong sig → `Status{403}` and the error text has no `MOCKSIG`; `pack_version("v1") != vp_version("v1")`.
-- [ ] Step 2: run — FAIL. Step 3: implement (mock: parse `Range: bytes=a-b`, answer 206 with the slice). Step 4: run — PASS; fmt, clippy, `cargo test --test vp` still green.
-- [ ] Step 5: commit `refactor: share the GitHub cache Twirp client; add Range reads`
+- [x] Step 1: failing tests — upload a blob through the mock (create/upload_blocks/finalize), `get_download_url` exact key, `download_range(url, 3, 5)` yields bytes 3..8; wrong sig → `Status{403}` and the error text has no `MOCKSIG`; `pack_version("v1") != vp_version("v1")`.
+- [x] Step 2: run — FAIL. Step 3: implement (mock: parse `Range: bytes=a-b`, answer 206 with the slice). Step 4: run — PASS; fmt, clippy, `cargo test --test vp` still green.
+- [x] Step 5: commit `refactor: share the GitHub cache Twirp client; add Range reads`
 
 ### Task 2: `pack` setting, envelope `hash`, `packs` stat
 

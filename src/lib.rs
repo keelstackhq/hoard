@@ -1,6 +1,7 @@
 pub mod config;
 pub mod doctor;
 pub mod envelope;
+pub mod gha_twirp;
 pub mod key;
 pub mod r2;
 pub mod ratelimit;

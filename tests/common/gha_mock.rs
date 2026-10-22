@@ -33,6 +33,8 @@ pub struct MockRequest {
     pub query: String,
     pub authorization: Option<String>,
     pub x_ms_version: Option<String>,
+    /// The `Range` header of blob GETs.
+    pub range: Option<String>,
     /// JSON body of Twirp calls.
     pub json: Option<Value>,
 }
@@ -47,6 +49,19 @@ pub struct MockState {
     pub requests: Vec<MockRequest>,
     /// When set, every Twirp call answers with this status.
     pub fail_status: Option<u16>,
+    /// The next `n` Twirp calls answer with `status`, then calls succeed again.
+    pub fail_twirp_next: Option<(u16, usize)>,
+    /// The next `n` blob GETs answer with `status`, then GETs succeed again.
+    pub fail_blob_get_next: Option<(u16, usize)>,
+    /// Blob GETs answer 200 with the whole blob even when `Range` is sent.
+    pub ignore_range: bool,
+}
+
+/// Takes one failure off a one-shot counter, if any is left.
+fn take_failure(slot: &mut Option<(u16, usize)>) -> Option<u16> {
+    let (status, n) = (*slot)?;
+    *slot = (n > 1).then_some((status, n - 1));
+    Some(status)
 }
 
 #[derive(Clone)]
@@ -72,6 +87,18 @@ impl GhaMock {
     }
     pub fn fail_with(&self, status: u16) {
         self.state.lock().unwrap().fail_status = Some(status);
+    }
+    /// Fails only the next `n` Twirp calls with `status`.
+    pub fn fail_next_twirp(&self, status: u16, n: usize) {
+        self.state.lock().unwrap().fail_twirp_next = Some((status, n));
+    }
+    /// Fails only the next `n` blob GETs with `status`.
+    pub fn fail_next_blob_get(&self, status: u16, n: usize) {
+        self.state.lock().unwrap().fail_blob_get_next = Some((status, n));
+    }
+    /// Makes blob GETs ignore `Range` (answer 200 with the whole blob).
+    pub fn ignore_range(&self, on: bool) {
+        self.state.lock().unwrap().ignore_range = on;
     }
 }
 
@@ -104,9 +131,11 @@ async fn twirp(
         query: String::new(),
         authorization: header(&headers, "authorization"),
         x_ms_version: None,
+        range: None,
         json: Some(json.clone()),
     });
-    if let Some(code) = st.fail_status {
+    let code = take_failure(&mut st.fail_twirp_next).or(st.fail_status);
+    if let Some(code) = code {
         return (StatusCode::from_u16(code).unwrap(), "{\"code\":\"x\"}").into_response();
     }
     if header(&headers, "authorization") != Some(format!("Bearer {}", s.token)) {
@@ -192,6 +221,7 @@ fn record_blob(st: &mut MockState, method: &str, id: &str, query: &str, headers:
         query: query.into(),
         authorization: header(headers, "authorization"),
         x_ms_version: header(headers, "x-ms-version"),
+        range: header(headers, "range"),
         json: None,
     });
 }
@@ -252,9 +282,36 @@ async fn blob_get(
     if query_param(&q, "sig").as_deref() != Some(MOCK_SIG) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match st.blobs.get(&id) {
-        Some(b) => b.clone().into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+    if let Some(code) = take_failure(&mut st.fail_blob_get_next) {
+        return StatusCode::from_u16(code).unwrap().into_response();
+    }
+    let Some(blob) = st.blobs.get(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(range) = header(&headers, "range").filter(|_| !st.ignore_range) else {
+        return blob.clone().into_response();
+    };
+    // `bytes=a-b` (inclusive); `b` is clamped to the blob like Azure does.
+    let parsed = range
+        .strip_prefix("bytes=")
+        .and_then(|r| r.split_once('-'))
+        .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)));
+    let total = blob.len();
+    match parsed {
+        Some((a, b)) if a <= b && a < total => {
+            let b = b.min(total - 1);
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [("content-range", format!("bytes {a}-{b}/{total}"))],
+                blob[a..=b].to_vec(),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [("content-range", format!("bytes */{total}"))],
+        )
+            .into_response(),
     }
 }
 
