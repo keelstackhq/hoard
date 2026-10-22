@@ -33,14 +33,27 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-22 · **0.1.0 released** · release run 39749863566 → `chore(release): v0.1.0` (5c32424), tags `v0.1.0` and `v0` on it · release v0.1.0 (stable) has the five `hoard-<target>.tar.gz`, their digests equal `checksums.generated.ts` (`VERSION = "0.1.0"`); x86_64 musl binary is static and prints `hoard 0.1.0` · docs pin `@v0` (0.x); 1.0 and `v1` wait for packing; self-test gains a `release` variant (published binary)
 - 2026-10-22 · real-R2 owner checks (01-core-r2/Task 8, 03-vite-plus-throughput/Task 3 Step 1) · new `.github/workflows/r2-checks.yml`, run 39752184290 on the repository's R2 bucket · `hoard doctor`: `✓ lifecycle rule hoard-cache- (7 days)` (verify requires the 1-day multipart abort) and `✓ bucket read/write`; immutable >8 MiB: one 20 MiB key PUT twice in a row and another PUT twice in parallel, all 200, GET returns the first / one complete body, stats `puts 2, put_skipped_existing 2, put_errors 0` (the parallel loser was refused by R2's conditional create, so R2 honours If-None-Match on CompleteMultipartUpload); `refresh_real_r2` passes: self-copy moves last_modified forward (…826 → …829), so CopyObject refresh resets the object's age on R2
 
+- 2026-10-22 · ci: `ci-ok` aggregate job (PR keelstackhq/hoard#5, merged) · 2ecc3ac · actionlint clean; ci run green incl. ci-ok
+- 2026-10-22 · 04-packing/design · ae72a62, c50fcb3 · spec §6.5 + plan; opus design review (3 Critical, 6 Important) folded in, decisions recorded in the plan
+- 2026-10-22 · 04-packing/Task 1 shared Twirp client + Range reads · 8bb6c1d · 8 gha_twirp + 44 vp pass
+- 2026-10-22 · 04-packing/Task 2 pack setting, envelope hash, packs stat · 55cf151 · 113 unit pass
+- 2026-10-22 · 04-packing/Task 3 pack index · 4e5db71 · 123 unit pass (10 index)
+- 2026-10-22 · 04-packing/Task 4 pack backend + Range reads · 6cd654d · 20 pack tests (fs + GitHub mock)
+- 2026-10-22 · 04-packing/Task 5 pack writer + shutdown index merge · 319e658 · 34 pack tests, 3× no flakes
+- 2026-10-22 · 04-packing/Task 6 server wiring · 6251b7a · 4 http_pack; e2e fs, fs+PACK=on, r2 PASS
+- 2026-10-22 · 04-packing/Task 7 bench + docs · 09e962f, 91141ea; whole-branch review fixes 2303f84; diagnostics f1e1f41 · cargo all green (37 pack); CI + self-test (10 legs on the GitHub cache) green
+- 2026-10-22 · 04-packing/Task 8 bench with packing · runs 39755912769 (400), 39756606113 (1000) · 400 and 1000: 1 pack, throttled 0, rate_limited 0, put_errors 0, warm hits 400/400 and 1000/1000 → goal met
+
 ## Blocked
 
 <!-- Task, what is missing, exact action a human must take. -->
 
-- **Packing (spec §12) — design and plan.** The bench showed `throttled > 0` at 400 packages, so packing is needed.
-  Action: write the packing spec section and a plan (one pack + index per job, HTTP Range reads), as promised in
-  03-vite-plus-throughput/Task 4 Step 3. Until it ships, a cold build of ~400+ packages on the GitHub cache loses
-  some uploads to the 429 pause (22 of 400 in the bench); R2 is not affected.
+- ~~**Packing (spec §12) — design and plan.**~~ Done 2026-10-22 (spec §6.5, plan 04-packing, PR keelstackhq/hoard#9).
+- **Intermittent miss seen once in self-test (2026-10-22).** On PR #9 head 91141ea one of ten GitHub-cache `hit` legs
+  missed one of two packed artifacts; its re-run and every later run passed. Cause unknown; hoard now logs index
+  loads/writes and the self-test prints the hoard log on a failed check. Action: if it recurs, the log of that job
+  shows why — send it to an agent.
+- **Required check (owner).** Add `ci-ok` as the required status check in main's branch protection.
 
 ## Status
 

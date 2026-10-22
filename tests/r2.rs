@@ -1066,6 +1066,7 @@ fn hrd1(body: &[u8]) -> Vec<u8> {
         duration_ms: Some(5),
         tag: None,
         size: body.len() as u64,
+        hash: None,
     };
     let mut out = hoard::envelope::encode_header(&h);
     out.extend_from_slice(body);

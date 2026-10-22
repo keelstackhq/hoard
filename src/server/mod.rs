@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 
 use crate::config::Mode;
+use crate::pack::Packs;
 use crate::ratelimit::RateGate;
 use crate::stats::{Stats, StatsSnapshot};
 use crate::store::Store;
@@ -30,6 +31,9 @@ pub struct AppState {
     pub cache_version: String,
     /// Set when PUTs are spooled and uploaded in the background (`write-behind`).
     pub write_behind: Option<Arc<WriteBehind>>,
+    /// Set when Turborepo artifacts are packed (`pack`): reads use the pack index, PUTs go to
+    /// the pack writer, and the store is not used for artifacts.
+    pub packs: Option<Arc<Packs>>,
     /// Set for `storage=r2` with `refresh-on-hit`: a GET hit may reset the object's age.
     pub refresh: Option<Arc<crate::r2::refresh::Refresher>>,
     /// `POST /_hoard/shutdown` sends a reply channel here and answers once the shutdown work

@@ -7,7 +7,6 @@
 pub mod archive;
 pub mod cli;
 pub mod fingerprint;
-pub mod gha_twirp;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,8 +18,8 @@ use futures::{Stream, StreamExt};
 use opendal::ErrorKind;
 use tracing::warn;
 
+pub use crate::gha_twirp::{GhaTwirp, vp_version};
 pub use archive::{Archived, archive_dir, dir_size, extract_archive, extract_stream};
-pub use gha_twirp::{GhaTwirp, vp_version};
 
 use crate::envelope::Header;
 use crate::serve::GITHUB_PREFIX;
@@ -406,6 +405,7 @@ pub async fn vp_save(
                 duration_ms: None,
                 tag: None,
                 size,
+                hash: None,
             };
             let body = file_stream(tokio::fs::File::open(&spool.0).await?);
             store.put(&key, &header, body).await?; // an existing key is success

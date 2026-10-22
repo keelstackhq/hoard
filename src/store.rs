@@ -208,7 +208,7 @@ const GHAC_CREATE_NOT_OK: &str = "create cache entry returns non-ok";
 
 /// True when a write failed because the key exists (or is being created): the if-not-exists
 /// condition, a backend's "already exists", or ghac's `CreateCacheEntry` `ok: false`.
-fn is_condition_failed(e: &opendal::Error) -> bool {
+pub(crate) fn is_condition_failed(e: &opendal::Error) -> bool {
     match e.kind() {
         ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists => true,
         ErrorKind::Unexpected => e.message() == GHAC_CREATE_NOT_OK,

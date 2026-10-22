@@ -44,6 +44,10 @@ jobs:
           HOARD_BIN: ${{ github.workspace }}/target/release/hoard
       - run: tests/e2e/turbo.sh
         env:
+          PACK: "on"
+          HOARD_BIN: ${{ github.workspace }}/target/release/hoard
+      - run: tests/e2e/turbo.sh
+        env:
           STORAGE: r2
           HOARD_BIN: ${{ github.workspace }}/target/release/hoard
   action:

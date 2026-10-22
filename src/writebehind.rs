@@ -318,7 +318,7 @@ impl WriteBehind {
 }
 
 /// Streams `body` into a new file at `path`. On error the caller's reservation removes it.
-async fn spool<S>(path: &Path, mut body: S) -> io::Result<()>
+pub(crate) async fn spool<S>(path: &Path, mut body: S) -> io::Result<()>
 where
     S: Stream<Item = io::Result<Bytes>> + Unpin,
 {

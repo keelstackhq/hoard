@@ -11,6 +11,7 @@ fn header(size: u64) -> Header {
         duration_ms: Some(7),
         tag: Some("t".into()),
         size,
+        hash: None,
     }
 }
 
