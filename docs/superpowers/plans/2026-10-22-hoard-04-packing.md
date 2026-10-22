@@ -101,8 +101,8 @@ impl PackIndex {
 }
 pub const MAX_PACKS: usize = 1000; pub const MAX_ENTRIES: usize = 200_000; pub const MAX_UNUSED: Duration = 7 days; pub const MAX_DECODED: u64 = 64 << 20;
 ```
-- [ ] Step 1: failing unit tests — encode/decode round-trip; exact JSON shape of a one-entry index (decompress and compare); merge newest-wins regardless of argument order, last_used = max; drop_packs/remove_hashes remove entries and renumber; cap drops unused-for-7-days packs, then least recently used; decode rejects garbage, `v:2`, out-of-range pack #, oversize (use a zstd bomb of zeros > cap).
-- [ ] Step 2–4. Step 5: commit `feat: pack index`
+- [x] Step 1: failing unit tests — encode/decode round-trip; exact JSON shape of a one-entry index (decompress and compare); merge newest-wins regardless of argument order, last_used = max; drop_packs/remove_hashes remove entries and renumber; cap drops unused-for-7-days packs, then least recently used; decode rejects garbage, `v:2`, out-of-range pack #, oversize (use a zstd bomb of zeros > cap).
+- [x] Step 2–4. Step 5: commit `feat: pack index`
 
 ### Task 4: Pack backend and read path
 
