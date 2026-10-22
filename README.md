@@ -55,7 +55,7 @@ What the step does:
 The cache never fails your build. If storage is down or slow, a read is a miss and an upload is
 skipped (with a warning, so a broken cache does not look like a cold one).
 
-Pin a release tag (`@v0` or `@v0.2.0`), not `@main` or a commit: each action release can only
+Pin a release tag (`@v0` or `@v0.3.0`), not `@main` or a commit: each action release can only
 run the hoard binary of that same release.
 
 ## Choose a storage
