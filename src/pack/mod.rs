@@ -5,3 +5,4 @@ pub mod backend;
 pub mod index;
 pub mod names;
 pub mod reader;
+pub mod writer;
