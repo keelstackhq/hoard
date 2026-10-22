@@ -52,7 +52,7 @@ test("defaults", () => {
     r2Lifecycle: "auto",
     maxAgeDays: 7,
     maxSize: "5GB",
-    refreshOnHit: false,
+    refreshOnHit: true,
     vpMaxSize: "2GB",
     version: VERSION,
     warnings: [],
@@ -151,12 +151,12 @@ describe("validation", () => {
 });
 
 describe("refresh-on-hit", () => {
-  test("accepts yes/no spellings; default false", () => {
-    expect(resolveSettings({}, {}).refreshOnHit).toBe(false);
-    for (const v of ["true", "TRUE", "yes", "on", "1"]) {
+  test("accepts yes/no spellings; default true (spec §7.3)", () => {
+    expect(resolveSettings({}, {}).refreshOnHit).toBe(true);
+    for (const v of ["true", "TRUE", "yes", "on", "1", ""]) {
       expect(resolveSettings({ "refresh-on-hit": v }, {}).refreshOnHit).toBe(true);
     }
-    for (const v of ["false", "no", "off", "0", ""]) {
+    for (const v of ["false", "no", "off", "0"]) {
       expect(resolveSettings({ "refresh-on-hit": v }, {}).refreshOnHit).toBe(false);
     }
   });

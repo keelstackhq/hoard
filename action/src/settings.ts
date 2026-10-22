@@ -21,7 +21,7 @@ export interface Settings {
   r2Lifecycle: "auto" | "verify" | "manual";
   maxAgeDays: number;
   maxSize: string;
-  /** R2 only: refresh objects older than max-age-days / 2 when they are read (§7.3). */
+  /** R2 only: refresh objects older than max-age-days / 2 when they are read (§7.3); default true. */
   refreshOnHit: boolean;
   /** `vp save` skips a Vite+ task cache larger than this (§4.2). */
   vpMaxSize: string;
@@ -135,7 +135,7 @@ export function resolveSettings(inputs: Record<string, string>, env: NodeJS.Proc
     r2Lifecycle: oneOf("r2-lifecycle", input("r2-lifecycle", "auto"), LIFECYCLES),
     maxAgeDays: maxAgeDays(input("max-age-days", "7")),
     maxSize: input("max-size", "5GB"),
-    refreshOnHit: bool("refresh-on-hit", input("refresh-on-hit", "false")),
+    refreshOnHit: bool("refresh-on-hit", input("refresh-on-hit", "true")),
     vpMaxSize: size("vp-max-size", input("vp-max-size", "2GB")),
     version,
     warnings,

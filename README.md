@@ -119,8 +119,8 @@ The job summary then shows `Storage: r2 (my-team-cache/cache/) · Lifecycle: 7 d
 - **Size cap.** At the end of a job, at most once a day, hoard deletes the oldest objects until
   the prefix fits in `max-size` (default 5 GB). Do not nest prefixes in one bucket (`cache/` and
   `cache/team/`): the outer prefix's size cap would delete the inner one's objects.
-- **Optional `refresh-on-hit: true`.** Renews objects that are still being read, so the lifecycle
-  rule does not expire artifacts in use.
+- **Refresh-on-hit (on by default).** Renews objects that are still being read, so the lifecycle
+  rule does not expire artifacts in use. Set `refresh-on-hit: false` to turn it off.
 
 ### Sign artifacts
 
@@ -218,7 +218,7 @@ All inputs are optional. Inputs marked (r2) are used only with `storage: r2`.
 | `r2-lifecycle` | `auto` | `auto` (set the bucket's expiry rule), `verify` (fail if it is missing) or `manual` (r2). |
 | `max-age-days` | `7` | Delete R2 objects this many days after their last write, 1–36500 (r2). |
 | `max-size` | `5GB` | Size cap for the R2 prefix; the oldest objects are pruned above it (r2). |
-| `refresh-on-hit` | `false` | R2 only: reset the age of objects older than `max-age-days / 2` when a cache hit reads them (once per object per run), so artifacts in use never expire. |
+| `refresh-on-hit` | `true` | R2 only: reset the age of objects older than `max-age-days / 2` when a cache hit reads them (once per object per run), so artifacts in use never expire. Does nothing for `github` and `fs`. |
 | `vp-max-size` | `2GB` | Vite+ only: skip saving the task cache when it is larger than this (then run `vp cache clean`). |
 | `version` | empty | hoard binary version. Empty: this action's own release, the only one it can verify. |
 
@@ -305,11 +305,13 @@ cache entry each, so a job makes about one upload per 128 MiB of new artifacts, 
 packages it builds. With `pack` on, `write-behind` is not used for Turborepo artifacts. See
 [spec §6.5](docs/superpowers/specs/2026-10-14-hoard-design.md#65-packing-turborepo-artifacts-pack-on).
 
-`--refresh-on-hit` (`HOARD_REFRESH_ON_HIT=true`; R2 only) copies an object onto itself in the
-background when a cache hit reads it and it is older than `max-age-days / 2`, so artifacts in
-use do not expire. It is verified on MinIO; see
-[spec §7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-optional)
-for the one manual check against real R2.
+`--refresh-on-hit[=true|false]` (`HOARD_REFRESH_ON_HIT`; R2 only, on by default with
+`storage=r2` and `mode=read-write`) copies an object onto itself in the background when a cache
+hit reads it and it is older than `max-age-days / 2`, at most once per object per run, so
+artifacts in use do not expire. Turn it off with `--refresh-on-hit=false` or
+`HOARD_REFRESH_ON_HIT=false`. A failed refresh is logged and counted (`Refresh errors` in the
+summary), never fatal. It does nothing for `github` and `fs`. Verified on MinIO and real R2; see
+[spec §7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-on-by-default).
 
 ## Security
 

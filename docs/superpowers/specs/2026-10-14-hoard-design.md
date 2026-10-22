@@ -107,7 +107,7 @@ secrets as `""`).
 | `max-size` | `5GB` | R2 size cap; accepts `KB`, `MB`, `GB`, `TB` (powers of 1000) |
 | `vp-max-size` | `2GB` | `vp save` only: when the regular files of the task-cache directory add up to more, the save is skipped with a hint to run `vp cache clean` (hoard never edits Vite+'s SQLite cache). Same units as `max-size` |
 | `workspace`, `os-arch`, `run-key` | `.`, this machine, run id | `vp restore` / `vp save` only (§4.1) |
-| `refresh-on-hit` | off | Boolean flag (`HOARD_REFRESH_ON_HIT=true`, also `yes`/`no`, `1`/`0`; action input of the same name): `storage=r2` with `mode=read-write` only, ignored elsewhere with one info log (§7.3) |
+| `refresh-on-hit` | on (r2) | Boolean (`--refresh-on-hit[=true\|false]`, `HOARD_REFRESH_ON_HIT=true\|false`, also `yes`/`no`, `1`/`0`; action input of the same name, default `true`): acts only with `storage=r2` and `mode=read-write`, where it is on unless set to `false`. Elsewhere it does nothing: silently when not set, with one info log when set to `true` (§7.3) |
 | `pack` | `auto` | `auto` \| `on` \| `off`; `auto` = on for `storage=github`, off for `fs`; ignored for `r2`. Turborepo artifacts are packed into a few large entries plus an index instead of one entry each (§6.5). When on, `write-behind` is not used for Turborepo artifacts |
 | `write-behind` | `auto` | `auto` \| `on` \| `off`; `auto` = on for `storage=github`, off for `r2`/`fs`. PUTs are answered once spooled to disk and uploaded in the background (§5) |
 
@@ -450,9 +450,10 @@ something was deleted, `Prune: failed (reason)` on an error or timeout, nothing 
 The size cap counts everything under `{prefix}`, so do not nest prefixes in one bucket
 (`cache/` and `cache/team/`): a prune of the outer prefix deletes the inner one's objects.
 
-### 7.3 Layer 3 — refresh-on-hit (optional)
+### 7.3 Layer 3 — refresh-on-hit (on by default)
 
-`refresh-on-hit` (off by default; `storage=r2`, `mode=read-write`): the lifecycle rule counts an
+`refresh-on-hit` (on by default after 0.2.0, owner decision 2026-10-22; `storage=r2`,
+`mode=read-write`; `refresh-on-hit: false` turns it off): the lifecycle rule counts an
 object's age from its last write, so an artifact that is read daily would still expire. On a
 GET hit, once per object per run, hoard checks the object's age and, when it is older than
 `max-age-days / 2`, copies it onto itself (`CopyObject`, source = destination,
@@ -464,7 +465,21 @@ changes). Details:
 - Cost per object per run: one `HEAD` (read `Last-Modified`) and, when old, one `CopyObject`.
   A per-run set of keys makes later hits free; a key whose check was skipped because all 4
   refresh slots were busy is not added to the set and may be tried on a later hit.
-- Success counts `refreshed` (§9); the summary says `Refreshed: N objects` when `N > 0`.
+- Success counts `refreshed` (§9); the summary says `Refreshed: N objects` when `N > 0`. A
+  failure (HEAD or copy) is logged as a redacted warning and counts `refresh_errors`; the
+  summary says `Refresh errors: N` when `N > 0`. It never fails a request or the job.
+- **Write budget.** Refresh writes stay bounded without a new rule: at most one `CopyObject`
+  per object per run (the per-run key set), only for objects older than `max-age-days / 2`
+  (so an object is copied at most about once per half lifecycle, however many runs read it),
+  at most 4 at once, and never more objects than the run read. A run therefore makes at most
+  as many refresh writes as it has distinct hits, and the bucket's size is unchanged (a
+  self-copy replaces the object). This is why it can be on by default.
+- **Other storages.** `storage=github` (GitHub cache entries are immutable and have no
+  age to reset; GitHub evicts by last access, so a read already keeps an entry) and
+  `storage=fs` (no lifecycle rule) never start the refresher: no HEAD, no copy, no stats, and
+  no log line unless `refresh-on-hit` was set to `true` explicitly (then one info line). The
+  action passes `HOARD_REFRESH_ON_HIT` only for `storage=r2` with `mode=read-write`. `mode=read` and `mode=off` with
+  `r2` behave the same way, since a refresh is a write.
 - Needs `s3:GetObject` and `s3:PutObject` on the prefix (`CopyObject`), which `hoard` already
   needs for writes.
 
@@ -485,11 +500,11 @@ the same envelope.
 ## 9. Stats and job summary
 
 `Stats { hits, misses, puts, put_skipped_existing, put_errors, rate_limited, throttled, corrupt,
-bytes_down, bytes_up, time_saved_ms, refreshed, packs }` — `time_saved_ms` sums `duration_ms` of every hit;
-`refreshed` counts R2 objects renewed by refresh-on-hit (§7.3); `packs` counts packs uploaded (§6.5).
+bytes_down, bytes_up, time_saved_ms, refreshed, refresh_errors, packs }` — `time_saved_ms` sums `duration_ms` of every hit;
+`refreshed` counts R2 objects renewed by refresh-on-hit and `refresh_errors` the refreshes that failed (§7.3); `packs` counts packs uploaded (§6.5).
 The storage line is `Storage: github`, `Storage: r2 (<bucket>/<prefix>)` or `Storage: fs (<root>)`;
 when `put_errors > 0` the line ends with `Upload errors: N` (so a broken storage never looks like
-a cold cache), then, when `refreshed > 0`, with `Refreshed: N objects`, then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`, then, when `throttled > 0`, with `Throttled: N responses (429)`, then, when `packs > 0`, with `Packs: N uploaded`. When the
+a cold cache), then, when `refreshed > 0`, with `Refreshed: N objects`, then, when `refresh_errors > 0`, with `Refresh errors: N`, then, when `rate_limited > 0`, with `Rate limited: N uploads skipped`, then, when `throttled > 0`, with `Throttled: N responses (429)`, then, when `packs > 0`, with `Packs: N uploaded`. When the
 write-behind drain timed out, `Upload queue: N dropped at shutdown` comes right after the
 startup lines (before the prune line); the dropped uploads are also in `Upload errors`.
 

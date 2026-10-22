@@ -152,6 +152,32 @@ describe("main", () => {
     expect(env).toMatchObject({ HOARD_REFRESH_ON_HIT: "true" });
   });
 
+  test("refresh-on-hit defaults to on for r2 and can be turned off", async () => {
+    const r2 = {
+      storage: "r2",
+      "r2-endpoint": "http://127.0.0.1:9000",
+      "r2-access-key-id": "ak",
+      "r2-secret-access-key": "sk",
+      "r2-bucket": "b",
+    };
+    for (const [inputs, want] of [
+      [r2, "true"],
+      [{ ...r2, "refresh-on-hit": "false" }, "false"],
+    ] as const) {
+      const f = fakeCore(inputs);
+      const d = deps(f);
+      await runMain(d);
+      expect(f.of("setFailed")).toEqual([]);
+      const [, , , env] = vi.mocked(d.startServer).mock.calls[0] ?? [];
+      expect(env).toMatchObject({ HOARD_REFRESH_ON_HIT: want });
+    }
+  });
+
+  test("action.yml default for refresh-on-hit is true", () => {
+    const yml = readFileSync(new URL("../../action.yml", import.meta.url), "utf8");
+    expect(yml).toMatch(/^ {2}refresh-on-hit:\n(?: {4}.*\n)*? {4}default: "true"$/m);
+  });
+
   test("action.yml declares exactly the inputs main reads", () => {
     const yml = readFileSync(new URL("../../action.yml", import.meta.url), "utf8");
     const names: string[] = [];

@@ -45,6 +45,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-22 · 04-packing/Task 8 bench with packing · runs 39755912769 (400), 39756606113 (1000) · 400 and 1000: 1 pack, throttled 0, rate_limited 0, put_errors 0, warm hits 400/400 and 1000/1000 → goal met
 - 2026-10-22 · **0.2.0 prepared** · `Cargo.toml` and `Cargo.lock` at 0.2.0 · 0.2.0 ships packing (spec §6.5, PR keelstackhq/hoard#9) as 0.x so it runs in real use first; `@v0` moves to 0.2.0; 1.0 and `v1` come later
 - 2026-10-22 · **0.2.0 released** · release run 39768777131 → `chore(release): v0.2.0` (cdc7052), tags `v0.2.0` and `v0` on it · release v0.2.0 (stable) has the five `hoard-<target>.tar.gz`, their digests equal `checksums.generated.ts` (`VERSION = "0.2.0"`); x86_64 musl binary is static and prints `hoard 0.2.0`; action lint + 156 tests pass on cdc7052, dist rebuild identical (164 KB) · self-test run 39773285100 on cdc7052: 20/20 green incl. the four `release` legs (published binary, FULL TURBO)
+- 2026-10-22 · refresh-on-hit on by default (owner: "refresh-on-hit: yes") · spec §7.3 · tri-state flag (unset = on for r2 read-write, silent no-op for github/fs/read), `--refresh-on-hit=false` / `HOARD_REFRESH_ON_HIT=false` / input `false` turns it off; action passes it only for r2 read-write; new stat `refresh_errors` + summary `Refresh errors: N`; write budget unchanged (≤1 copy per object per run, only when older than max-age-days / 2) · 128 unit pass, cargo test green with MinIO, action lint + 160 tests, dist 156 KB, e2e fs, fs+PACK=on and r2 PASS
 
 ## Blocked
 
@@ -133,7 +134,7 @@ lists every input and output.
 1. ~~**CI**~~ and ~~**self-test on real runners**~~: green on PR keelstackhq/hoard#1 (2026-10-15).
 2. ~~**Release dry run**~~: passed 2026-10-21; the owner removed the leftovers.
 3. ~~**Real R2 checks**~~: all pass (2026-10-22, `r2-checks.yml`). Self-copy resets the age on R2, so
-   refresh-on-hit works as built; whether to turn it on by default is your call (spec §7.3).
+   refresh-on-hit works as built; you chose to turn it on by default (2026-10-22, spec §7.3).
 4. ~~**Benchmark**~~: done 2026-10-21, packing needed; its spec section and plan are open (Blocked).
 
 ~~First real release~~: 0.1.0 released 2026-10-22 (`@v0`). 0.2.0 released 2026-10-22 with packing (`@v0`); 1.0 / `@v1` waits for packing to run in real use.
