@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use tokio::time::Instant;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::backend::PackBackend;
 use super::index::{Entry, MAX_DECODED, PackIndex};
@@ -93,6 +93,11 @@ impl PackReader {
                     if st.abandoned {
                         warn!("pack index finished loading after the wait; it is not used");
                     } else {
+                        info!(
+                            "pack index loaded: {} artifacts in {} packs",
+                            idx.len(),
+                            idx.pack_count()
+                        );
                         st.index = idx;
                     }
                 }
@@ -236,7 +241,14 @@ async fn load_one(backend: &PackBackend, prefix: &str) -> Option<PackIndex> {
         }
     };
     match tokio::task::spawn_blocking(move || PackIndex::decode(&bytes)).await {
-        Ok(Ok(idx)) => Some(idx),
+        Ok(Ok(idx)) => {
+            info!(
+                "pack index {key}: {} artifacts in {} packs",
+                idx.len(),
+                idx.pack_count()
+            );
+            Some(idx)
+        }
         Ok(Err(e)) => {
             warn!("ignoring the pack index {key}: {}", redacted(&e));
             None

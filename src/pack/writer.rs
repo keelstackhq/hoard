@@ -24,7 +24,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::backend::{PackBackend, PackError};
 use super::index::{Loc, MAX_ENTRIES, MAX_PACKS, MAX_UNUSED, PackIndex};
@@ -512,6 +512,7 @@ impl PackWriter {
         idx.remove_hashes(&corrupt);
         idx.merge(&new);
         idx.cap(now_ms(), MAX_UNUSED, MAX_PACKS, MAX_ENTRIES);
+        let (entries, packs) = (idx.len(), idx.pack_count());
         let bytes = match tokio::task::spawn_blocking(move || idx.encode()).await {
             Ok(b) => b,
             Err(e) => {
@@ -529,8 +530,10 @@ impl PackWriter {
         drop(bytes);
         for _ in 0..2 {
             let m = inner.seq_index.fetch_add(1, Ordering::Relaxed) + 1;
-            match inner.backend.upload(&inner.names.index_key(m), &path).await {
+            let key = inner.names.index_key(m);
+            match inner.backend.upload(&key, &path).await {
                 Ok(_) => {
+                    info!("pack index {key} written: {entries} artifacts in {packs} packs");
                     remove_file(&path);
                     return true;
                 }
@@ -623,6 +626,10 @@ async fn upload_pack(inner: &Arc<Inner>, pack: &SealedPack) {
                     .uploaded_bytes
                     .fetch_add(pack.bytes, Ordering::Relaxed);
                 lock(&inner.new_index).add_pack(&key, now_ms(), pack.entries.clone());
+                info!(
+                    "pack {key} uploaded: {items} artifacts, {} bytes",
+                    pack.bytes
+                );
                 pack.uploaded.store(true, Ordering::Relaxed);
                 finish();
             }
