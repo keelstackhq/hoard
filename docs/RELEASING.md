@@ -27,7 +27,8 @@ accept pushes from `github-actions[bot]`.
 
 ## The major tag `vX`
 
-Users pin the major tag (`uses: <owner>/hoard@v1`). The workflow moves `vX` only for a stable,
+Users pin the major tag (`uses: <owner>/hoard@v0` while hoard is 0.x; a 0.x release moves `v0`,
+1.0 and later move `v1`, `v2`, …). The workflow moves `vX` only for a stable,
 non-draft release, and only forward: if a newer stable `vX.*` tag exists (a backport release), `vX`
 stays where it is.
 

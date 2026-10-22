@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { BinaryDownloadError } from "../src/binary.js";
+import { VERSION } from "../src/checksums.generated.js";
 import {
   type ActionCore,
   INPUTS,
@@ -95,7 +96,7 @@ describe("main", () => {
     await runMain(d);
 
     expect(f.of("setFailed")).toEqual([]);
-    expect(d.ensureBinary).toHaveBeenCalledWith("x86_64-unknown-linux-musl", "0.0.0-dev");
+    expect(d.ensureBinary).toHaveBeenCalledWith("x86_64-unknown-linux-musl", VERSION); // the baked release version
     const [bin, args, log, env] = vi.mocked(d.startServer).mock.calls[0] ?? [];
     expect(bin).toBe("/opt/hoard");
     expect(args).toContain("--storage");
