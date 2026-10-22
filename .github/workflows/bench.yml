@@ -1,5 +1,5 @@
 name: bench
-# GitHub cache upload rate-limit benchmark (spec §6.4, §12). Not run on push or PR.
+# GitHub cache upload rate-limit benchmark (spec §6.4, §6.5, §12). Not run on push or PR.
 #   cold  builds N generated packages with an empty cache: every task is a miss and a PUT, so this
 #         is the burst of uploads that can hit GitHub's 200 uploads/min limit. It records `puts`,
 #         `rate_limited`, `put_errors`, the build wall time and (with write-behind) how long the
@@ -20,6 +20,11 @@ on:
         type: choice
         options: [auto, "on", "off"]
         default: auto
+      pack:
+        description: hoard pack mode (auto = on for the GitHub cache; spec §6.5)
+        type: choice
+        options: [auto, "on", "off"]
+        default: auto
 
 permissions:
   contents: read # the GitHub cache works with the runtime token; nothing else is needed
@@ -27,6 +32,7 @@ permissions:
 env:
   PACKAGES: ${{ inputs.packages }}
   WRITE_BEHIND: ${{ inputs.write-behind }}
+  PACK: ${{ inputs.pack }}
 
 jobs:
   cold:
@@ -40,6 +46,7 @@ jobs:
       put-errors: ${{ steps.stats.outputs.put-errors }}
       wall-seconds: ${{ steps.build.outputs.wall-seconds }}
       drain-seconds: ${{ steps.stats.outputs.drain-seconds }}
+      packs: ${{ steps.stats.outputs.packs }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -68,6 +75,7 @@ jobs:
         env:
           HOARD_ACTION_BINARY_PATH: ${{ github.workspace }}/target/release/hoard
           HOARD_WRITE_BEHIND: ${{ env.WRITE_BEHIND }}
+          HOARD_PACK: ${{ env.PACK }}
         with:
           storage: github
           cache-version: bench-${{ github.run_id }}
@@ -93,6 +101,14 @@ jobs:
           # 45 min job limit covers a build, this wait and a slow runner without letting a hang
           # run for 6 hours.
           start=$(date +%s)
+          # With packing (on, or auto on the GitHub cache) artifacts are uploaded as packs plus an
+          # index during hoard's shutdown drain, so the counters are only final in the shutdown
+          # reply. Shut the server down here and read them from it (the action's post step then
+          # warns that the server already stopped, and still writes the summary).
+          if [ "$PACK" != off ]; then
+            s="$(curl -fsS -X POST -H "Authorization: Bearer $TURBO_TOKEN" "$TURBO_API/_hoard/shutdown")"
+            drain=$(( $(date +%s) - start ))
+          else
           while :; do
             s="$(stats)"
             done_count="$(jq '.puts + .put_skipped_existing + .put_errors + .rate_limited' <<<"$s")"
@@ -100,6 +116,7 @@ jobs:
             [ $(( $(date +%s) - start )) -ge 900 ] && { drain=timeout; echo "::warning::uploads still pending after 900 s; the counters are not final"; break; }
             sleep 2
           done
+          fi
           echo "$s"
           {
             echo "puts=$(jq .puts <<<"$s")"
@@ -107,9 +124,10 @@ jobs:
             echo "throttled=$(jq .throttled <<<"$s")"
             echo "put-errors=$(jq .put_errors <<<"$s")"
             echo "drain-seconds=$drain"
+            echo "packs=$(jq '.packs // 0' <<<"$s")"
           } >> "$GITHUB_OUTPUT"
           {
-            echo "### Cold run: $PACKAGES packages, write-behind $WRITE_BEHIND"
+            echo "### Cold run: $PACKAGES packages, write-behind $WRITE_BEHIND, pack $PACK"
             echo
             echo "| metric | value |"
             echo "| --- | --- |"
@@ -119,6 +137,7 @@ jobs:
             echo "| rate_limited | $(jq .rate_limited <<<"$s") |"
             echo "| throttled (429 responses) | $(jq .throttled <<<"$s") |"
             echo "| put_errors | $(jq .put_errors <<<"$s") |"
+            echo "| packs uploaded | $(jq '.packs // 0' <<<"$s") |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   warm:
@@ -154,6 +173,7 @@ jobs:
         env:
           HOARD_ACTION_BINARY_PATH: ${{ github.workspace }}/target/release/hoard
           HOARD_WRITE_BEHIND: ${{ env.WRITE_BEHIND }}
+          HOARD_PACK: ${{ env.PACK }}
         with:
           storage: github
           cache-version: bench-${{ github.run_id }}
@@ -179,7 +199,7 @@ jobs:
           echo "hits=$hits" >> "$GITHUB_OUTPUT"
           echo "misses=$(jq .misses <<<"$s")" >> "$GITHUB_OUTPUT"
           {
-            echo "### Warm run: $PACKAGES packages, write-behind $WRITE_BEHIND"
+            echo "### Warm run: $PACKAGES packages, write-behind $WRITE_BEHIND, pack $PACK"
             echo
             echo "| metric | value |"
             echo "| --- | --- |"
@@ -202,7 +222,7 @@ jobs:
           {
             echo "### Rate-limit benchmark (copy into docs/benchmarks/2026-10-rate-limit.md)"
             echo
-            echo "| packages | write-behind | cold wall (s) | drain (s) | puts | rate_limited | throttled | put_errors | warm wall (s) | hits |"
-            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-            echo "| $(c packages) | $WRITE_BEHIND | $(c wall-seconds) | $(c drain-seconds) | $(c puts) | $(c rate-limited) | $(c throttled) | $(c put-errors) | $(w wall-seconds) | $(w hits) |"
+            echo "| packages | write-behind | pack | cold wall (s) | drain (s) | puts | packs | rate_limited | throttled | put_errors | warm wall (s) | hits |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            echo "| $(c packages) | $WRITE_BEHIND | $PACK | $(c wall-seconds) | $(c drain-seconds) | $(c puts) | $(c packs) | $(c rate-limited) | $(c throttled) | $(c put-errors) | $(w wall-seconds) | $(w hits) |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
