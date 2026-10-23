@@ -1,0 +1,57 @@
+name: rust-bench-burst
+# Spec §14 research: 5 parallel cold sccache jobs on the GitHub cache, like bosun's 5-gate matrix,
+# each with its own key namespace. Do the 200 uploads/min/repo limit and 429s show up?
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/rust-cache-research]
+    paths: [.github/workflows/rust-bench-burst.yml]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  SCCACHE_VERSION: v0.18.0
+
+jobs:
+  burst:
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [1, 2, 3, 4, 5]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: keelstackhq/bosun
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: |
+          curl -sSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" | tar xz
+          sudo mv sccache-*/sccache /usr/local/bin/
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('SCCACHE_GHA_ENABLED', 'on');
+            core.exportVariable('SCCACHE_GHA_VERSION', `burst-${context.runId}-${{ matrix.leg }}`);
+      - run: cargo fetch --locked
+      - name: cold build
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_LOG: warn
+          SCCACHE_ERROR_LOG: ${{ runner.temp }}/sccache.log
+        run: |
+          set -euo pipefail
+          sccache --start-server
+          echo "start $(date -u +%T)"
+          s=$(date +%s.%N)
+          cargo test --locked --no-run 2>&1 | tail -1
+          cargo clippy --all-targets --locked 2>&1 | tail -1
+          echo "end $(date -u +%T)"
+          sccache --show-stats
+          echo "RESULT burst leg=${{ matrix.leg }} wall=$(echo "$(date +%s.%N) - $s" | bc)s rate_limited_log_lines=$(grep -ci 'rate\|429\|too many' "$RUNNER_TEMP/sccache.log" || true)"
+          grep -i 'rate\|429\|too many' "$RUNNER_TEMP/sccache.log" | head -3 | cut -c1-300 || true
