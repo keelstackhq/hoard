@@ -1,0 +1,156 @@
+name: rust-bench
+# Pure-Rust cache comparison for spec §14 (research; not part of hoard's CI).
+# For each sample repo and cache tool: `cold` builds with an empty cache, `warm` builds again on a
+# fresh runner after a one-line change to the repo's own crate (like a PR). Each run uses its own
+# cache keys (run id), so legs never see another run's entries.
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/rust-cache-research]
+    paths: [.github/workflows/rust-bench.yml]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  SCCACHE_VERSION: v0.18.0
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        repo: [bosun, berth]
+        tool: [none, rust-cache, sccache-gha, sccache-r2]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: keelstackhq/${{ matrix.repo }}
+      - name: toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: sccache
+        if: startsWith(matrix.tool, 'sccache')
+        run: |
+          curl -sSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" | tar xz
+          sudo mv sccache-*/sccache /usr/local/bin/
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - name: sccache GitHub env
+        if: matrix.tool == 'sccache-gha'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('SCCACHE_GHA_ENABLED', 'on');
+            core.exportVariable('SCCACHE_GHA_VERSION', `bench-${context.runId}-${{ matrix.repo }}`);
+      - name: sccache R2 env
+        if: matrix.tool == 'sccache-r2'
+        env:
+          ACCOUNT: ${{ secrets.R2_ACCOUNT_ID }}
+          BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=$BUCKET"
+            echo "SCCACHE_ENDPOINT=https://$ACCOUNT.r2.cloudflarestorage.com"
+            echo "SCCACHE_REGION=auto"
+            # Under cache/ so hoard's lifecycle rule (7 days) and size cap bound it.
+            echo "SCCACHE_S3_KEY_PREFIX=cache/sccache-bench/${GITHUB_RUN_ID}/${{ matrix.repo }}/"
+          } >> "$GITHUB_ENV"
+      - name: rust-cache
+        if: matrix.tool == 'rust-cache'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: bench-${{ github.run_id }}
+      - name: fetch
+        run: cargo fetch --locked
+      - name: cold build
+        env:
+          AWS_ACCESS_KEY_ID: ${{ matrix.tool == 'sccache-r2' && secrets.R2_ACCESS_KEY_ID || '' }}
+          AWS_SECRET_ACCESS_KEY: ${{ matrix.tool == 'sccache-r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --start-server; fi
+          s=$(date +%s.%N)
+          cargo test --locked --no-run 2>&1 | tail -2
+          t1=$(echo "$(date +%s.%N) - $s" | bc)
+          s=$(date +%s.%N)
+          cargo clippy --all-targets --locked 2>&1 | tail -1
+          t2=$(echo "$(date +%s.%N) - $s" | bc)
+          echo "RESULT cold ${{ matrix.repo }} ${{ matrix.tool }} test-build=${t1}s clippy=${t2}s target=$(du -sm target | cut -f1)MB"
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --show-stats --stats-format json > "$RUNNER_TEMP/cold.json"; sccache --stop-server; fi
+
+  warm:
+    needs: bench
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        repo: [bosun, berth]
+        tool: [none, rust-cache, sccache-gha, sccache-r2]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: keelstackhq/${{ matrix.repo }}
+      - name: toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: sccache
+        if: startsWith(matrix.tool, 'sccache')
+        run: |
+          curl -sSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" | tar xz
+          sudo mv sccache-*/sccache /usr/local/bin/
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - name: sccache GitHub env
+        if: matrix.tool == 'sccache-gha'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('SCCACHE_GHA_ENABLED', 'on');
+            core.exportVariable('SCCACHE_GHA_VERSION', `bench-${context.runId}-${{ matrix.repo }}`);
+      - name: sccache R2 env
+        if: matrix.tool == 'sccache-r2'
+        env:
+          ACCOUNT: ${{ secrets.R2_ACCOUNT_ID }}
+          BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=$BUCKET"
+            echo "SCCACHE_ENDPOINT=https://$ACCOUNT.r2.cloudflarestorage.com"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_S3_KEY_PREFIX=cache/sccache-bench/${GITHUB_RUN_ID}/${{ matrix.repo }}/"
+          } >> "$GITHUB_ENV"
+      - name: rust-cache
+        if: matrix.tool == 'rust-cache'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: bench-${{ github.run_id }}
+          save-if: "false"
+      - name: fetch
+        run: cargo fetch --locked
+      - name: one-line change to the repo's own crate (like a PR)
+        run: |
+          f=src/lib.rs; [ -f "$f" ] || f=src/main.rs
+          echo "// bench change" >> "$f"
+      - name: warm build
+        env:
+          AWS_ACCESS_KEY_ID: ${{ matrix.tool == 'sccache-r2' && secrets.R2_ACCESS_KEY_ID || '' }}
+          AWS_SECRET_ACCESS_KEY: ${{ matrix.tool == 'sccache-r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --start-server; fi
+          s=$(date +%s.%N)
+          cargo test --locked --no-run 2>&1 | tail -2
+          t1=$(echo "$(date +%s.%N) - $s" | bc)
+          s=$(date +%s.%N)
+          cargo clippy --all-targets --locked 2>&1 | tail -1
+          t2=$(echo "$(date +%s.%N) - $s" | bc)
+          echo "RESULT warm ${{ matrix.repo }} ${{ matrix.tool }} test-build=${t1}s clippy=${t2}s"
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --stop-server; fi
