@@ -50,6 +50,7 @@ jobs:
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('SCCACHE_GHA_ENABLED', 'on');
+            core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on'); // GHA.md omits it; see rust-bench-burst.yml
             core.exportVariable('SCCACHE_GHA_VERSION', `bench-${context.runId}-${{ matrix.repo }}`);
       - name: sccache R2 env
         if: matrix.tool == 'sccache-r2'
@@ -118,6 +119,7 @@ jobs:
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('SCCACHE_GHA_ENABLED', 'on');
+            core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on'); // GHA.md omits it; see rust-bench-burst.yml
             core.exportVariable('SCCACHE_GHA_VERSION', `bench-${context.runId}-${{ matrix.repo }}`);
       - name: sccache R2 env
         if: matrix.tool == 'sccache-r2'
