@@ -21,10 +21,11 @@ jobs:
   bench:
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 6
       matrix:
         repo: [bosun, berth]
-        tool: [none, rust-cache, sccache-gha, sccache-r2]
+        tool: [none, rust-cache, sccache-r2] # sccache-gha: rust-bench-burst.yml (it shares the upload limit)
+        rep: [1, 2]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -63,13 +64,14 @@ jobs:
             echo "SCCACHE_ENDPOINT=https://$ACCOUNT.r2.cloudflarestorage.com"
             echo "SCCACHE_REGION=auto"
             # Under cache/ so hoard's lifecycle rule (7 days) and size cap bound it.
-            echo "SCCACHE_S3_KEY_PREFIX=cache/sccache-bench/${GITHUB_RUN_ID}/${{ matrix.repo }}/"
+            echo "SCCACHE_S3_KEY_PREFIX=cache/sccache-bench/${GITHUB_RUN_ID}/${{ matrix.repo }}-${{ matrix.rep }}/"
           } >> "$GITHUB_ENV"
       - name: rust-cache
         if: matrix.tool == 'rust-cache'
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: bench-${{ github.run_id }}
+          prefix-key: bench-${{ github.run_id }}-${{ matrix.rep }}
+          add-job-id-key: "false"
       - name: fetch
         run: cargo fetch --locked
       - name: cold build
@@ -82,7 +84,7 @@ jobs:
           s=$(date +%s.%N)
           cargo clippy --all-targets --locked 2>&1 | tail -1
           t2=$(echo "$(date +%s.%N) - $s" | bc)
-          echo "RESULT cold ${{ matrix.repo }} ${{ matrix.tool }} test-build=${t1}s clippy=${t2}s target=$(du -sm target | cut -f1)MB"
+          echo "RESULT cold ${{ matrix.repo }} ${{ matrix.tool }} rep=${{ matrix.rep }} cpus=$(nproc) test-build=${t1}s clippy=${t2}s target=$(du -sm target | cut -f1)MB"
           if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --show-stats --stats-format json > "$RUNNER_TEMP/cold.json"; sccache --stop-server; fi
 
   warm:
@@ -90,10 +92,11 @@ jobs:
     if: always()
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 6
       matrix:
         repo: [bosun, berth]
-        tool: [none, rust-cache, sccache-gha, sccache-r2]
+        tool: [none, rust-cache, sccache-r2] # sccache-gha: rust-bench-burst.yml (it shares the upload limit)
+        rep: [1, 2]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -131,13 +134,14 @@ jobs:
             echo "SCCACHE_BUCKET=$BUCKET"
             echo "SCCACHE_ENDPOINT=https://$ACCOUNT.r2.cloudflarestorage.com"
             echo "SCCACHE_REGION=auto"
-            echo "SCCACHE_S3_KEY_PREFIX=cache/sccache-bench/${GITHUB_RUN_ID}/${{ matrix.repo }}/"
+            echo "SCCACHE_S3_KEY_PREFIX=cache/sccache-bench/${GITHUB_RUN_ID}/${{ matrix.repo }}-${{ matrix.rep }}/"
           } >> "$GITHUB_ENV"
       - name: rust-cache
         if: matrix.tool == 'rust-cache'
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: bench-${{ github.run_id }}
+          prefix-key: bench-${{ github.run_id }}-${{ matrix.rep }}
+          add-job-id-key: "false"
           save-if: "false"
       - name: fetch
         run: cargo fetch --locked
@@ -155,5 +159,5 @@ jobs:
           s=$(date +%s.%N)
           cargo clippy --all-targets --locked 2>&1 | tail -1
           t2=$(echo "$(date +%s.%N) - $s" | bc)
-          echo "RESULT warm ${{ matrix.repo }} ${{ matrix.tool }} test-build=${t1}s clippy=${t2}s"
+          echo "RESULT warm ${{ matrix.repo }} ${{ matrix.tool }} rep=${{ matrix.rep }} cpus=$(nproc) test-build=${t1}s clippy=${t2}s"
           if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --stop-server; fi
