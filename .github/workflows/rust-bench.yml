@@ -27,6 +27,9 @@ jobs:
         tool: [none, rust-cache, sccache-gha, sccache-r2]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      AWS_ACCESS_KEY_ID: ${{ matrix.tool == 'sccache-r2' && secrets.R2_ACCESS_KEY_ID || '' }}
+      AWS_SECRET_ACCESS_KEY: ${{ matrix.tool == 'sccache-r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,12 +72,9 @@ jobs:
       - name: fetch
         run: cargo fetch --locked
       - name: cold build
-        env:
-          AWS_ACCESS_KEY_ID: ${{ matrix.tool == 'sccache-r2' && secrets.R2_ACCESS_KEY_ID || '' }}
-          AWS_SECRET_ACCESS_KEY: ${{ matrix.tool == 'sccache-r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
         run: |
           set -euo pipefail
-          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --start-server; fi
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --stop-server >/dev/null 2>&1 || true; sccache --start-server; fi
           s=$(date +%s.%N)
           cargo test --locked --no-run 2>&1 | tail -2
           t1=$(echo "$(date +%s.%N) - $s" | bc)
@@ -86,6 +86,7 @@ jobs:
 
   warm:
     needs: bench
+    if: always()
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -94,6 +95,9 @@ jobs:
         tool: [none, rust-cache, sccache-gha, sccache-r2]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      AWS_ACCESS_KEY_ID: ${{ matrix.tool == 'sccache-r2' && secrets.R2_ACCESS_KEY_ID || '' }}
+      AWS_SECRET_ACCESS_KEY: ${{ matrix.tool == 'sccache-r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -140,12 +144,9 @@ jobs:
           f=src/lib.rs; [ -f "$f" ] || f=src/main.rs
           echo "// bench change" >> "$f"
       - name: warm build
-        env:
-          AWS_ACCESS_KEY_ID: ${{ matrix.tool == 'sccache-r2' && secrets.R2_ACCESS_KEY_ID || '' }}
-          AWS_SECRET_ACCESS_KEY: ${{ matrix.tool == 'sccache-r2' && secrets.R2_SECRET_ACCESS_KEY || '' }}
         run: |
           set -euo pipefail
-          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --start-server; fi
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --stop-server >/dev/null 2>&1 || true; sccache --start-server; fi
           s=$(date +%s.%N)
           cargo test --locked --no-run 2>&1 | tail -2
           t1=$(echo "$(date +%s.%N) - $s" | bc)
