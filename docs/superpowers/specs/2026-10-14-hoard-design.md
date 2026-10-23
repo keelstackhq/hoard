@@ -16,6 +16,7 @@ laptops). An R2 bucket must never grow without limit.
 ### Non-goals (v1)
 
 - Nx, Bazel, Gradle or any non-JS task runner.
+- A compile cache for pure-Rust (cargo-only) repositories: use Swatinem/rust-cache (§14).
 - A hosted service, accounts or a dashboard.
 - Vite+'s own remote-cache protocol (`/fetch`, `/blob`, `/store`): unreleased upstream; revisit
   when VoidZero ships it (see §12).
@@ -660,6 +661,9 @@ hoard stays 0.x (users pin `@v0`) until artifact packing lands; 1.0 and the `v1`
   one pack + one index per job, `throttled` 0 and every warm task hits
   (`docs/benchmarks/2026-10-rate-limit.md`). Required before 1.0.
 - Nx adapter.
+- sccache backend (deferred, §14): serve the WebDAV subset sccache uses, over hoard's stores,
+  with packing on the GitHub cache. Revisit when a repo's dependency build is large enough that a
+  `target/` restore misses often, or when caches must be shared across repos or with laptops.
 
 ## 13. Milestones
 
@@ -669,3 +673,54 @@ hoard stays 0.x (users pin `@v0`) until artifact packing lands; 1.0 and the `v1`
    node24 wrapper, self-test workflow.
 3. **Vite+ and throughput** — `vp restore/save`, write-behind uploads, refresh-on-hit, packing
    (only if the benchmark shows rate limiting).
+
+## 14. Pure-Rust repositories (cargo, no Turborepo)
+
+Decided 2026-10-23: **hoard does not cache cargo builds.** Pure-Rust repositories (hull's
+`template-rust`, berth, bosun) use `Swatinem/rust-cache@v2`. Turborepo is not the answer
+either: hull's pure-Rust template has no Node and no Turborepo (hull measured: Node setup costs ~10 s per PR,
+a turbo hit saves ~1 s, and turbo does not cache `target/`).
+
+Evidence (`docs/benchmarks/2026-10-rust.md`; `ubuntu-latest`, sccache 0.18.0, rust-cache 2.9.3,
+warm job = a one-line change to the repo's crate on a fresh runner, test-build + clippy):
+
+| repo | no cache | rust-cache | sccache, GitHub cache | sccache, R2 |
+| --- | --- | --- | --- | --- |
+| bosun (198 cacheable calls) | 28.7–47.6 s | **19.7 s** + 3 s restore | 37.9 s | 55.9–64.1 s |
+| berth (115 cacheable calls) | 17.8–26.6 s | **7.0–8.8 s** + 2–6 s restore | — | 26.1–32.9 s |
+
+Why rust-cache wins on these repos:
+
+- It restores `target/` as one archive (91–134 MB, 2–6 s), so cargo finds the dependencies
+  fresh and runs no rustc for them. Build scripts and proc-macros are restored too.
+- sccache still runs every rustc call through its wrapper and fetches each hit separately: 198
+  GETs from R2 cost more than compiling these dependencies (warm sccache on R2 was slower than
+  no cache, with 99.5% hits). It cannot cache crates that link (`bin`, `proc-macro`, build
+  scripts: 98 of bosun's calls) at all.
+- sccache on the GitHub cache makes one upload per crate. Five parallel cold bosun jobs lost 634
+  of 990 writes to `429` (the 200 uploads/min limit), and its documented setup without
+  `ACTIONS_CACHE_SERVICE_V2=on` stored nothing. In both cases the build is green and the loss is
+  invisible.
+
+What hoard could add (deferred, §12): sccache's WebDAV backend uses only `GET`, `PUT`,
+`PROPFIND` (Depth 0, to find an existing parent) and `MKCOL` under
+`{endpoint}/{prefix}/{a}/{b}/{c}/{64-hex key}`, plus a write check of `.sccache_check` at
+startup, with `SCCACHE_WEBDAV_TOKEN` sent as a bearer token. hoard could serve that on
+127.0.0.1 over its stores and keep its rules: packing removes the `429`s, R2 stays bounded, a
+storage error is a miss. It would not remove the per-crate GETs or the uncacheable crates, so it
+would not beat rust-cache for warm-`main` PRs on repos of this size. It becomes worth building
+when a `target/` restore misses often (many `Cargo.lock` changes, many toolchains or feature
+sets, dependency builds of several minutes) or when one cache must serve several repos or
+laptops.
+
+Setup lines for the user today:
+
+```yaml
+- uses: dtolnay/rust-toolchain@stable
+- uses: Swatinem/rust-cache@v2
+- run: cargo test --locked
+```
+
+If sccache is used on the GitHub cache anyway, export `ACTIONS_CACHE_SERVICE_V2=on` with
+`ACTIONS_RESULTS_URL` and `ACTIONS_RUNTIME_TOKEN`, and avoid parallel cold jobs. sccache on R2
+needs its own lifecycle rule: sccache never cleans the bucket.

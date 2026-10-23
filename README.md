@@ -194,6 +194,22 @@ Details:
   hoard step sees it.
 - Restore and save problems are warnings and never fail the build.
 
+## Pure Rust (cargo only)
+
+hoard caches Turborepo and Vite+ tasks, not cargo builds. For a pure-Rust repository use
+[Swatinem/rust-cache](https://github.com/Swatinem/rust-cache):
+
+```yaml
+- uses: Swatinem/rust-cache@v2
+- run: cargo test --locked
+```
+
+On keelstackhq/bosun and keelstackhq/berth it made PR builds 1.3–2.5× faster than no cache
+(counting its restore step). sccache was slower than no cache on R2, and on the GitHub cache it
+lost most uploads to GitHub's rate limit when jobs ran in parallel. A hoard backend for sccache is deferred until large
+dependency trees or sharing across repos need it. Numbers:
+[`docs/benchmarks/2026-10-rust.md`](docs/benchmarks/2026-10-rust.md), spec §14.
+
 ## Requirements
 
 - **Runners:** GitHub-hosted or self-hosted, on Linux x64 and arm64, macOS x64 and arm64
