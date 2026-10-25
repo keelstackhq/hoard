@@ -36,6 +36,7 @@ export interface ActionCore {
   setFailed(message: string): void;
   warning(message: string): void;
   info(message: string): void;
+  notice(message: string): void;
   startGroup(name: string): void;
   endGroup(): void;
   summary: { addRaw(text: string): { write(): Promise<unknown> } };
@@ -190,7 +191,15 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     // Vite+: restore the task cache now; post saves it. Problems are warnings only.
     const workspace = env.GITHUB_WORKSPACE || process.cwd();
     let vp: VpState | undefined;
-    if (d.detectTools(workspace).vp) {
+    const tools = d.detectTools(workspace);
+    if (tools.cargo && !tools.turbo && !tools.vp) {
+      // Spec §14: hoard does not cache cargo builds. A hint only, not a settings warning.
+      core.notice(
+        "hoard caches Turborepo and Vite+ tasks, not cargo builds. For this Rust repository " +
+          "add Swatinem/rust-cache@v2 (https://github.com/keelstackhq/hoard#pure-rust-cargo-only)",
+      );
+    }
+    if (tools.vp) {
       // An absolute VITE_CACHE_PATH (the only kind hoard uses) is outside node_modules, so an
       // install cannot drop it.
       const cacheOutside = isAbsolute(env.VITE_CACHE_PATH ?? "");

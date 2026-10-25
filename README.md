@@ -204,6 +204,9 @@ hoard caches Turborepo and Vite+ tasks, not cargo builds. For a pure-Rust reposi
 - run: cargo test --locked
 ```
 
+When the hoard step runs in a repository with a root `Cargo.toml` and no `turbo.json` or
+`vite-plus`, it logs a notice that points here; the step still succeeds.
+
 On keelstackhq/bosun and keelstackhq/berth it made PR builds 1.3–2.5× faster than no cache
 (counting its restore step). sccache was slower than no cache on R2, and on the GitHub cache
 parallel jobs lost most uploads to GitHub's rate limit. A hoard backend for sccache is deferred

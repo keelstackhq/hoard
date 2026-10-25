@@ -7,6 +7,8 @@ export interface Tools {
   turbo: boolean;
   /** `vite-plus` in the root `package.json` dependencies or devDependencies. */
   vp: boolean;
+  /** `Cargo.toml` at the root (spec §14: hoard does not cache cargo builds). */
+  cargo: boolean;
 }
 
 const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "optionalDependencies"] as const;
@@ -28,5 +30,6 @@ export function detectTools(root: string): Tools {
   return {
     turbo: ["turbo.json", "turbo.jsonc"].some((f) => existsSync(join(root, f))),
     vp: hasVitePlus(root),
+    cargo: existsSync(join(root, "Cargo.toml")),
   };
 }
