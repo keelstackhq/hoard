@@ -9,11 +9,19 @@ const fixtures = fileURLToPath(new URL("../../tests/fixtures/", import.meta.url)
 
 describe("detectTools", () => {
   test("the Turborepo fixture is turbo only", () => {
-    expect(detectTools(join(fixtures, "turbo-repo"))).toEqual({ turbo: true, vp: false });
+    expect(detectTools(join(fixtures, "turbo-repo"))).toEqual({
+      turbo: true,
+      vp: false,
+      cargo: false,
+    });
   });
 
   test("the Vite+ fixture is vp only", () => {
-    expect(detectTools(join(fixtures, "vp-repo"))).toEqual({ turbo: false, vp: true });
+    expect(detectTools(join(fixtures, "vp-repo"))).toEqual({
+      turbo: false,
+      vp: true,
+      cargo: false,
+    });
   });
 
   describe("in a scratch repo", () => {
@@ -26,7 +34,7 @@ describe("detectTools", () => {
     });
 
     test("nothing there: neither", () => {
-      expect(detectTools(dir)).toEqual({ turbo: false, vp: false });
+      expect(detectTools(dir)).toEqual({ turbo: false, vp: false, cargo: false });
     });
 
     test("both tools at once", async () => {
@@ -35,7 +43,7 @@ describe("detectTools", () => {
         join(dir, "package.json"),
         JSON.stringify({ dependencies: { "vite-plus": "1.2.0" } }),
       );
-      expect(detectTools(dir)).toEqual({ turbo: true, vp: true });
+      expect(detectTools(dir)).toEqual({ turbo: true, vp: true, cargo: false });
     });
 
     test("vite-plus must be a dependency, not just mentioned", async () => {
@@ -48,7 +56,12 @@ describe("detectTools", () => {
 
     test("a broken package.json is no vp, not an error", async () => {
       await writeFile(join(dir, "package.json"), "{ not json");
-      expect(detectTools(dir)).toEqual({ turbo: false, vp: false });
+      expect(detectTools(dir)).toEqual({ turbo: false, vp: false, cargo: false });
+    });
+
+    test("Cargo.toml at the root counts as cargo", async () => {
+      await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "x"\n');
+      expect(detectTools(dir)).toEqual({ turbo: false, vp: false, cargo: true });
     });
 
     test("turbo.jsonc counts as turbo", async () => {

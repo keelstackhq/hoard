@@ -538,7 +538,11 @@ main:
    `action/src/tools.ts`, at `GITHUB_WORKSPACE`, else the working directory: `turbo.json` or
    `turbo.jsonc` present → turbo; `vite-plus` in the root `package.json` `dependencies`,
    `devDependencies` or `optionalDependencies` → vp; both allowed). A `vite.config.*` is not
-   required: Vite Task caches `package.json` scripts too.
+   required: Vite Task caches `package.json` scripts too. `Cargo.toml` at the root → cargo. When
+   cargo is found and neither turbo nor vp, main (after step 5) logs the `core.notice`
+   `hoard caches Turborepo and Vite+ tasks, not cargo builds. For this Rust repository add
+   Swatinem/rust-cache@v2 (<README link>)` (§14). It is a hint only: not a settings warning, not
+   in the job summary, and the server still starts and exports `TURBO_*` as usual.
 2. Resolve the target from `process.platform`/`process.arch` (anything else fails with
    `unsupported platform <platform>/<arch>`, before any download). Refuse a target with no
    checksum in `action/src/checksums.generated.ts` (written at release time, bundled into `dist/`)
@@ -712,6 +716,9 @@ would not beat rust-cache for warm-`main` PRs on repos of this size. It becomes 
 when a `target/` restore misses often (many `Cargo.lock` changes, many toolchains or feature
 sets, dependency builds of several minutes) or when one cache must serve several repos or
 laptops.
+
+When the action runs in a repository with a root `Cargo.toml` and no Turborepo or Vite+, it
+logs a notice that points here (§10 main 1); it never fails or changes the step.
 
 Setup lines for the user today:
 

@@ -36,6 +36,7 @@ function fakeCore(inputs: Record<string, string> = {}, state: Record<string, str
     setFailed: (m) => void calls.push(["setFailed", m]),
     warning: (m) => void calls.push(["warning", m]),
     info: (m) => void calls.push(["info", m]),
+    notice: (m) => void calls.push(["notice", m]),
     startGroup: (n) => void calls.push(["startGroup", n]),
     endGroup: () => void calls.push(["endGroup"]),
     summary: {
@@ -84,7 +85,7 @@ describe("main", () => {
       }),
       waitForHealth: vi.fn(async () => 40404),
       kill: vi.fn(),
-      detectTools: vi.fn(() => ({ turbo: true, vp: false })),
+      detectTools: vi.fn(() => ({ turbo: true, vp: false, cargo: false })),
       runVp: vi.fn(async () => ({ ok: true, line: "no cache found" })),
       ...over,
     };
@@ -406,7 +407,7 @@ describe("main", () => {
   test("Vite+ repo: restores the task cache after health, with the server's storage", async () => {
     const f = fakeCore({ storage: "fs", "vp-max-size": "1GB" });
     const d = deps(f, {
-      detectTools: vi.fn(() => ({ turbo: false, vp: true })),
+      detectTools: vi.fn(() => ({ turbo: false, vp: true, cargo: false })),
       runVp: vi.fn(async () => {
         f.calls.push(["runVp"]);
         return { ok: true, line: "restored cache/vp/v1/linux-x64/1-1 (2 KB)" };
@@ -441,7 +442,7 @@ describe("main", () => {
 
   test("Vite+ without node_modules: warns to put hoard after the install, still restores", async () => {
     const f = fakeCore();
-    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true })) });
+    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true, cargo: false })) });
     d.env.GITHUB_WORKSPACE = join(dir, "no-install");
     await runMain(d);
     expect(f.of("setFailed")).toEqual([]);
@@ -456,7 +457,7 @@ describe("main", () => {
 
   test("Vite+ with an absolute VITE_CACHE_PATH: no node_modules warning", async () => {
     const f = fakeCore();
-    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true })) });
+    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true, cargo: false })) });
     d.env.GITHUB_WORKSPACE = join(dir, "no-install");
     d.env.VITE_CACHE_PATH = join(dir, "vite-cache");
     await runMain(d);
@@ -466,7 +467,7 @@ describe("main", () => {
 
   test("Vite+ with a relative VITE_CACHE_PATH still warns (hoard ignores it)", async () => {
     const f = fakeCore();
-    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true })) });
+    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: true, cargo: false })) });
     d.env.GITHUB_WORKSPACE = join(dir, "no-install");
     d.env.VITE_CACHE_PATH = "cache";
     await runMain(d);
@@ -476,7 +477,7 @@ describe("main", () => {
   test("a failed Vite+ restore is a warning; main still succeeds", async () => {
     const f = fakeCore();
     const d = deps(f, {
-      detectTools: vi.fn(() => ({ turbo: true, vp: true })),
+      detectTools: vi.fn(() => ({ turbo: true, vp: true, cargo: false })),
       runVp: vi.fn(async () => ({ ok: false, line: "hoard vp restore timed out after 120s" })),
     });
     await mkdir(join(dir, "node_modules"));
@@ -495,6 +496,35 @@ describe("main", () => {
     await runMain(d);
     expect(d.runVp).not.toHaveBeenCalled();
     expect(Object.keys(Object.fromEntries(f.of("saveState")))).not.toContain("vp");
+  });
+
+  const RUST_NOTICE =
+    "hoard caches Turborepo and Vite+ tasks, not cargo builds. For this Rust repository " +
+    "add Swatinem/rust-cache@v2 (https://github.com/keelstackhq/hoard#pure-rust-cargo-only)";
+
+  test("cargo-only repo: a notice that points to rust-cache; main still succeeds", async () => {
+    const f = fakeCore();
+    const d = deps(f, { detectTools: vi.fn(() => ({ turbo: false, vp: false, cargo: true })) });
+    await runMain(d);
+    expect(f.of("setFailed")).toEqual([]);
+    expect(f.of("notice")).toEqual([[RUST_NOTICE]]);
+    expect(f.of("warning")).toEqual([]);
+    expect(f.of("exportVariable")).toHaveLength(3); // hoard still serves turbo, as asked
+    const saved = Object.fromEntries(f.of("saveState"));
+    expect(JSON.parse(String(saved.warnings ?? "[]"))).toEqual([]); // not in the job summary
+  });
+
+  test.each([
+    { turbo: true, vp: false, cargo: true },
+    { turbo: false, vp: true, cargo: true },
+    { turbo: false, vp: false, cargo: false },
+  ])("no rust-cache notice for %o", async (tools) => {
+    const f = fakeCore();
+    const d = deps(f, { detectTools: vi.fn(() => tools) });
+    await mkdir(join(dir, "node_modules"));
+    d.env.GITHUB_WORKSPACE = dir;
+    await runMain(d);
+    expect(f.of("notice")).toEqual([]);
   });
 
   test("a missing token file fails the step", async () => {
