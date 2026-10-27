@@ -26,9 +26,9 @@ enum Command {
     /// Run the cache server until shutdown.
     Serve {
         #[command(flatten)]
-        serve: ServeArgs,
+        args: ServeArgs,
         #[command(flatten)]
-        detach: DetachArgs,
+        d: DetachArgs,
     },
     /// Print export lines for a running server.
     Env(TokenPaths),
@@ -57,7 +57,8 @@ fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
         eprintln!("error: {}", redacted(&e));
-        std::process::exit(1);
+        let start_failed = e.is::<hoard::standalone::StartFailed>();
+        std::process::exit(if start_failed { 3 } else { 1 });
     }
 }
 
@@ -77,10 +78,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Stop(a) => stop(&a),
-        Command::Serve {
-            serve: args,
-            detach: d,
-        } => {
+        Command::Serve { args, d } => {
             let pack_ignored = args.storage == hoard::config::Storage::R2
                 && args.pack == hoard::config::PackMode::On;
             let cfg = Config::try_from(args)?;
