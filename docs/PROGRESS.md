@@ -153,3 +153,4 @@ lists every input and output.
   `src/ratelimit.rs`, `src/doctor.rs` or `scripts/bench/`.
 - MinIO for tests is `pgsty/minio` (the `minio/minio` image was removed from Docker Hub).
 - In this container, dockerd has to be started by hand.
+- hd-1 follow-up: pid file records the start time (stop never signals a reused pid), stop warns when kill fails, CircleCI pinned install cleans its temp dir and explains a sha256 mismatch, offline test of the start step (tests/circleci_cmd.rs).

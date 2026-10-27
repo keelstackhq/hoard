@@ -29,7 +29,9 @@ cache of up to `max-size`; CircleCI bills cache storage by plan, so check it bef
 `version` must be `X.Y.Z` (a leading `v` is allowed). `install.sh` rejects an archive whose
 SHA-256 differs from `checksums.generated.ts` at the release tag, and a file for another version.
 `sha256` pins the archive hash: the command then downloads and checks the archive itself and
-runs no script from the tag. hull vendors the per-version SHA-256 for its executor (linux x64).
+runs no script from the tag. Without `sha256` the trust root is the release tag (the install
+script and the checksums file both come from it), which is why hull pins `sha256`: it vendors
+the per-version SHA-256 for its executor (linux x64).
 A failed install, or a server that does not start (`hoard serve --detach` exit 3), prints a
 warning and the build runs without the cache. A setup error
 (exit 1: bad R2 credentials, missing lifecycle rule, port in use) fails the step.
