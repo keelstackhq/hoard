@@ -6,6 +6,7 @@ use hoard::doctor::run_doctor;
 use hoard::r2::prune::run_prune;
 use hoard::redact::redacted;
 use hoard::serve::{env_for, run_serve};
+use hoard::standalone::{DetachArgs, StopArgs, detach, stop};
 use hoard::vp::cli::{VpCommand, prepare};
 use tracing_subscriber::EnvFilter;
 
@@ -23,9 +24,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the cache server until shutdown.
-    Serve(ServeArgs),
+    Serve {
+        #[command(flatten)]
+        serve: ServeArgs,
+        #[command(flatten)]
+        detach: DetachArgs,
+    },
     /// Print export lines for a running server.
     Env(TokenPaths),
+    /// Shut down a running server, wait for its uploads, print the summary.
+    Stop(StopArgs),
     /// Enforce max-size on R2 now.
     Prune(PruneArgs),
     /// Check storage credentials, bucket access and the R2 lifecycle rule.
@@ -68,10 +76,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             print!("{}", env_for(&paths)?);
             Ok(())
         }
-        Command::Serve(args) => {
+        Command::Stop(a) => stop(&a),
+        Command::Serve {
+            serve: args,
+            detach: d,
+        } => {
             let pack_ignored = args.storage == hoard::config::Storage::R2
                 && args.pack == hoard::config::PackMode::On;
             let cfg = Config::try_from(args)?;
+            if d.detach {
+                return detach(&cfg, &d);
+            }
             init_logging();
             if pack_ignored {
                 tracing::info!(

@@ -77,6 +77,8 @@ One Rust crate (`hoard`, lib + bin) and one small TypeScript action in `action/`
 | Command | Purpose |
 |---|---|
 | `hoard serve` | Run the cache server until shutdown. |
+| `hoard serve --detach` | Start the server in the background (own process group, output to `log-file`, truncated at each start), wait up to 15 s for `/_hoard/health`, write `pid-file`, exit 0. Config errors fail in the foreground; a server that dies during startup fails with the log tail; a running server is refused. |
+| `hoard stop` | `POST /_hoard/shutdown` (waits for the upload drain, up to 300 s), then for the process in `pid-file` (linux, 30 s), and removes it. `--summary markdown` prints the summary file, else `hoard stopped` goes to stderr. No server: exit 1. |
 | `hoard env` | Print `export` lines for a running server (reads the port file and token file). |
 | `hoard prune` | Enforce `max-size` on R2 (or fs) now (ignores the 24 h throttle with `--force`); prints `pruned N of M objects, freed X, Y remain (max Z)` or `skipped: last prune < 24 h ago (use --force)`. With `storage=github` it fails: `prune is only for r2/fs storage; GitHub evicts old cache entries itself`. |
 | `hoard doctor` | Check storage credentials, bucket access and the R2 lifecycle rule; print fixes. The access check writes, reads and deletes `{prefix}_hoard/doctor`, also with `mode=read`. With `storage=github` it only checks that the GitHub Actions cache environment is complete and prints `✓ GitHub cache environment`; it never writes (entries are immutable and count against the quota). |
@@ -98,7 +100,10 @@ secrets as `""`).
 | `port-file` | `$RUNNER_TEMP/hoard.port` or `./.hoard/port` | |
 | `token` | random 32 bytes, hex | Written to `--token-file` (mode 0600); never logged |
 | `token-file` | `$RUNNER_TEMP/hoard.token` or `./.hoard/token` | Where the token is written; read by `hoard env` |
-| `summary-file` | none | Markdown summary written on shutdown |
+| `summary-file` | `$RUNNER_TEMP/hoard-summary.md` or `./.hoard/summary.md` | Markdown summary written on shutdown |
+| `pid-file` | `$RUNNER_TEMP/hoard.pid` or `./.hoard/pid` | `serve --detach` writes the pid; `stop` waits on it |
+| `log-file` | `$RUNNER_TEMP/hoard.log` or `./.hoard/log` | `serve --detach` writes stdout and stderr here |
+| `detach` | off | Boolean flag (`HOARD_DETACH`): `serve` runs in the background (§4.1) |
 | `fs-root` | `./.hoard/store` | `fs` storage only (tests, local use) |
 | `r2-account-id`, `r2-access-key-id`, `r2-secret-access-key`, `r2-bucket` | — | required for `r2` |
 | `r2-endpoint` | — | Optional S3 endpoint URL override (e.g. MinIO for tests and local use), must start with `http://` or `https://`; when set, `r2-account-id` is not required |
@@ -731,3 +736,16 @@ Setup lines for the user today:
 If sccache is used on the GitHub cache anyway, export `ACTIONS_CACHE_SERVICE_V2=on` with
 `ACTIONS_RESULTS_URL` and `ACTIONS_RUNTIME_TOKEN`, and avoid parallel cold jobs. sccache on R2
 needs its own lifecycle rule: sccache never cleans the bucket.
+
+## 15. Other CI providers
+
+Runners without a JavaScript action (CircleCI, shell) use the binary directly:
+`scripts/install.sh` (`HOARD_VERSION=X.Y.Z`, Linux) installs it into `$HOARD_INSTALL_DIR` (default
+`~/.local/bin`) after checking the archive's SHA-256 against `action/src/checksums.generated.ts`
+at the release tag; `hoard serve --detach` / `hoard stop` (§4.1) replace the action's start and
+stop; `storage=github` does not work there. `circleci/hoard.yml` is the reference CircleCI command
+(`step: start|stop`, `version`, `storage: fs|r2`): `fs` keeps artifacts in `~/.cache/hoard`,
+restored and saved with CircleCI caches keyed `hoard-v1-{{ .Branch }}-{{ .Revision }}`, falling
+back to `hoard-v1-{{ .Branch }}-`, then `hoard-v1-main-`, and pruned to 2 GB (`prune --force`) before
+the save. A failed install is a warning (the build runs without the cache); `stop` never fails
+the job.

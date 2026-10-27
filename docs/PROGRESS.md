@@ -49,6 +49,7 @@ One line per finished task: `YYYY-MM-DD · plan/task · commit · test summary`.
 - 2026-10-22 · fix: `vp save`'s empty-cache line names the directory and says only `vp run` tasks are cached (keelstackhq/example-app#12: hull repos call `vp build/test` under turbo, so the task cache is empty by design) · cargo vp 44/44, fmt + clippy clean
 - 2026-10-22 · fix(test): `get_hit_refreshes_old_object_once_per_run` waits up to 10 s for `stats.refreshed` instead of reading it 150 ms after the copy request is logged (failed once in CI on PR keelstackhq/hoard#13) · red with a 300 ms delay on copies in the test proxy, green after; cargo test green with MinIO
 - 2026-10-23 · pure-Rust research (spec §14) · bench runs 39969545861, 39969545941, 39968589984 · decision: no cargo cache in hoard; pure-Rust repos use rust-cache (bosun warm 19.7 s vs 28.7–47.6 s no cache; sccache on R2 slower than no cache; sccache on the GitHub cache lost 634/990 writes to 429 in 5 parallel jobs); sccache WebDAV backend deferred (§12)
+- 2026-10-27 · HD-1 standalone CI (serve --detach, stop, install.sh, circleci/hoard.yml) · uncommitted · 2 standalone tests pass; install.sh verified against v0.3.0
 
 ## Blocked
 

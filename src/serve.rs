@@ -79,12 +79,18 @@ pub fn env_lines(port: u16, token: &str) -> String {
 
 /// Reads the port and token files of a running server and returns its [`env_lines`].
 pub fn env_for(paths: &TokenPaths) -> anyhow::Result<String> {
+    let (port, token) = read_server(paths, "hoard serve")?;
+    Ok(env_lines(port, &token))
+}
+
+/// Port and token of a running server, read from the files `hoard serve` wrote.
+pub(crate) fn read_server(paths: &TokenPaths, start_cmd: &str) -> anyhow::Result<(u16, String)> {
     let port_file = paths.port_file.clone().unwrap_or_else(default_port_file);
     let token_file = paths.token_file.clone().unwrap_or_else(default_token_file);
     let read = |p: &Path| {
         std::fs::read_to_string(p).with_context(|| {
             format!(
-                "no running hoard server found (missing {}); start one with `hoard serve`",
+                "no running hoard server found (missing {}); start one with `{start_cmd}`",
                 p.display()
             )
         })
@@ -97,7 +103,7 @@ pub fn env_for(paths: &TokenPaths) -> anyhow::Result<String> {
         )
     })?;
     let token = read(&token_file)?;
-    Ok(env_lines(port, token.trim()))
+    Ok((port, token.trim().to_string()))
 }
 
 /// 32 random bytes as 64 lowercase hex characters.
