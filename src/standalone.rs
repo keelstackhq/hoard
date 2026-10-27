@@ -103,7 +103,8 @@ pub fn detach(cfg: &Config, a: &DetachArgs) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     let pid = child.id();
-    std::fs::write(&pid_file, format!("{pid}\n"))?;
+    let start = proc_starttime(pid).map_or(String::new(), |t| format!("{t}\n"));
+    std::fs::write(&pid_file, format!("{pid}\n{start}"))?;
     eprintln!("hoard started (pid {pid}); load the env with: eval \"$(hoard env)\"");
     Ok(())
 }
@@ -130,16 +131,53 @@ fn proc_stat(pid: u32) -> Option<(String, String, u32)> {
     Some((comm, state, f.nth(1)?.parse().ok()?))
 }
 
-/// A live hoard process leading its own process group (not ours): the only thing `stop` signals,
-/// so a stale pid file never reaches another process.
-fn hoard_group(pid: Option<u32>) -> Option<u32> {
+/// Start time (clock ticks after boot, field 22 of `/proc/<pid>/stat`); None off linux.
+fn proc_starttime(pid: u32) -> Option<u64> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    s.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+/// The pid file: the pid, and when written by linux the process start time (guards pid reuse).
+#[derive(Clone, Copy)]
+struct Target {
+    pid: u32,
+    start: Option<u64>,
+}
+
+fn read_target(pid_file: &Path) -> Option<Target> {
+    let text = std::fs::read_to_string(pid_file).unwrap_or_default();
+    let mut lines = text.lines();
+    let pid = lines
+        .next()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|&p| p > 1)?;
+    Some(Target {
+        pid,
+        // A missing or unreadable second line (an older pid file) skips the start-time check.
+        start: lines.next().and_then(|l| l.trim().parse().ok()),
+    })
+}
+
+/// A live hoard process leading its own process group (not ours), with the recorded start time:
+/// the only thing `stop` signals, so a stale pid file never reaches another process.
+fn hoard_group(t: Option<Target>) -> Option<u32> {
+    let t = t?;
     let own = proc_stat(std::process::id()).map(|s| s.2);
-    let (comm, state, pgrp) = proc_stat(pid?)?;
-    (comm == "hoard" && state != "Z" && Some(pgrp) == pid && Some(pgrp) != own).then_some(pgrp)
+    let (comm, state, pgrp) = proc_stat(t.pid)?;
+    let same_start = t.start.is_none_or(|s| proc_starttime(t.pid) == Some(s));
+    (comm == "hoard" && state != "Z" && same_start && pgrp == t.pid && Some(pgrp) != own)
+        .then_some(pgrp)
 }
 
 /// Waits up to `secs` for the group leader to exit; true once it is gone.
-fn gone_within(pid: Option<u32>, secs: u64) -> bool {
+fn gone_within(pid: Option<Target>, secs: u64) -> bool {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while hoard_group(pid).is_some() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -147,17 +185,27 @@ fn gone_within(pid: Option<u32>, secs: u64) -> bool {
     hoard_group(pid).is_none()
 }
 
-fn signal_group(pgrp: u32, sig: &str) {
-    let _ = std::process::Command::new("kill")
+/// Sends `sig` to the process group; true unless the signal could not be sent to a hoard that
+/// still runs (then warns). A group that exited meanwhile (kill: ESRCH) is not a failure.
+fn signal_group(pid: Option<Target>, pgrp: u32, sig: &str) -> bool {
+    let cmd = std::process::Command::new("kill")
         .args([sig, "--", &format!("-{pgrp}")])
         .status();
+    let why = match cmd {
+        Ok(s) if s.success() => return true,
+        _ if hoard_group(pid).is_none() => return true,
+        Ok(s) => s.to_string(),
+        Err(e) => e.to_string(),
+    };
+    let sig = sig.trim_start_matches('-');
+    eprintln!("warning: could not send SIG{sig} to hoard process group {pgrp} ({why})");
+    false
 }
 
 pub fn stop(a: &StopArgs) -> anyhow::Result<()> {
     let (port, token) = read_server(&a.paths, "hoard serve --detach")?;
     let pid_file = a.pid_file.clone().unwrap_or_else(default_pid_file);
-    let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
-    let pid = pid.trim().parse::<u32>().ok().filter(|&p| p > 1);
+    let pid = read_target(&pid_file);
     let answered = match http(port, "POST /_hoard/shutdown", &token, 300) {
         Some((code, _)) if !(200..300).contains(&code) => {
             bail!("hoard shutdown failed: HTTP {code}")
@@ -173,26 +221,40 @@ pub fn stop(a: &StopArgs) -> anyhow::Result<()> {
         // Once the shutdown request is answered, hoard no longer acts on SIGTERM.
         (true, Some(p)) if !gone_within(pid, 30) => {
             eprintln!("warning: hoard (pid {p}) did not exit in 30 s; sending SIGKILL");
-            signal_group(p, "-KILL");
+            kill_and_wait(pid, p);
         }
         (false, Some(p)) => {
             eprintln!("warning: hoard did not answer the shutdown request; sending SIGTERM");
-            signal_group(p, "-TERM");
-            if !gone_within(pid, 270) {
+            if signal_group(pid, p, "-TERM") && !gone_within(pid, 270) {
                 eprintln!("warning: hoard (pid {p}) still runs after 270 s; sending SIGKILL");
-                signal_group(p, "-KILL");
+                kill_and_wait(pid, p);
             }
         }
         _ => {}
     }
-    let _ = std::fs::remove_file(&pid_file);
+    let still = hoard_group(pid);
     let file = a.summary_file.clone().unwrap_or_else(default_summary_file);
     match (a.summary, std::fs::read_to_string(&file)) {
-        (None, _) => eprintln!("hoard stopped"),
+        (None, _) if still.is_none() => eprintln!("hoard stopped"),
+        (None, _) => {}
         (_, Ok(md)) => print!("{md}"),
         (_, Err(e)) => eprintln!("warning: cannot read summary {}: {e}", file.display()),
     }
+    match still {
+        // Keep the pid file so a later `hoard stop` can still find it (exit 0: never fail the build).
+        Some(p) => eprintln!("warning: hoard (pid {p}) is still running"),
+        None => {
+            let _ = std::fs::remove_file(&pid_file);
+        }
+    }
     Ok(())
+}
+
+/// SIGKILL, then a short wait so the final check does not see a group that is still dying.
+fn kill_and_wait(pid: Option<Target>, pgrp: u32) {
+    if signal_group(pid, pgrp, "-KILL") {
+        gone_within(pid, 5);
+    }
 }
 
 #[cfg(all(test, unix))]

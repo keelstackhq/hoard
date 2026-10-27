@@ -38,8 +38,17 @@ struct PidGuard(std::path::PathBuf);
 impl Drop for PidGuard {
     fn drop(&mut self) {
         if let Ok(pid) = std::fs::read_to_string(&self.0) {
-            let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+            let pid = pid.lines().next().unwrap_or_default();
+            let _ = Command::new("kill").args(["-9", pid]).status();
         }
+    }
+}
+
+struct Killer(String);
+
+impl Drop for Killer {
+    fn drop(&mut self) {
+        let _ = Command::new("kill").args(["-9", &self.0]).status();
     }
 }
 
@@ -56,6 +65,7 @@ fn detach_put_get_stop() {
     assert!(log.file_type().is_file() && log.mode() & 0o777 == 0o600);
     assert_eq!(std::fs::read_to_string(d.join("victim")).unwrap(), "keep");
     let pid = std::fs::read_to_string(d.join("PID")).unwrap();
+    let pid = pid.lines().next().unwrap().to_string();
     let (code, _, err) = hoard(d, &["serve", "--detach"]);
     assert!(code == 1 && err.contains("already running"), "{code} {err}");
     let env = hoard(d, &["env"]).1;
@@ -88,6 +98,7 @@ fn stop_sigterms_a_hoard_that_does_not_answer() {
     let _guard = PidGuard(d.join("PID"));
     assert_eq!(hoard(d, &["serve", "--detach"]).0, 0);
     let pid = std::fs::read_to_string(d.join("PID")).unwrap();
+    let pid = pid.lines().next().unwrap().to_string();
     std::fs::write(d.join("PORT"), "1").unwrap(); // stop asks port 1: nothing answers
     let (code, _, err) = hoard(d, &["stop"]);
     assert_eq!(code, 0, "{err}");
@@ -120,4 +131,69 @@ fn stop_never_signals_a_pid_that_is_not_a_hoard_group() {
     }
     assert!(sleeper.try_wait().unwrap().is_none(), "sleep was signalled");
     let _ = sleeper.kill();
+}
+
+fn start_with_port_1(d: &std::path::Path) -> String {
+    assert_eq!(hoard(d, &["serve", "--detach"]).0, 0);
+    let pid = std::fs::read_to_string(d.join("PID")).unwrap();
+    std::fs::write(d.join("PORT"), "1").unwrap(); // nothing answers on port 1
+    pid
+}
+
+#[test]
+fn stop_ignores_a_reused_pid_with_another_start_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let _guard = PidGuard(d.join("PID"));
+    let saved = start_with_port_1(d);
+    let (pid, start) = saved
+        .trim()
+        .split_once('\n')
+        .expect("pid file: pid and start time");
+    assert!(start.parse::<u64>().is_ok(), "{saved:?}");
+    std::fs::write(d.join("PID"), format!("{pid}\n1\n")).unwrap();
+    let (code, _, err) = hoard(d, &["stop"]);
+    assert!(code == 1 && err.contains("nothing to stop"), "{code} {err}");
+    assert!(!gone(pid), "server {pid} was signalled");
+    std::fs::write(d.join("PID"), &saved).unwrap();
+    std::fs::write(d.join("PORT"), "1").unwrap();
+    assert_eq!(hoard(d, &["stop"]).0, 0);
+    assert!(gone(pid));
+}
+
+#[test]
+fn stop_warns_and_returns_when_kill_cannot_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let _guard = PidGuard(d.join("PID"));
+    let pid = start_with_port_1(d);
+    let pid = pid.lines().next().unwrap().to_string();
+    std::fs::write(d.join("SUMMARY"), "### hoard (earlier)\n").unwrap();
+    let _kill = Killer(pid.clone()); // `stop` removes the pid file, so the guard above cannot
+    let empty = tempfile::tempdir().unwrap();
+    let t = std::time::Instant::now();
+    let o = Command::new(env!("CARGO_BIN_EXE_hoard"))
+        .env("PATH", empty.path())
+        .env("HOARD_PORT_FILE", d.join("PORT"))
+        .env("HOARD_TOKEN_FILE", d.join("TOKEN"))
+        .env("HOARD_PID_FILE", d.join("PID"))
+        .env("HOARD_SUMMARY_FILE", d.join("SUMMARY"))
+        .args(["stop", "--summary", "markdown"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("### hoard (earlier)"),
+        "summary printed: {out} {err}"
+    );
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(
+        err.contains("warning: could not send SIGTERM to hoard process group"),
+        "{err}"
+    );
+    assert!(t.elapsed().as_secs() < 10, "waited {:?}", t.elapsed());
+    assert!(!gone(&pid));
+    assert!(!err.contains("hoard stopped"), "{err}");
+    assert!(d.join("PID").exists(), "pid file kept for a later stop");
 }
