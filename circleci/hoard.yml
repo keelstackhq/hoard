@@ -59,9 +59,17 @@ steps:
               pinned() { # never runs code fetched from the tag the pin distrusts
                 case "$(uname -sm)" in "Linux x86_64") a=x86_64 ;; "Linux aarch64") a=aarch64 ;;
                   *) echo "hoard: no linux release for $(uname -sm)" >&2; return 1 ;; esac
-                t="$(mktemp -d)" && get -o "$t/h.tgz" "https://github.com/keelstackhq/hoard/releases/download/v$v/hoard-$a-unknown-linux-musl.tar.gz" &&
-                  echo "$sha  $t/h.tgz" | sha256sum -c --quiet - && tar -xzf "$t/h.tgz" -C "$t" hoard &&
-                  mkdir -p "$HOME/.local/bin" && install -m 0755 "$t/hoard" "$HOME/.local/bin/hoard"
+                t="$(mktemp -d)" || return 1
+                {
+                  get -o "$t/h.tgz" "https://github.com/keelstackhq/hoard/releases/download/v$v/hoard-$a-unknown-linux-musl.tar.gz" &&
+                    { echo "$sha  $t/h.tgz" | sha256sum -c --quiet - ||
+                      { echo "hoard: the archive for $a-unknown-linux-musl does not match sha256 (the pin is per architecture; this runner is $(uname -m))" >&2; false; }; } &&
+                    tar -xzf "$t/h.tgz" -C "$t" hoard &&
+                    mkdir -p "$HOME/.local/bin" && install -m 0755 "$t/hoard" "$HOME/.local/bin/hoard"
+                }
+                rc=$?
+                rm -rf "$t"
+                return "$rc"
               }
               unpinned() { get "https://raw.githubusercontent.com/keelstackhq/hoard/v$v/scripts/install.sh" | HOARD_VERSION="$v" sh; }
               # A download problem must not fail the build: turbo then runs without the remote cache.
