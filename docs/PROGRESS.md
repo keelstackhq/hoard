@@ -154,3 +154,4 @@ lists every input and output.
 - MinIO for tests is `pgsty/minio` (the `minio/minio` image was removed from Docker Hub).
 - In this container, dockerd has to be started by hand.
 - hd-1 follow-up: pid file records the start time (stop never signals a reused pid), stop warns when kill fails, CircleCI pinned install cleans its temp dir and explains a sha256 mismatch, offline test of the start step (tests/circleci_cmd.rs).
+- hd-1 lows: stop waits 5 s after SIGKILL and prints the summary even when hoard still runs; the CircleCI start step exports HOARD_SKIP=1 until this job installed hoard and stop skips while it is 1 or unset; offline tests of the stop step.

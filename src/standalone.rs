@@ -221,30 +221,40 @@ pub fn stop(a: &StopArgs) -> anyhow::Result<()> {
         // Once the shutdown request is answered, hoard no longer acts on SIGTERM.
         (true, Some(p)) if !gone_within(pid, 30) => {
             eprintln!("warning: hoard (pid {p}) did not exit in 30 s; sending SIGKILL");
-            signal_group(pid, p, "-KILL");
+            kill_and_wait(pid, p);
         }
         (false, Some(p)) => {
             eprintln!("warning: hoard did not answer the shutdown request; sending SIGTERM");
             if signal_group(pid, p, "-TERM") && !gone_within(pid, 270) {
                 eprintln!("warning: hoard (pid {p}) still runs after 270 s; sending SIGKILL");
-                signal_group(pid, p, "-KILL");
+                kill_and_wait(pid, p);
             }
         }
         _ => {}
     }
-    if let Some(p) = hoard_group(pid) {
-        // Keep the pid file so a later `hoard stop` can still find it (exit 0: never fail the build).
-        eprintln!("warning: hoard (pid {p}) is still running");
-        return Ok(());
-    }
-    let _ = std::fs::remove_file(&pid_file);
+    let still = hoard_group(pid);
     let file = a.summary_file.clone().unwrap_or_else(default_summary_file);
     match (a.summary, std::fs::read_to_string(&file)) {
-        (None, _) => eprintln!("hoard stopped"),
+        (None, _) if still.is_none() => eprintln!("hoard stopped"),
+        (None, _) => {}
         (_, Ok(md)) => print!("{md}"),
         (_, Err(e)) => eprintln!("warning: cannot read summary {}: {e}", file.display()),
     }
+    match still {
+        // Keep the pid file so a later `hoard stop` can still find it (exit 0: never fail the build).
+        Some(p) => eprintln!("warning: hoard (pid {p}) is still running"),
+        None => {
+            let _ = std::fs::remove_file(&pid_file);
+        }
+    }
     Ok(())
+}
+
+/// SIGKILL, then a short wait so the final check does not see a group that is still dying.
+fn kill_and_wait(pid: Option<Target>, pgrp: u32) {
+    if signal_group(pid, pgrp, "-KILL") {
+        gone_within(pid, 5);
+    }
 }
 
 #[cfg(all(test, unix))]

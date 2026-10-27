@@ -168,6 +168,7 @@ fn stop_warns_and_returns_when_kill_cannot_run() {
     let _guard = PidGuard(d.join("PID"));
     let pid = start_with_port_1(d);
     let pid = pid.lines().next().unwrap().to_string();
+    std::fs::write(d.join("SUMMARY"), "### hoard (earlier)\n").unwrap();
     let _kill = Killer(pid.clone()); // `stop` removes the pid file, so the guard above cannot
     let empty = tempfile::tempdir().unwrap();
     let t = std::time::Instant::now();
@@ -177,10 +178,15 @@ fn stop_warns_and_returns_when_kill_cannot_run() {
         .env("HOARD_TOKEN_FILE", d.join("TOKEN"))
         .env("HOARD_PID_FILE", d.join("PID"))
         .env("HOARD_SUMMARY_FILE", d.join("SUMMARY"))
-        .arg("stop")
+        .args(["stop", "--summary", "markdown"])
         .output()
         .unwrap();
     let err = String::from_utf8_lossy(&o.stderr);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("### hoard (earlier)"),
+        "summary printed: {out} {err}"
+    );
     assert_eq!(o.status.code(), Some(0), "{err}");
     assert!(
         err.contains("warning: could not send SIGTERM to hoard process group"),

@@ -41,6 +41,7 @@ steps:
               {
                 echo "export HOARD_PORT_FILE='$d/port' HOARD_TOKEN_FILE='$d/token' HOARD_PID_FILE='$d/pid'"
                 echo "export HOARD_LOG_FILE='$d/log' HOARD_SUMMARY_FILE='$d/summary.md'"
+                echo 'export HOARD_SKIP=1 # cleared once this job installed hoard; stop skips until then'
                 echo 'export PATH="$HOME/.local/bin:$PATH"'
               } >> "$BASH_ENV"
               . "$BASH_ENV"
@@ -77,6 +78,7 @@ steps:
               if ! "$inst"; then
                 echo "hoard: install failed; continuing without the cache"; exit 0
               fi
+              echo 'export HOARD_SKIP=' >> "$BASH_ENV" # `hoard` on PATH is now this job's
               mode='<< parameters.mode >>'
               if [ "$mode" = auto ]; then
                 mode=read-write
@@ -104,6 +106,8 @@ steps:
         - run:
             when: always
             command: |
+              # Unset (start never ran) or 1 (no hoard installed): skip; empty: this job installed hoard.
+              if [ "${HOARD_SKIP-1}" = 1 ]; then echo "hoard: not installed in this job; nothing to stop"; exit 0; fi
               hoard stop --summary markdown || echo "hoard: no server to stop"
               if [ '<< parameters.storage >>' = fs ]; then
                 hoard prune --force --storage fs --fs-root ~/.cache/hoard --max-size '<< parameters.max-size >>' || true
