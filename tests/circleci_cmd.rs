@@ -1,14 +1,27 @@
-//! Runs the start step of `circleci/hoard.yml` offline, with fake `curl` and `uname`.
+//! Runs the start and stop steps of `circleci/hoard.yml` offline, with fake `curl`, `uname`
+//! and `hoard`.
 #![cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-/// The first `command: |` block (the start step), dedented, with parameters substituted.
+/// The start step's script (the first `command: |` block), parameters substituted.
 fn start_script(sha256: &str) -> String {
+    step_script(0, sha256)
+}
+
+/// The `n`th `command: |` block (0 start, 1 stop), dedented, with parameters substituted.
+fn step_script(n: usize, sha256: &str) -> String {
     let yml = std::fs::read_to_string("circleci/hoard.yml").unwrap();
-    let mut lines = yml.lines().skip_while(|l| l.trim() != "command: |");
-    let head = lines.next().expect("no command block");
+    let all: Vec<_> = yml.lines().collect();
+    let starts: Vec<_> = (0..all.len())
+        .filter(|&i| all[i].trim() == "command: |")
+        .collect();
+    let first = *starts
+        .get(n)
+        .expect("no such command block in circleci/hoard.yml");
+    let mut lines = all[first..].iter().copied();
+    let head = lines.next().unwrap();
     let outer = head.len() - head.trim_start().len();
     let indent = |l: &str| l.len() - l.trim_start().len();
     let body: Vec<_> = lines
@@ -24,6 +37,7 @@ fn start_script(sha256: &str) -> String {
         ("mode", "auto"),
         ("storage", storage),
         ("default-branch", "main"),
+        ("max-size", "1GB"),
     ] {
         s = s.replace(&format!("{params}{k} >>"), v);
     }
@@ -45,14 +59,21 @@ struct Run {
 
 /// Builds the fakes and a fixture archive, runs the start step with the pin `sha256(hash)`.
 fn run(sha256: impl Fn(&str) -> String, uname: &str) -> Run {
+    run_with(sha256, uname, 0)
+}
+
+/// [`run`], with the fake `hoard env` exiting `env_exit`.
+fn run_with(sha256: impl Fn(&str) -> String, uname: &str, env_exit: i32) -> Run {
     let (home, tmp, bin, fix) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
     );
-    let fake = "case \"$1\" in serve) echo fake serve ;; env) echo \"export TURBO_API=http://127.0.0.1:1\" ;; esac";
-    script_file(fix.path(), "hoard", fake);
+    let fake = format!(
+        "case \"$1\" in serve) echo fake serve ;; env) echo \"export TURBO_API=http://127.0.0.1:1\"; exit {env_exit} ;; esac"
+    );
+    script_file(fix.path(), "hoard", &fake);
     let tgz = fix.path().join("h.tgz");
     let (t, f) = (tgz.to_str().unwrap(), fix.path().to_str().unwrap());
     let tar = ["-czf", t, "-C", f, "hoard"];
@@ -150,4 +171,78 @@ fn malformed_pin_fails_the_step() {
     let r = run(|_| "abc".into(), "Linux x86_64");
     assert_eq!(r.code, 1, "{}", r.out);
     assert!(r.out.contains("64 lowercase hex"), "{}", r.out);
+}
+
+/// `HOARD_SKIP` after sourcing the `$BASH_ENV` the start step wrote.
+fn skip_after_start(r: &Run) -> String {
+    let env = r.home.path().join("bash_env");
+    let o = Command::new("bash")
+        .args(["-c", ". \"$1\"; printf %s \"${HOARD_SKIP:-}\"", "-"])
+        .arg(&env)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap())
+        .output()
+        .unwrap();
+    String::from_utf8(o.stdout).unwrap()
+}
+
+#[test]
+fn start_marks_skip_unless_the_server_runs() {
+    assert_eq!(skip_after_start(&run(|s| s.into(), "Linux x86_64")), "");
+    assert_eq!(
+        skip_after_start(&run(|_| "0".repeat(64), "Linux x86_64")),
+        "1"
+    );
+    assert_eq!(skip_after_start(&run(|s| s.into(), "Linux riscv64")), "1");
+    // Installed and started, then `hoard env` fails: stop must still run.
+    let r = run_with(|s| s.into(), "Linux x86_64", 1);
+    assert_eq!(
+        (r.code, skip_after_start(&r).as_str()),
+        (1, ""),
+        "{}",
+        r.out
+    );
+}
+
+/// Runs the stop step with a fake `hoard` (exit `code`) in PATH; returns (exit, hoard calls).
+fn run_stop(skip: &str, code: i32) -> (i32, String) {
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("calls");
+    let fake = format!("echo \"$*\" >> \"{}\"; exit {code}", log.display());
+    script_file(bin.path(), "hoard", &fake);
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let o = Command::new("bash")
+        .args(["-eo", "pipefail", "-c", &step_script(1, "")])
+        .env_clear()
+        .env("PATH", path)
+        .env("HOARD_SKIP", skip)
+        .output()
+        .unwrap();
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    (o.status.code().unwrap(), calls)
+}
+
+#[test]
+fn stop_step_skips_when_start_did_not_run_hoard() {
+    assert_eq!(run_stop("1", 0), (0, String::new()));
+}
+
+#[test]
+fn stop_step_stops_and_prunes_and_never_fails() {
+    for code in [0, 1] {
+        let (exit, calls) = run_stop("", code);
+        assert_eq!(exit, 0, "{calls}");
+        let lines: Vec<_> = calls.lines().collect();
+        assert_eq!(lines.len(), 2, "{calls}");
+        assert!(lines[0].starts_with("stop --summary markdown"), "{calls}");
+        assert!(
+            lines[1].starts_with("prune --force --storage fs"),
+            "{calls}"
+        );
+        assert!(lines[1].contains("--max-size 1GB"), "{calls}");
+    }
 }
