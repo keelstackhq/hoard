@@ -125,6 +125,16 @@ pub fn default_token_file() -> PathBuf {
     runner_temp_or("hoard.token", "./.hoard/token")
 }
 
+pub fn default_summary_file() -> PathBuf {
+    runner_temp_or("hoard-summary.md", "./.hoard/summary.md")
+}
+pub fn default_pid_file() -> PathBuf {
+    runner_temp_or("hoard.pid", "./.hoard/pid")
+}
+pub fn default_log_file() -> PathBuf {
+    runner_temp_or("hoard.log", "./.hoard/log")
+}
+
 /// Port and token file locations; enough for `hoard env` to find a running server.
 #[derive(Args, Debug, Clone)]
 pub struct TokenPaths {
@@ -406,7 +416,7 @@ impl TryFrom<ServeArgs> for Config {
             port_file: a.paths.port_file.unwrap_or_else(default_port_file),
             token_file: a.paths.token_file.unwrap_or_else(default_token_file),
             token: a.token,
-            summary_file: a.summary_file,
+            summary_file: Some(a.summary_file.unwrap_or_else(default_summary_file)),
             fs_root: a.fs_root,
             r2,
             r2_lifecycle: a.r2_lifecycle,

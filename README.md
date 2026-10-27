@@ -301,6 +301,8 @@ The action runs the `hoard` binary for you. You can also run it yourself:
 | Command | What it does |
 |---|---|
 | `hoard serve` | Runs the cache server on 127.0.0.1 until `POST /_hoard/shutdown`, SIGTERM or Ctrl-C. |
+| `hoard serve --detach` | Same, in the background: returns once the server is ready and writes `--pid-file`; output goes to `--log-file`. Exits 1 on a setup error, 3 when the server did not start for another reason. |
+| `hoard stop [--summary markdown]` | Shuts the server down, waits for its uploads and prints the markdown summary; signals only its own hoard process group. |
 | `hoard env` | Prints the `export TURBO_API/TURBO_TOKEN/TURBO_TEAM` lines for a running server. |
 | `hoard prune [--force]` | Deletes the oldest objects until the R2 prefix fits in `max-size` (at most once per 24 h without `--force`). |
 | `hoard doctor` | Checks the storage credentials, bucket read/write and the R2 lifecycle rule, and prints the fixes. |
@@ -335,6 +337,11 @@ artifacts in use do not expire. Turn it off with `--refresh-on-hit=false` or
 `HOARD_REFRESH_ON_HIT=false`. A failed refresh is logged and counted (`Refresh errors` in the
 summary), never fatal. It does nothing for `github` and `fs`. Verified on MinIO and real R2; see
 [spec §7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-on-by-default).
+
+## CircleCI and other CI
+
+`scripts/install.sh` (`HOARD_VERSION`, optional `HOARD_SHA256`) installs a verified release;
+`circleci/hoard.yml` runs it with `serve --detach` and `stop`: [docs/circleci.md](docs/circleci.md).
 
 ## Security
 
