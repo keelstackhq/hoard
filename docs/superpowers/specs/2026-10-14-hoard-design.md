@@ -744,4 +744,5 @@ Runners without a JavaScript action (CircleCI, shell) use the binary directly. `
 `HOARD_SHA256` (64 lowercase hex) when set, else against `action/src/checksums.generated.ts` at the
 release tag, whose `VERSION` must match. `hoard serve --detach` / `hoard stop` (§4.1) replace the
 action's start and stop; `storage=github` does not work there. `circleci/hoard.yml` is the reference
-CircleCI command; `docs/circleci.md` describes its parameters, cache keys and failure handling.
+CircleCI command (with `sha256` it checks the archive itself and runs no script from the tag);
+`docs/circleci.md` describes its parameters, cache keys and failure handling.

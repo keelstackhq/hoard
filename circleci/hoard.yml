@@ -55,10 +55,18 @@ steps:
               if [ -n "$sha" ] && [ "${#sha}" != 64 ]; then
                 echo "hoard: sha256 must be 64 lowercase hex characters" >&2; exit 1
               fi
+              get() { curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 "$@"; }
+              pinned() { # never runs code fetched from the tag the pin distrusts
+                case "$(uname -sm)" in "Linux x86_64") a=x86_64 ;; "Linux aarch64") a=aarch64 ;;
+                  *) echo "hoard: no linux release for $(uname -sm)" >&2; return 1 ;; esac
+                t="$(mktemp -d)" && get -o "$t/h.tgz" "https://github.com/keelstackhq/hoard/releases/download/v$v/hoard-$a-unknown-linux-musl.tar.gz" &&
+                  echo "$sha  $t/h.tgz" | sha256sum -c --quiet - && tar -xzf "$t/h.tgz" -C "$t" hoard &&
+                  mkdir -p "$HOME/.local/bin" && install -m 0755 "$t/hoard" "$HOME/.local/bin/hoard"
+              }
+              unpinned() { get "https://raw.githubusercontent.com/keelstackhq/hoard/v$v/scripts/install.sh" | HOARD_VERSION="$v" sh; }
               # A download problem must not fail the build: turbo then runs without the remote cache.
-              if ! curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 \
-                "https://raw.githubusercontent.com/keelstackhq/hoard/v$v/scripts/install.sh" \
-                | HOARD_VERSION="$v" HOARD_SHA256="$sha" sh; then
+              inst=unpinned; if [ -n "$sha" ]; then inst=pinned; fi
+              if ! "$inst"; then
                 echo "hoard: install failed; continuing without the cache"; exit 0
               fi
               mode='<< parameters.mode >>'
