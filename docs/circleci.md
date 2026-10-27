@@ -33,9 +33,10 @@ runs no script from the tag. Without `sha256` the trust root is the release tag 
 script and the checksums file both come from it), which is why hull pins `sha256`: it vendors
 the per-version SHA-256 for its executor (linux x64).
 A failed install, or a server that does not start (`hoard serve --detach` exit 3), prints a warning
-and the build runs without the cache. `start` exports `HOARD_SKIP=1` until hoard is installed, so
-`stop` then skips (it never runs a stale `hoard` from `PATH` on a self-hosted runner). A setup error
-(exit 1: bad R2 credentials, missing lifecycle rule, port in use) fails the step.
+and the build runs without the cache. `start` exports `HOARD_SKIP=1` until hoard is installed, and
+`stop` skips while it is 1 or unset (it never runs a stale `hoard` from `PATH` on a self-hosted
+runner). A setup error (exit 1: bad R2 credentials, missing lifecycle rule, port in use) fails the
+step.
 
 ## R2
 

@@ -106,7 +106,8 @@ steps:
         - run:
             when: always
             command: |
-              if [ "${HOARD_SKIP:-}" = 1 ]; then echo "hoard: not installed in this job; nothing to stop"; exit 0; fi
+              # Unset (start never ran) or 1 (no hoard installed): skip; empty: this job installed hoard.
+              if [ "${HOARD_SKIP-1}" = 1 ]; then echo "hoard: not installed in this job; nothing to stop"; exit 0; fi
               hoard stop --summary markdown || echo "hoard: no server to stop"
               if [ '<< parameters.storage >>' = fs ]; then
                 hoard prune --force --storage fs --fs-root ~/.cache/hoard --max-size '<< parameters.max-size >>' || true

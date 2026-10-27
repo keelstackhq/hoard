@@ -177,7 +177,7 @@ fn malformed_pin_fails_the_step() {
 fn skip_after_start(r: &Run) -> String {
     let env = r.home.path().join("bash_env");
     let o = Command::new("bash")
-        .args(["-c", ". \"$1\"; printf %s \"${HOARD_SKIP:-}\"", "-"])
+        .args(["-c", ". \"$1\"; printf %s \"${HOARD_SKIP-unset}\"", "-"])
         .arg(&env)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap())
@@ -205,7 +205,7 @@ fn start_marks_skip_unless_the_server_runs() {
 }
 
 /// Runs the stop step with a fake `hoard` (exit `code`) in PATH; returns (exit, hoard calls).
-fn run_stop(skip: &str, code: i32) -> (i32, String) {
+fn run_stop(skip: Option<&str>, code: i32) -> (i32, String) {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("calls");
     let fake = format!("echo \"$*\" >> \"{}\"; exit {code}", log.display());
@@ -215,26 +215,29 @@ fn run_stop(skip: &str, code: i32) -> (i32, String) {
         bin.path().display(),
         std::env::var("PATH").unwrap()
     );
-    let o = Command::new("bash")
-        .args(["-eo", "pipefail", "-c", &step_script(1, "")])
+    let mut cmd = Command::new("bash");
+    cmd.args(["-eo", "pipefail", "-c", &step_script(1, "")])
         .env_clear()
-        .env("PATH", path)
-        .env("HOARD_SKIP", skip)
-        .output()
-        .unwrap();
+        .env("PATH", path);
+    if let Some(skip) = skip {
+        cmd.env("HOARD_SKIP", skip);
+    }
+    let o = cmd.output().unwrap();
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     (o.status.code().unwrap(), calls)
 }
 
 #[test]
 fn stop_step_skips_when_start_did_not_run_hoard() {
-    assert_eq!(run_stop("1", 0), (0, String::new()));
+    assert_eq!(run_stop(Some("1"), 0), (0, String::new()));
+    // The start step never ran in this job: a `hoard` on PATH is not this job's.
+    assert_eq!(run_stop(None, 0), (0, String::new()));
 }
 
 #[test]
 fn stop_step_stops_and_prunes_and_never_fails() {
     for code in [0, 1] {
-        let (exit, calls) = run_stop("", code);
+        let (exit, calls) = run_stop(Some(""), code);
         assert_eq!(exit, 0, "{calls}");
         let lines: Vec<_> = calls.lines().collect();
         assert_eq!(lines.len(), 2, "{calls}");
