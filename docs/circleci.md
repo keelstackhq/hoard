@@ -5,8 +5,8 @@
 `commands:` as `hoard` (or pack it as `commands/hoard.yml`):
 
 ```yaml
-steps: [checkout, hoard: {step: start, version: 0.4.0}, run: pnpm turbo run build test,
-        hoard: {step: stop, version: 0.4.0}]
+steps: [checkout, hoard: {step: start, version: 0.5.0}, run: pnpm turbo run build test,
+        hoard: {step: stop, version: 0.5.0}]
 ```
 
 On the default branch, also pass `restore: false` to `start` (see Trust); the default `true` is
@@ -64,5 +64,5 @@ builds and strict setups use `r2` with read-only tokens and the restricted read-
 
 ## Plain shell
 
-`HOARD_VERSION=0.4.0 sh scripts/install.sh`, `hoard serve --detach --storage fs --fs-root DIR`,
+`HOARD_VERSION=0.5.0 sh scripts/install.sh`, `hoard serve --detach --storage fs --fs-root DIR`,
 `eval "$(hoard env)"`, the build, and `hoard stop --summary markdown`.
