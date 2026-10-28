@@ -263,8 +263,14 @@ fn restore_parameter_guards_only_the_restore_cache_step() {
     assert_eq!(yml.matches("<< parameters.restore >>").count(), 1, "{yml}");
     let at = yml.find("restore_cache:").expect("restore_cache step");
     let block = &yml[yml[..at].rfind("- when:").unwrap()..at];
-    assert!(
-        block.contains("equal: [true, << parameters.restore >>]"),
-        "restore_cache not guarded by `restore`: {block}"
-    );
+    for guard in [
+        "- equal: [start, << parameters.step >>]",
+        "- equal: [fs, << parameters.storage >>]",
+        "- << parameters.restore >>",
+    ] {
+        assert!(
+            block.contains(guard),
+            "restore_cache `when` lacks {guard}: {block}"
+        );
+    }
 }

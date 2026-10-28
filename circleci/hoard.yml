@@ -33,7 +33,7 @@ steps:
         and:
           - equal: [start, << parameters.step >>]
           - equal: [fs, << parameters.storage >>]
-          - equal: [true, << parameters.restore >>]
+          - << parameters.restore >>
       steps:
         - restore_cache:
             keys:
