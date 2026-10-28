@@ -342,6 +342,9 @@ summary), never fatal. It does nothing for `github` and `fs`. Verified on MinIO 
 
 `scripts/install.sh` (`HOARD_VERSION`, optional `HOARD_SHA256`) installs a verified release;
 `circleci/hoard.yml` runs it with `serve --detach` and `stop`: [docs/circleci.md](docs/circleci.md).
+Security: CircleCI caches are not branch-scoped, so pass `restore: false` on the default branch;
+it then never restores a cache a PR could have saved (with `fs` its builds are cold; `r2` keeps
+them warm).
 
 ## Security
 

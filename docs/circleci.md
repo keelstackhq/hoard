@@ -9,20 +9,26 @@ steps: [checkout, hoard: {step: start, version: 0.4.0}, run: pnpm turbo run buil
         hoard: {step: stop, version: 0.4.0}]
 ```
 
-Parameters: `step` (`start`|`stop`), `version` (required), `storage` (`fs`, default, or `r2`),
-`default-branch` (`main`), `max-size` (`1GB`), `mode` (`auto`, `read-write`, `read`) and `sha256`.
+On the default branch, also pass `restore: false` to `start` (see Trust); the default `true` is
+right only for other branches.
 
-`start` restores the cache, installs and starts hoard, and appends `TURBO_*` to `$BASH_ENV` (state
-files: a private `mktemp -d` per job). `stop` (also after a failure) waits for the uploads, prints
-the summary, prunes the directory to `max-size` and saves it (`fs`, default branch only).
+Parameters: `step` (`start`|`stop`), `version` (required), `storage` (`fs`, default, or `r2`),
+`default-branch` (`main`), `max-size` (`1GB`), `mode` (`auto`, `read-write`, `read`), `sha256` and
+`restore` (`true`; pass `false` on the default branch, see Trust).
+
+`start` restores the cache (unless `restore: false`), installs and starts hoard, and appends
+`TURBO_*` to `$BASH_ENV` (state files: a private `mktemp -d` per job). `stop` (also after a failure)
+waits for the uploads, prints the summary, prunes the directory to `max-size` and saves it (`fs`,
+default branch only).
 
 ## Cache keys and cost (fs)
 
 Only the default branch saves, under `hoard-v1-<default-branch>~<revision>`. `~` cannot occur in a
 git ref, so the prefix `hoard-v1-main~` never matches a branch such as `main-x` (unverified: that
-CircleCI accepts `~` in keys; the fallback is `:`, also forbidden in refs). Every pipeline restores
-the newest default-branch cache; PR pipelines do not save. Each default-branch pipeline stores one
-cache of up to `max-size`; CircleCI bills cache storage by plan, so check it before raising it.
+CircleCI accepts `~` in keys; the fallback is `:`, also forbidden in refs). PR and other branch
+pipelines restore the newest default-branch cache and do not save; the default branch saves and,
+with `restore: false`, does not restore. Each default-branch pipeline stores one cache of up to
+`max-size`; CircleCI bills cache storage by plan, so check it before raising it.
 
 ## Install and failures
 
@@ -48,8 +54,13 @@ branch a second context with a read-write token, restricted with a CircleCI expr
 the GitHub Action, GitHub and CircleCI share one cache (hull's `both` mode).
 
 Trust: with `fs`, anyone who can run a job in the project can save a cache under the default
-branch's prefix (with an edited config) and so feed artifacts to later builds. For strict setups
-use `r2` with read-only tokens and the restricted read-write context above.
+branch's prefix (with an edited config) and so feed artifacts to later builds: CircleCI caches are
+not branch-scoped, and a same-repo PR runs its own config. So the default branch must not restore:
+call the command with `restore: false` there (in a job that only runs on `main`, as hull's circleci
+piece does). The cost: with `fs`, every default-branch build is cold (a full build, no hits); it
+still saves, and only other branches get hits. `restore: false` protects only the default branch:
+PRs still restore the newest `hoard-v1-main~` entry, whoever saved it. For warm default-branch
+builds and strict setups use `r2` with read-only tokens and the restricted read-write context above.
 
 ## Plain shell
 

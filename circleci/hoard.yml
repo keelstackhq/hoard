@@ -23,10 +23,17 @@ parameters:
   sha256:
     type: string
     default: ""
+  restore:
+    type: boolean
+    default: true
+    description: Restore the fs cache on start. Pass false on the default branch; see docs/circleci.md (Trust).
 steps:
   - when:
       condition:
-        and: [equal: [start, << parameters.step >>], equal: [fs, << parameters.storage >>]]
+        and:
+          - equal: [start, << parameters.step >>]
+          - equal: [fs, << parameters.storage >>]
+          - << parameters.restore >>
       steps:
         - restore_cache:
             keys:

@@ -745,4 +745,9 @@ Runners without a JavaScript action (CircleCI, shell) use the binary directly. `
 release tag, whose `VERSION` must match. `hoard serve --detach` / `hoard stop` (§4.1) replace the
 action's start and stop; `storage=github` does not work there. `circleci/hoard.yml` is the reference
 CircleCI command (with `sha256` it checks the archive itself and runs no script from the tag);
-`docs/circleci.md` describes its parameters, cache keys and failure handling.
+`docs/circleci.md` describes its parameters, cache keys and failure handling. Its `restore` parameter
+(default `true`) guards only the fs `restore_cache` step. Security: CircleCI caches are not
+branch-scoped and a same-repo PR runs its own config, so it can save a newer `hoard-v1-main~…`
+entry; the default branch must not restore (callers pass `restore: false` there, as hull does) and
+still serves and saves. With `fs` its builds are then cold and only other branches get hits; those
+still restore the newest entry, whoever saved it (`r2` with restricted tokens closes that).

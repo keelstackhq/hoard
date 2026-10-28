@@ -249,3 +249,28 @@ fn stop_step_stops_and_prunes_and_never_fails() {
         assert!(lines[1].contains("--max-size 1GB"), "{calls}");
     }
 }
+
+/// `restore: false` (hull passes it on the default branch) skips only the fs `restore_cache`:
+/// CircleCI caches are not branch-scoped, so a PR's edited config could save a poisoned
+/// `hoard-v1-main~…` that main would restore. The default (`true`) keeps the restore.
+#[test]
+fn restore_parameter_guards_only_the_restore_cache_step() {
+    let yml = std::fs::read_to_string("circleci/hoard.yml").unwrap();
+    assert!(
+        yml.contains("  restore:\n    type: boolean\n    default: true\n"),
+        "restore parameter (boolean, default true) missing"
+    );
+    assert_eq!(yml.matches("<< parameters.restore >>").count(), 1, "{yml}");
+    let at = yml.find("restore_cache:").expect("restore_cache step");
+    let block = &yml[yml[..at].rfind("- when:").unwrap()..at];
+    for guard in [
+        "- equal: [start, << parameters.step >>]",
+        "- equal: [fs, << parameters.storage >>]",
+        "- << parameters.restore >>",
+    ] {
+        assert!(
+            block.contains(guard),
+            "restore_cache `when` lacks {guard}: {block}"
+        );
+    }
+}
