@@ -2,6 +2,8 @@ name: release
 
 # Builds hoard for the five targets of spec §10, bakes their SHA-256 checksums into the action,
 # rebuilds action/dist, then commits, tags and publishes the GitHub release.
+# Only the publish job writes (commit, tags, release); it runs in the `release` environment, so it
+# waits for the owner's approval (org decision D-015). check and build need no approval.
 on:
   workflow_dispatch:
     inputs:
@@ -145,6 +147,9 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # Required reviewers (the owner) and deployment branch `main` are set on this environment in
+    # the repository settings; see docs/RELEASING.md.
+    environment: release
     permissions:
       contents: write
     steps:

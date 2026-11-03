@@ -637,7 +637,8 @@ Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-appl
 `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
 
 Release (`.github/workflows/release.yml`, `workflow_dispatch` with `version` and `draft`; see
-`docs/RELEASING.md`): build the five targets, write the checksums file, rebuild `dist/`, run the
+`docs/RELEASING.md`): build the five targets, then, in the `publish` job that runs in the
+`release` environment and waits for the owner's approval, write the checksums file, rebuild `dist/`, run the
 action tests (the bot's push does not trigger CI), commit
 `chore(release): vX.Y.Z` and push it with tag `vX.Y.Z` → create the GitHub release → verify it has
 exactly the five assets → only then move `vX` to it. `vX` moves only for stable, non-draft releases
