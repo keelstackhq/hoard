@@ -153,9 +153,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # No stored credentials: pnpm install/build/test below run dependency code, so the write
+      # token is passed only to the two git steps that push (as an http.extraheader via GIT_CONFIG_*).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.28.0
@@ -187,7 +190,14 @@ jobs:
             exit 1
           fi
       - name: Commit and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # Push auth for this step's git commands only, via env (not argv); git >= 2.31.
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$basic"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add action/src/checksums.generated.ts action/dist
@@ -222,7 +232,13 @@ jobs:
       - name: Move major tag
         env:
           DRAFT: ${{ inputs.draft }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # Push auth for this step's git commands only, via env (not argv); git >= 2.31.
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$basic"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
           case "$VERSION" in *-*) echo "pre-release: v-major tag not moved"; exit 0 ;; esac
           if [ "$DRAFT" = "true" ]; then
             echo "draft: v-major tag not moved; see docs/RELEASING.md after publishing the draft"
