@@ -19,12 +19,23 @@ action tests against them (the release push does not trigger CI), commits
 
    Add `-f draft=true` for a draft release. A version with a suffix (`X.Y.Z-rc.1`) is published as
    a pre-release.
+
+   The `check` and `build` jobs run at once. The `publish` job (commit, tags, GitHub release) runs
+   in the `release` environment and waits until the owner approves it in the run's page
+   (org decision D-015: agents never push tags or start releases).
 3. Check: `gh release view vX.Y.Z` lists five assets, and `git show vX.Y.Z:action/src/checksums.generated.ts`
    has `VERSION = "X.Y.Z"`.
 
 The workflow refuses to start when the version is not semver, does not equal `Cargo.toml`, or the
 tag `vX.Y.Z` already exists. It pushes back to the branch it was started from, so that branch must
 accept pushes from `github-actions[bot]`.
+
+## The `release` environment
+
+Settings → Environments → `release` must have **Required reviewers** = the owner and
+**Deployment branches** = `main`. GitHub creates a missing environment on first use with no
+protection, so confirm it exists before a release. With the branch rule, a release from any branch
+other than `main` (for example a backport branch) needs that branch added to the rule first.
 
 ## The major tag `vX`
 
