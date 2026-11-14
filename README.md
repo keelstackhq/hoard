@@ -3,7 +3,7 @@
 A Turborepo (and Vite+) remote cache for GitHub Actions, in one line of YAML. No account, no
 server to host. Artifacts go to the GitHub Actions cache (default, zero config) or to your own
 Cloudflare R2 bucket. Part of [keelstackhq](https://github.com/keelstackhq): tools for
-bootstrapping projects.
+bootstrapping projects. The family: hull, splice, hoard, hoist, berth, bosun.
 
 > hoard is 0.x: pin `@v0`. 1.0 (and the `@v1` tag) waits for artifact packing, which keeps large
 > monorepos under the GitHub cache upload rate limit.

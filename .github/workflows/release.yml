@@ -93,9 +93,9 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       # No build cache here: release binaries are built from a clean slate.
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (no version tags; toolchain pinned via with:)
         with:
-          toolchain: stable
+          toolchain: "1.97"
           targets: ${{ matrix.target }}
       # aws-lc-sys (rustls' crypto provider) compiles C; on Linux zig cc is the C compiler and
       # linker for musl. Its pregenerated bindings cover all five targets, so no cmake/bindgen.

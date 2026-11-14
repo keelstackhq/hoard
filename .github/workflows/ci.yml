@@ -9,11 +9,12 @@ jobs:
     env:
       HOARD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (no version tags; toolchain pinned via with:)
         with:
+          toolchain: "1.97"
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: docker compose up -d --wait minio
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
@@ -23,13 +24,15 @@ jobs:
     env:
       HOARD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (no version tags; toolchain pinned via with:)
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.28.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
       - run: docker compose up -d --wait minio
@@ -83,8 +86,23 @@ jobs:
             echo "::error::action/dist is $size bytes, over the 200 KB limit: trim dependencies or bundle settings in action/"
             exit 1
           fi
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Require every `uses:` to be a full commit SHA
+        run: scripts/check-pinned-uses.sh
+      - name: Require workflow toolchains to match rust-toolchain.toml
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          bad=$(grep -rhnE '^\s*toolchain:' .github/workflows | grep -v "\"$want\"" || true)
+          if [ -z "$want" ] || [ -n "$bad" ]; then
+            echo "::error::workflow toolchain differs from rust-toolchain.toml ($want):"; echo "$bad"; exit 1
+          fi
   ci-ok:
-    needs: [rust, e2e, action]
+    needs: [rust, e2e, action, workflow-lint]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -93,9 +111,10 @@ jobs:
           RUST: ${{ needs.rust.result }}
           E2E: ${{ needs.e2e.result }}
           ACTION: ${{ needs.action.result }}
+          LINT: ${{ needs.workflow-lint.result }}
         run: |
-          echo "rust: $RUST, e2e: $E2E, action: $ACTION"
-          for r in "$RUST" "$E2E" "$ACTION"; do
+          echo "rust: $RUST, e2e: $E2E, action: $ACTION, workflow-lint: $LINT"
+          for r in "$RUST" "$E2E" "$ACTION" "$LINT"; do
             if [ "$r" != "success" ]; then
               exit 1
             fi

@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       # Run right after checkout: untracked files left by earlier steps would be committed.
-      - uses: keelstackhq/splice/action@v1
+      - uses: keelstackhq/splice/action@ebf10b627d1ae1128c8908201774a19eb896857e # v1
         with:
           scope: all
           # A GITHUB_TOKEN push does not trigger CI on the bot PR; SPLICE_BOT_TOKEN does.

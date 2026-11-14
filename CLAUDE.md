@@ -3,11 +3,12 @@
 One-line CI cache for TypeScript monorepos (Turborepo, Vite+). A Rust binary serves the Turborepo
 remote-cache API on localhost and stores artifacts in the GitHub Actions cache, a Cloudflare R2
 bucket, or the local filesystem. A small node24 GitHub Action downloads, starts and stops it.
+Part of the keelstackhq family: hull, splice, hoard, hoist, berth, bosun.
 
 - Design: `docs/superpowers/specs/2026-10-14-hoard-design.md` — the source of truth. Read the
   section you touch before changing behaviour; update the spec in the same PR when behaviour changes.
 - Plans: `docs/superpowers/plans/` — one per milestone; tick checkboxes as tasks land.
-- Progress: `docs/PROGRESS.md` — one line per finished task, plus anything blocked on a human.
+- Progress: `docs/PROGRESS.md` — live status and anything blocked on a human (≤ 40 lines); finished-task history is in `docs/archive/`.
 
 ## Layout
 
