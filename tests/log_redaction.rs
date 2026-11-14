@@ -95,7 +95,16 @@ async fn storage_error_logs_are_redacted() {
     assert_eq!(t.stats.snapshot().put_errors, 1);
 
     let out = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-    let warns: Vec<&str> = out.lines().filter(|l| l.contains("WARN")).collect();
+    // Three errors in a row open the read breaker; its one warning carries no storage text.
+    assert_eq!(
+        out.matches("storage reads keep failing").count(),
+        1,
+        "{out}"
+    );
+    let warns: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("WARN") && !l.contains("storage reads keep failing"))
+        .collect();
     assert!(warns.len() >= 4, "{out}");
     for line in &warns {
         assert!(line.contains("storage error"), "{line}");

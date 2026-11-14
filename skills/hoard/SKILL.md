@@ -19,8 +19,8 @@ Put the step **after** dependency install, **before** the turbo/vp command. No i
 
 Order: checkout, setup-node, install, hoard, turbo. The step exports `TURBO_API`, `TURBO_TOKEN`
 and `TURBO_TEAM` to every later step (no `eval "$(hoard env)"` in Actions). With turbo
-`envMode: strict`, add those three to `globalPassThroughEnv`. Needs no `permissions:` block and
-any turbo that reads those variables. Keep other turbo cache steps off; one `turbo` job per matrix
+`envMode: strict`, add those three to `globalPassThroughEnv`. Needs no `permissions:` block;
+any turbo version that reads those variables works. Keep other turbo cache steps off; one `turbo` job per matrix
 leg is fine.
 
 Keep `pull_request` and also run the workflow on `push` to the default branch (`main` below): GitHub cache entries are branch-scoped, so pull
@@ -56,9 +56,12 @@ run should say `>>> FULL TURBO`. A re-run of the same commit counts as a second 
 
 ## Other CI, local
 
-`scripts/install.sh` installs a verified release; `hoard serve --detach`, `eval "$(hoard env)"`,
-run turbo, `hoard stop` (files in this repo, not in your project). CircleCI: `circleci/hoard.yml`, `docs/circleci.md`; pass `restore: false`
-on the default branch (CircleCI parameter only; Actions has no such input).
+CircleCI has no GitHub cache: use `fs` or `r2`. Copy the command from
+`https://raw.githubusercontent.com/keelstackhq/hoard/v0.5.0/circleci/hoard.yml` under `commands:
+hoard:` in `.circleci/config.yml`, then call `hoard: {step: start, version: 0.5.0}` before turbo and
+`hoard: {step: stop, version: 0.5.0}` after (the token is generated; no env to set). Run `main` in a
+separate job with `start` given `restore: false` (cache poisoning; CircleCI only). Full config: `docs/circleci.md` beside that file. Elsewhere: `HOARD_VERSION=0.5.0 sh scripts/install.sh`,
+`hoard serve --detach`, `eval "$(hoard env)"`, turbo, `hoard stop --summary markdown`.
 
 ## Rules
 

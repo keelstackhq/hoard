@@ -251,7 +251,10 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   uploading); fs and GET paths stream; nothing is buffered beyond that bound.
 - S3/R2 and `ghac` requests are time-bounded (60 s per operation, 15 s per read/write IO step); a timeout is a
   storage error like any other (GET/HEAD miss, PUT counts `put_errors`), so a hung connection never
-  stalls the build.
+  stalls the build. **Read breaker** (unpacked GET/HEAD/batch query): after 3 storage errors in a row (not
+  misses), reads are answered as misses without touching the store for 30 s, then one read probes the
+  backend again (a hit or miss closes the breaker). A dead backend therefore costs a few slow requests,
+  not one Turborepo request timeout per task. One warning is logged when it opens.
 
 ### 6.4 GitHub cache backend specifics
 

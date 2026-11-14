@@ -867,3 +867,25 @@ async fn rate_limited_first_write_closes_the_gate() {
     assert_eq!(calls.total(), before, "the gate is closed");
     assert_eq!(t.stats.snapshot().rate_limited, 2);
 }
+
+/// A backend that errors on every read (here: the fs root is a file, so stat fails with
+/// ENOTDIR) must cost the build three failed requests, then answer misses from the breaker.
+#[tokio::test]
+async fn failing_reads_open_the_read_breaker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let store = hoard::store::Store::new(hoard::store::build_operator(&fs_config(&root)).unwrap());
+    // Swap the directory for a file after the operator was built: every stat now fails.
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::write(&root, b"x").unwrap();
+    let t = common::spawn_test_server_opts(store, Mode::ReadWrite, false, dir).await;
+    for _ in 0..5 {
+        assert_eq!(head(&t, "ab12").await.status(), 404);
+    }
+    assert_eq!(t.stats.snapshot().misses, 5);
+    assert!(
+        !t.rate_gate.allow_read(std::time::Instant::now()),
+        "three storage errors in a row open the breaker"
+    );
+}
