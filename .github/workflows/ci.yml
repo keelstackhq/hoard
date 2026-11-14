@@ -3,9 +3,13 @@ on:
   push:
     branches: [main]
   pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       HOARD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
     steps:
@@ -15,12 +19,13 @@ jobs:
           toolchain: "1.97"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: docker compose up -d --wait minio
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: docker compose up -d --wait minio
       - run: cargo test
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       HOARD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
     steps:
@@ -35,6 +40,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+          cache: pnpm
+          cache-dependency-path: action/pnpm-lock.yaml
       - run: docker compose up -d --wait minio
       - run: cargo build --release
       - run: pnpm --dir action install --frozen-lockfile
@@ -55,6 +62,7 @@ jobs:
           HOARD_BIN: ${{ github.workspace }}/target/release/hoard
   action:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -65,6 +73,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+          cache: pnpm
+          cache-dependency-path: action/pnpm-lock.yaml
       - run: pnpm --dir action install --frozen-lockfile
       - run: pnpm --dir action lint
       - run: pnpm --dir action typecheck
@@ -88,6 +98,7 @@ jobs:
           fi
   workflow-lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -105,6 +116,7 @@ jobs:
     needs: [rust, e2e, action, workflow-lint]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Require every CI job to succeed
         env:

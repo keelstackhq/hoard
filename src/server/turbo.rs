@@ -69,7 +69,7 @@ pub async fn events(_body: Bytes) -> StatusCode {
 #[derive(Deserialize)]
 pub struct Query {
     #[serde(default)]
-    hashes: Vec<String>,
+    hashes: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -85,7 +85,16 @@ pub async fn query(State(s): State<AppState>, body: Bytes) -> Json<HashMap<Strin
         return Json(HashMap::new());
     }
     let hashes = serde_json::from_slice::<Query>(&body)
-        .map(|q| q.hashes)
+        .map(|q| {
+            // One odd entry must not turn the whole batch into misses.
+            q.hashes
+                .into_iter()
+                .filter_map(|h| match h {
+                    serde_json::Value::String(h) => Some(h),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     if let Some(packs) = &s.packs {
         // Answered from the index: no storage request per hash.
@@ -267,7 +276,7 @@ pub async fn put_artifact(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
     else {
-        warn!(%hash, "PUT: missing or invalid Content-Length, not caching");
+        warn!(%hash, "PUT: missing or invalid Content-Length (the client must send Content-Length, not chunked), not caching");
         inc(&s.stats.put_errors, 1);
         return put_ok();
     };
@@ -285,7 +294,7 @@ pub async fn put_artifact(
         hash: None,
     };
     if encode_header(&header).len() > PREFIX_LEN + MAX_HEADER_LEN {
-        warn!(%hash, "PUT: artifact headers too large for the envelope, not caching");
+        warn!(%hash, "PUT: artifact headers (x-artifact-tag, x-artifact-duration) too large for the envelope (4096 bytes), not caching");
         inc(&s.stats.put_errors, 1);
         return put_ok();
     }
@@ -296,7 +305,9 @@ pub async fn put_artifact(
             static WARNED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                warn!("PUT: packing has no writer (spool dir unusable); artifacts are not cached");
+                warn!(
+                    "PUT: packing has no writer (spool dir unusable); artifacts are not cached. Check that the runner temp/work dir is writable, or set --pack off"
+                );
             }
             inc(&s.stats.put_errors, 1);
             return put_ok();

@@ -1,12 +1,12 @@
 #!/bin/sh
-# Installs a hoard release (Linux) after a SHA-256 check. HOARD_VERSION=0.4.0 sh install.sh
+# Installs a hoard release (Linux) after a SHA-256 check. HOARD_VERSION=0.5.0 sh install.sh
 # HOARD_SHA256 (64 lowercase hex) pins the archive hash for this machine's target and skips the sums file.
 set -eu
 # One function, called on the last line: a truncated `curl | sh` download runs nothing.
 main() {
 V="${HOARD_VERSION:-}"
 V="${V#v}"
-[ -n "$V" ] || { echo "HOARD_VERSION is required, e.g. HOARD_VERSION=0.4.0" >&2; exit 1; }
+[ -n "$V" ] || { echo "HOARD_VERSION is required, e.g. HOARD_VERSION=0.5.0" >&2; exit 1; }
 case "$V" in *[!0-9A-Za-z.-]*) echo "HOARD_VERSION has characters other than [0-9A-Za-z.-]" >&2; exit 1 ;; esac
 printf '%s\n' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ||
   { echo "HOARD_VERSION '$V' is not X.Y.Z (optionally -prerelease)" >&2; exit 1; }

@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 
 use clap::{Args, Parser, Subcommand};
-use hoard::config::{Config, ServeArgs, TokenPaths, drop_empty_hoard_env};
+use hoard::config::{Config, ServeArgs, TokenPaths, drop_empty_hoard_env, reject_secret_flags};
 use hoard::doctor::run_doctor;
 use hoard::r2::prune::run_prune;
 use hoard::redact::redacted;
@@ -54,6 +54,10 @@ struct PruneArgs {
 
 fn main() {
     drop_empty_hoard_env();
+    if let Err(e) = reject_secret_flags(std::env::args().skip(1)) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
         eprintln!("error: {}", redacted(&e));

@@ -163,8 +163,8 @@ pub struct ServeArgs {
     pub port: u16,
     #[command(flatten)]
     pub paths: TokenPaths,
-    /// Bearer token; random when unset.
-    #[arg(long, env = "HOARD_TOKEN")]
+    /// Bearer token; random when unset. Environment only (the binary rejects `--token`).
+    #[arg(long, env = "HOARD_TOKEN", hide = true)]
     pub token: Option<String>,
     /// Markdown summary written on shutdown.
     #[arg(long, env = "HOARD_SUMMARY_FILE")]
@@ -178,7 +178,8 @@ pub struct ServeArgs {
     pub r2_endpoint: Option<String>,
     #[arg(long, env = "HOARD_R2_ACCESS_KEY_ID")]
     pub r2_access_key_id: Option<String>,
-    #[arg(long, env = "HOARD_R2_SECRET_ACCESS_KEY")]
+    /// Environment only (the binary rejects `--r2-secret-access-key`).
+    #[arg(long, env = "HOARD_R2_SECRET_ACCESS_KEY", hide = true)]
     pub r2_secret_access_key: Option<String>,
     #[arg(long, env = "HOARD_R2_BUCKET")]
     pub r2_bucket: Option<String>,
@@ -250,6 +251,23 @@ fn empty_hoard_keys<I: IntoIterator<Item = (OsString, OsString)>>(vars: I) -> Ve
         .filter(|(k, v)| v.is_empty() && k.to_string_lossy().starts_with("HOARD_"))
         .map(|(k, _)| k)
         .collect()
+}
+
+/// Secrets never go in argv: reject `--token` and `--r2-secret-access-key` (also `--flag=value`)
+/// and name the environment variable to use. Never echoes the value.
+pub fn reject_secret_flags<I: IntoIterator<Item = String>>(args: I) -> Result<(), String> {
+    for a in args {
+        let name = a.split('=').next().unwrap_or("");
+        let env = match name {
+            "--token" => "HOARD_TOKEN",
+            "--r2-secret-access-key" => "HOARD_R2_SECRET_ACCESS_KEY",
+            _ => continue,
+        };
+        return Err(format!(
+            "{name} is not accepted: a secret on the command line is visible to other processes. Set {env} instead"
+        ));
+    }
+    Ok(())
 }
 
 /// Remove empty `HOARD_*` variables from the process environment. Call first thing in `main`,

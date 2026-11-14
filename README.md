@@ -207,10 +207,7 @@ hoard caches Turborepo and Vite+ tasks, not cargo builds. For a pure-Rust reposi
 When the hoard step runs in a repository with a root `Cargo.toml` and no `turbo.json` or
 `vite-plus`, it logs a notice that points here; the step still succeeds.
 
-On keelstackhq/bosun and keelstackhq/berth it made PR builds 1.3–2.5× faster than no cache
-(counting its restore step). sccache was slower than no cache on R2, and on the GitHub cache
-parallel jobs lost most uploads to GitHub's rate limit. A hoard backend for sccache is deferred
-until large dependency trees or sharing across repos need it. Numbers:
+hoard made those builds 1.3–2.5× faster than no cache; sccache was not. Numbers:
 [`docs/benchmarks/2026-10-rust.md`](docs/benchmarks/2026-10-rust.md), spec §14.
 
 ## Requirements
@@ -257,26 +254,8 @@ All inputs are optional. Inputs marked (r2) are used only with `storage: r2`.
 | `misses` | Number of cache misses. |
 | `time-saved-ms` | Sum of the original task durations of all hits, in milliseconds. |
 
-The outputs are set in the action's post step, at the end of the job, so later steps of the same
-job cannot read them. Read them from a later job:
-
-```yaml
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    outputs:
-      hits: ${{ steps.hoard.outputs.hits }}
-    steps:
-      # … checkout, install …
-      - uses: keelstackhq/hoard@v0
-        id: hoard
-      - run: pnpm turbo run build
-  report:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "cache hits: ${{ needs.build.outputs.hits }}"
-```
+Outputs are set in the post step, so only a later job can read them
+(`needs.build.outputs.hits`, with `outputs: hits: ${{ steps.hoard.outputs.hits }}` on the build job).
 
 ## Troubleshooting
 
@@ -316,7 +295,9 @@ prints the command). With `--mode read`, object read is enough.
 
 ## Settings
 
-Every setting is a flag (`--max-size 5GB`) and an environment variable (`HOARD_MAX_SIZE=5GB`).
+Every setting is a flag (`--max-size 5GB`) and an environment variable (`HOARD_MAX_SIZE=5GB`),
+except the secrets: the token and the R2 secret key are environment only (`HOARD_TOKEN`,
+`HOARD_R2_SECRET_ACCESS_KEY`); `--token` and `--r2-secret-access-key` are rejected.
 The full list with defaults is the table in
 [spec §4.2](docs/superpowers/specs/2026-10-14-hoard-design.md#42-configuration).
 
@@ -330,13 +311,8 @@ cache entry each, so a job makes about one upload per 128 MiB of new artifacts, 
 packages it builds. With `pack` on, `write-behind` is not used for Turborepo artifacts. See
 [spec §6.5](docs/superpowers/specs/2026-10-14-hoard-design.md#65-packing-turborepo-artifacts-pack-on).
 
-`--refresh-on-hit[=true|false]` (`HOARD_REFRESH_ON_HIT`; R2 only, on by default with
-`storage=r2` and `mode=read-write`) copies an object onto itself in the background when a cache
-hit reads it and it is older than `max-age-days / 2`, at most once per object per run, so
-artifacts in use do not expire. Turn it off with `--refresh-on-hit=false` or
-`HOARD_REFRESH_ON_HIT=false`. A failed refresh is logged and counted (`Refresh errors` in the
-summary), never fatal. It does nothing for `github` and `fs`. Verified on MinIO and real R2; see
-[spec §7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-on-by-default).
+`refresh-on-hit` (R2 only, on by default) is described under [How the bucket stays bounded](#how-the-bucket-stays-bounded); spec
+[§7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-on-by-default).
 
 ## CircleCI and other CI
 

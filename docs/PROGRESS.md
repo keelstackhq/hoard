@@ -1,7 +1,6 @@
 # Progress
 
-Live status only. Finished-task history (one line per task, 2026-10-14 to 2026-10-27) is in
-`docs/archive/PROGRESS-through-2026-10-27.md`. When a task lands, replace its line below; do not
+Live status only (older history: git log). When a task lands, replace its line below; do not
 append a log here. Keep this file at 40 lines or fewer.
 
 ## Status
