@@ -112,11 +112,16 @@ pub async fn query(State(s): State<AppState>, body: Bytes) -> Json<HashMap<Strin
         }
         return Json(found);
     }
+    if !s.rate_gate.allow_read(Instant::now()) {
+        return Json(HashMap::new());
+    }
     let found = futures::stream::iter(hashes.into_iter().filter(|h| validate_hash(h)))
         .map(|hash| {
             let s = &s;
             async move {
-                match s.store.head(&s.turbo_key(&hash)).await {
+                let r = s.store.head(&s.turbo_key(&hash)).await;
+                note_read(s, r.is_ok());
+                match r {
                     Ok(Some(h)) => Some((
                         hash,
                         Found {
@@ -137,6 +142,15 @@ pub async fn query(State(s): State<AppState>, body: Bytes) -> Json<HashMap<Strin
         .collect()
         .await;
     Json(found)
+}
+
+/// Feeds the read breaker: an answer (hit or miss) closes it, a storage error counts toward it.
+fn note_read(s: &AppState, answered: bool) {
+    if answered {
+        s.rate_gate.read_ok();
+    } else {
+        s.rate_gate.read_failed(Instant::now());
+    }
 }
 
 /// `Content-Length` plus the artifact headers that are present.
@@ -181,7 +195,13 @@ pub async fn head_artifact(State(s): State<AppState>, Path(hash): Path<String>) 
             }
         };
     }
-    match s.store.head(&s.turbo_key(&hash)).await {
+    if !s.rate_gate.allow_read(Instant::now()) {
+        inc(&s.stats.misses, 1);
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let r = s.store.head(&s.turbo_key(&hash)).await;
+    note_read(&s, r.is_ok());
+    match r {
         Ok(Some(h)) => (StatusCode::OK, artifact_headers(&h)).into_response(),
         Ok(None) => {
             inc(&s.stats.misses, 1);
@@ -221,7 +241,12 @@ pub async fn get_artifact(State(s): State<AppState>, Path(hash): Path<String>) -
             }
         }
     } else {
-        match s.store.get(&key).await {
+        if !s.rate_gate.allow_read(Instant::now()) {
+            return miss();
+        }
+        let r = s.store.get(&key).await;
+        note_read(&s, r.is_ok());
+        match r {
             Ok(GetOutcome::Hit(h, body)) => (h, body),
             Ok(GetOutcome::Miss) => return miss(),
             Ok(GetOutcome::Corrupt) => {

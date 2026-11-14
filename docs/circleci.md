@@ -1,18 +1,45 @@
 # hoard on CircleCI and other CI
 
-`circleci/hoard.yml` is a CircleCI command (`fs` or `r2` storage) built on `scripts/install.sh`
-(or, with `sha256`, its own pinned download), `serve --detach` and `stop`. Copy it under
-`commands:` as `hoard` (or pack it as `commands/hoard.yml`):
+CircleCI has no GitHub cache, so use `fs` (default, saved in CircleCI caches) or `r2`.
+`circleci/hoard.yml` is a CircleCI command built on `scripts/install.sh` (or, with `sha256`, its
+own pinned download), `serve --detach` and `stop`. It is not an orb: copy its contents into your
+`.circleci/config.yml` as the `hoard` command (the token is random per job; set nothing else):
 
-```yaml
-steps: [checkout, hoard: {step: start, version: 0.5.0}, run: pnpm turbo run build test,
-        hoard: {step: stop, version: 0.5.0}]
+```sh
+curl -fsSL https://raw.githubusercontent.com/keelstackhq/hoard/v0.5.0/circleci/hoard.yml
 ```
 
-On the default branch, also pass `restore: false` to `start` (see Trust); the default `true` is
-right only for other branches.
+```yaml
+version: 2.1
+commands:
+  hoard:             # paste the downloaded file here (description, parameters, steps), indented
+    description: ...
+jobs:
+  build:             # every branch except main: restores the default-branch cache
+    docker: [{image: cimg/node:24.0}]
+    steps:
+      - checkout
+      - run: pnpm install --frozen-lockfile
+      - hoard: {step: start, version: 0.5.0}
+      - run: pnpm turbo run build test
+      - hoard: {step: stop, version: 0.5.0}
+  build-main:        # main only: cold build, saves the cache (see Trust)
+    docker: [{image: cimg/node:24.0}]
+    steps:
+      - checkout
+      - run: pnpm install --frozen-lockfile
+      - hoard: {step: start, version: 0.5.0, restore: false}
+      - run: pnpm turbo run build test
+      - hoard: {step: stop, version: 0.5.0}
+workflows:
+  ci:
+    jobs:
+      - build: {filters: {branches: {ignore: main}}}
+      - build-main: {filters: {branches: {only: main}}}
+```
 
-Parameters: `step` (`start`|`stop`), `version` (required), `storage` (`fs`, default, or `r2`),
+The summary prints in the `stop` step's log (`Hits`, `Misses`); the second run should show
+`>>> FULL TURBO`. Parameters of the command: `step` (`start`|`stop`), `version` (required), `storage` (`fs`, default, or `r2`),
 `default-branch` (`main`), `max-size` (`1GB`), `mode` (`auto`, `read-write`, `read`), `sha256` and
 `restore` (`true`; pass `false` on the default branch, see Trust).
 

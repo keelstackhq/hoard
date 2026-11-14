@@ -17,11 +17,20 @@ pub const DEFAULT_PAUSE: Duration = Duration::from_secs(60);
 /// limits are per minute, so 10 minutes is plenty.
 pub const MAX_PAUSE: Duration = Duration::from_secs(10 * 60);
 
+/// Consecutive read errors (timeouts, 5xx) that open the read breaker.
+const READ_FAILS: u32 = 3;
+
+/// How long reads are answered as misses once the breaker is open. A dead backend would
+/// otherwise cost every task one full request timeout (Turborepo waits up to 30 s each).
+pub const READ_BREAK: Duration = Duration::from_secs(30);
+
 /// Shared by all request handlers. Open until a rate limit closes it.
 #[derive(Debug, Default)]
 pub struct RateGate {
     /// Uploads are skipped before this instant.
     paused_until: Mutex<Option<Instant>>,
+    /// Read breaker: (consecutive errors, reads skipped before this instant).
+    reads: Mutex<(u32, Option<Instant>)>,
 }
 
 impl RateGate {
@@ -67,6 +76,38 @@ impl RateGate {
         }
     }
 
+    /// True when a read may go to the store. After [`READ_FAILS`] errors in a row reads miss
+    /// at once for [`READ_BREAK`]; the first read after that probes the backend again.
+    pub fn allow_read(&self, now: Instant) -> bool {
+        self.reads_lock().1.is_none_or(|until| now >= until)
+    }
+
+    /// A read reached the store and got an answer (hit or miss).
+    pub fn read_ok(&self) {
+        *self.reads_lock() = (0, None);
+    }
+
+    /// A read failed with a storage error (not a miss). Logs once when the breaker opens.
+    pub fn read_failed(&self, now: Instant) {
+        let mut r = self.reads_lock();
+        r.0 += 1;
+        if r.0 >= READ_FAILS {
+            r.0 = READ_FAILS - 1; // one failed probe reopens it
+            r.1 = now.checked_add(READ_BREAK);
+            drop(r);
+            warn!(
+                "storage reads keep failing: answering reads as misses for {}s",
+                READ_BREAK.as_secs()
+            );
+        }
+    }
+
+    fn reads_lock(&self) -> std::sync::MutexGuard<'_, (u32, Option<Instant>)> {
+        self.reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
         // The guarded value is a plain Instant; a panic elsewhere cannot leave it inconsistent.
         self.paused_until
@@ -79,6 +120,23 @@ impl RateGate {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn read_breaker_opens_after_three_failures_and_closes_on_success() {
+        let g = RateGate::default();
+        let t0 = Instant::now();
+        assert!(g.allow_read(t0));
+        g.read_failed(t0);
+        g.read_failed(t0);
+        assert!(g.allow_read(t0), "two failures are not an outage");
+        g.read_ok();
+        g.read_failed(t0);
+        g.read_failed(t0);
+        assert!(g.allow_read(t0), "a success resets the count");
+        g.read_failed(t0);
+        assert!(!g.allow_read(t0 + READ_BREAK - Duration::from_secs(1)));
+        assert!(g.allow_read(t0 + READ_BREAK), "probe after the pause");
+    }
 
     #[test]
     fn gate_pauses_and_resumes() {
