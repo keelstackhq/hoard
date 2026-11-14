@@ -12,8 +12,17 @@ name: self-test
 # failed `hit` jobs must find the entries `warm` wrote in the earlier attempt.
 on:
   workflow_dispatch:
+  schedule: [{ cron: "41 5 * * 1" }] # weekly: catches runner and hosted-cache drift
   push:
     branches: [main]
+    paths:
+      - action.yml
+      - action/**
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - tests/fixtures/**
+      - .github/workflows/self-test.yml
   pull_request:
     paths:
       - action.yml
@@ -69,7 +78,7 @@ jobs:
       - if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
         uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
         with:
-          toolchain: stable
+          toolchain: "1.97"
       - if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - if: steps.gate.outputs.run == 'true' && matrix.binary == 'source'
@@ -230,7 +239,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch (no version tags)
         with:
-          toolchain: stable
+          toolchain: "1.97"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: hoard
