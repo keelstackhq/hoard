@@ -1,4 +1,4 @@
-# Progress archive (through 2026-11-14)
+# Progress archive (through 2026-10-27)
 
 Frozen history moved out of `docs/PROGRESS.md`; the live status is there.
 
