@@ -388,6 +388,21 @@ async fn batch_query() {
 }
 
 #[tokio::test]
+async fn batch_query_skips_non_string_entries() {
+    let t = spawn_test_server(Mode::ReadWrite).await;
+    put(&t, "aa", b"hello", &[]).await;
+    let b: Value = authed(&t, Method::POST, "/v8/artifacts")
+        .json(&json!({"hashes": ["aa", null, 7]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(b, json!({"aa": {"size": 5, "taskDurationMs": null}}));
+}
+
+#[tokio::test]
 async fn shutdown_waits_for_reply() {
     let mut t = spawn_test_server(Mode::ReadWrite).await;
     let req = authed(&t, Method::POST, "/_hoard/shutdown").send();
