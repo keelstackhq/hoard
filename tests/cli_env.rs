@@ -546,6 +546,7 @@ fn non_utf8_argv_does_not_panic_or_echo() {
     );
     assert!(!all.contains("panicked"), "{all}");
     assert!(!all.contains("SEKRIT"), "{all}");
+    assert_eq!(out.status.code(), Some(1), "{all}");
     // A secret flag with a non-UTF-8 value is still rejected, never echoed.
     let tok = b"--token=ab\xffSEKRIT".to_vec();
     let out = hoard_without_actions_env()
@@ -632,4 +633,30 @@ fn r2_env_vars_are_bound() {
         stderr.contains("bucket") && !stderr.contains("access-key"),
         "{stderr}"
     );
+}
+
+/// clap echoes bad arguments; non-UTF-8 argv is refused up front, naming only its position.
+#[test]
+fn non_utf8_argv_is_refused_without_echo() {
+    use std::os::unix::ffi::OsStrExt;
+    let bad = std::ffi::OsStr::from_bytes(b"\xffSEKRIT");
+    let cases: Vec<Vec<&std::ffi::OsStr>> = vec![
+        vec![bad],
+        vec!["serve".as_ref(), bad],
+        vec!["serve".as_ref(), "--storage".as_ref(), bad],
+        vec!["serve".as_ref(), "--mode".as_ref(), bad],
+    ];
+    for args in cases {
+        let out = hoard_without_actions_env().args(&args).output().unwrap();
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert_eq!(out.status.code(), Some(1), "{all}");
+        assert!(
+            all.contains("not valid UTF-8") && !all.contains("SEKRIT"),
+            "{all}"
+        );
+    }
 }
