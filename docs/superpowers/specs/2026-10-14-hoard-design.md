@@ -528,7 +528,7 @@ Storage: r2 (my-team-cache/cache/) · Lifecycle: 7 days ✓ · Pruned: 18 object
 
 `action.yml` at the repo root (so `uses: keelstackhq/hoard@v0` works): `runs.using: node24`,
 `main: action/dist/main.js`, `post: action/dist/post.js`, `post-if: always()`. Source in
-`action/src/`, bundled with esbuild; committed `action/dist/` < 200 KB. Inputs mirror §4.2 plus
+`action/src/`, bundled with esbuild; committed `action/dist/` < 200 KB. Inputs are the §4.2 settings the action exposes (no `pack`, `write-behind`, `no-reads`; `no-reads` comes from `ACTIONS_CACHE_MODE`) plus
 `version` (binary version, default = the action's own release; any other value fails, because the
 action can only verify its own release — change `uses:` instead). The action manages `port`,
 `token`, `port-file`, `token-file`, `summary-file` and `fs-root` itself, so they are not inputs.

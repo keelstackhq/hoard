@@ -8,7 +8,7 @@ Part of the keelstackhq family: hull, splice, hoard, hoist, berth, bosun.
 - Design: `docs/superpowers/specs/2026-10-14-hoard-design.md` — the source of truth. Read the
   section you touch before changing behaviour; update the spec in the same PR when behaviour changes.
 - Plans: `docs/superpowers/plans/` — one per milestone; tick checkboxes as tasks land.
-- Progress: `docs/PROGRESS.md` — live status and anything blocked on a human (≤ 40 lines); finished-task history is in `docs/archive/`.
+- Progress: `docs/PROGRESS.md` — live status and anything blocked on a human (≤ 40 lines).
 
 ## Layout
 
@@ -22,6 +22,7 @@ src/               Rust crate (lib + bin "hoard")
   pack/            packing (spec §6.5): index, names, backend, reader, writer
   writebehind.rs   spooled background uploads (pack=off)
   ratelimit.rs     429 pause gate; redact.rs: secret-free errors; doctor.rs
+  serve.rs, standalone.rs, stats.rs   server loop, `serve --detach`/`stop`, counters
   server/          axum router: Turborepo /v8 API, auth, /_hoard/*
   r2/              lifecycle rule (aws-sdk-s3), size-cap prune, refresh-on-hit
   vp/              Vite+ task-cache restore/save
@@ -43,7 +44,7 @@ tests/e2e/turbo.sh                               # real turbo, fs storage
 PACK=on tests/e2e/turbo.sh                       # real turbo, fs storage, packing
 STORAGE=r2 tests/e2e/turbo.sh                    # real turbo, MinIO as R2
 pnpm --dir action install && pnpm --dir action lint && pnpm --dir action test
-pnpm --dir action build                          # must keep action/dist < 200 KB
+pnpm --dir action build                          # must keep action/dist ≤ 204800 bytes
 ```
 
 Run the fast checks (fmt, clippy, the tests of the crate or package you changed) before every
