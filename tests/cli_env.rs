@@ -482,3 +482,45 @@ fn serve_github_pack_on_without_results_url_fails_at_startup() {
     );
     assert!(!dir.path().join("port").exists());
 }
+
+/// Secrets never go in argv (CLAUDE.md): the flags are rejected and the message names the env var.
+#[test]
+fn secret_flags_are_rejected_with_the_env_var_to_use() {
+    for (flag, env) in [
+        ("--token", "HOARD_TOKEN"),
+        ("--r2-secret-access-key", "HOARD_R2_SECRET_ACCESS_KEY"),
+    ] {
+        for args in [
+            vec!["serve", flag, "s3cret-value"],
+            vec!["doctor", &format!("{flag}=s3cret-value")[..]],
+        ] {
+            let out = hoard_without_actions_env().args(&args).output().unwrap();
+            assert_eq!(out.status.code(), Some(1), "{args:?}");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains(env), "{stderr}");
+            assert!(!stderr.contains("s3cret-value"), "{stderr}");
+        }
+    }
+}
+
+/// Each documented `HOARD_*` variable is bound to its flag: a bad value is rejected naming it.
+#[test]
+fn hoard_env_vars_are_bound_to_their_flags() {
+    for (var, flag) in [
+        ("HOARD_MODE", "--mode"),
+        ("HOARD_PACK", "--pack"),
+        ("HOARD_WRITE_BEHIND", "--write-behind"),
+        ("HOARD_MAX_AGE_DAYS", "--max-age-days"),
+        ("HOARD_PORT", "--port"),
+        ("HOARD_STORAGE", "--storage"),
+    ] {
+        let out = hoard_without_actions_env()
+            .arg("serve")
+            .env(var, "not-valid")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{var}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(flag), "{var}: {stderr}");
+    }
+}

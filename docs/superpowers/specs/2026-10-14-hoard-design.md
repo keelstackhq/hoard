@@ -98,14 +98,14 @@ secrets as `""`).
 | `cache-version` | `v1` | Part of every key; bump to purge. One segment of `[A-Za-z0-9._-]` (not `.` or `..`, no `/`) |
 | `port` | `0` | `0` = pick a free port; actual port written to `--port-file` |
 | `port-file` | `$RUNNER_TEMP/hoard.port` or `./.hoard/port` | |
-| `token` | random 32 bytes, hex | Written to `--token-file` (mode 0600); never logged |
+| `token` | random 32 bytes, hex | Written to `--token-file` (mode 0600); never logged. Environment only (`HOARD_TOKEN`): the binary rejects a `--token` flag |
 | `token-file` | `$RUNNER_TEMP/hoard.token` or `./.hoard/token` | Where the token is written; read by `hoard env` |
 | `summary-file` | `$RUNNER_TEMP/hoard-summary.md` or `./.hoard/summary.md` | Markdown summary written on shutdown |
 | `pid-file` | `$RUNNER_TEMP/hoard.pid` or `./.hoard/pid` | `serve --detach` writes the pid and, on linux, the process start time (second line); `stop` waits on it only while the start time matches |
 | `log-file` | `$RUNNER_TEMP/hoard.log` or `./.hoard/log` | `serve --detach` writes stdout and stderr here; created fresh (an existing file or symlink is removed) with mode 0600 |
 | `detach` | off | Boolean flag (`HOARD_DETACH`): `serve` runs in the background (§4.1) |
 | `fs-root` | `./.hoard/store` | `fs` storage only (tests, local use) |
-| `r2-account-id`, `r2-access-key-id`, `r2-secret-access-key`, `r2-bucket` | — | required for `r2` |
+| `r2-account-id`, `r2-access-key-id`, `r2-secret-access-key`, `r2-bucket` | — | required for `r2`. The secret key is environment only (`HOARD_R2_SECRET_ACCESS_KEY`); a `--r2-secret-access-key` flag is rejected (breaking since 0.6, never in argv) |
 | `r2-endpoint` | — | Optional S3 endpoint URL override (e.g. MinIO for tests and local use), must start with `http://` or `https://`; when set, `r2-account-id` is not required |
 | `r2-prefix` | `cache/` | One or more segments of `[A-Za-z0-9._-]` (not `.` or `..`), each followed by `/`, e.g. `cache/` or `team/turbo/`. No leading `/`, `//`, whitespace or control characters: the S3 layer would normalise them and reach keys outside the prefix (`/` = the whole bucket). |
 | `r2-lifecycle` | `auto` | `auto` \| `verify` \| `manual`; see §7.1 |

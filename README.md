@@ -295,7 +295,9 @@ prints the command). With `--mode read`, object read is enough.
 
 ## Settings
 
-Every setting is a flag (`--max-size 5GB`) and an environment variable (`HOARD_MAX_SIZE=5GB`).
+Every setting is a flag (`--max-size 5GB`) and an environment variable (`HOARD_MAX_SIZE=5GB`),
+except the secrets: the token and the R2 secret key are environment only (`HOARD_TOKEN`,
+`HOARD_R2_SECRET_ACCESS_KEY`); `--token` and `--r2-secret-access-key` are rejected.
 The full list with defaults is the table in
 [spec §4.2](docs/superpowers/specs/2026-10-14-hoard-design.md#42-configuration).
 
