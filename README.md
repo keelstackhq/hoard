@@ -238,7 +238,7 @@ All inputs are optional. Inputs marked (r2) are used only with `storage: r2`.
 | `r2-lifecycle` | `auto` | `auto` (set the bucket's expiry rule), `verify` (fail if it is missing) or `manual` (r2). |
 | `max-age-days` | `7` | Delete R2 objects this many days after their last write, 1–36500 (r2). |
 | `max-size` | `5GB` | Size cap for the R2 prefix; the oldest objects are pruned above it (r2). |
-| `refresh-on-hit` | `true` | R2 only: reset the age of objects older than `max-age-days / 2` when a cache hit reads them (once per object per run), so artifacts in use never expire. Does nothing for `github` and `fs`. |
+| `refresh-on-hit` | `true` | R2 only: a hit re-writes objects older than `max-age-days / 2`, so artifacts in use never expire. |
 | `vp-max-size` | `2GB` | Vite+ only: skip saving the task cache when it is larger than this (then run `vp cache clean`). |
 | `version` | empty | hoard binary version. Empty: this action's own release, the only one it can verify. |
 
@@ -298,21 +298,12 @@ prints the command). With `--mode read`, object read is enough.
 Every setting is a flag (`--max-size 5GB`) and an environment variable (`HOARD_MAX_SIZE=5GB`),
 except the secrets: the token and the R2 secret key are environment only (`HOARD_TOKEN`,
 `HOARD_R2_SECRET_ACCESS_KEY`); `--token` and `--r2-secret-access-key` are rejected (breaking in 0.6.0, see [CHANGELOG](CHANGELOG.md)).
-The full list with defaults is the table in
+Run `hoard serve --help` for every flag; defaults are in
 [spec §4.2](docs/superpowers/specs/2026-10-14-hoard-design.md#42-configuration).
 
-`--write-behind auto|on|off` (`HOARD_WRITE_BEHIND`, default `auto`: on for `storage=github`,
-off for `r2` and `fs`) answers each PUT once the artifact is spooled to disk and uploads it in
-the background; shutdown waits up to 120 s for the queue.
-
-`--pack auto|on|off` (`HOARD_PACK`, default `auto`: on for `storage=github`, off for `fs`;
-ignored for `r2`) stores Turborepo artifacts as a few large packs plus one index instead of one
-cache entry each, so a job makes about one upload per 128 MiB of new artifacts, however many
-packages it builds. With `pack` on, `write-behind` is not used for Turborepo artifacts. See
-[spec §6.5](docs/superpowers/specs/2026-10-14-hoard-design.md#65-packing-turborepo-artifacts-pack-on).
-
-`refresh-on-hit` (R2 only, on by default) is described under [How the bucket stays bounded](#how-the-bucket-stays-bounded); spec
-[§7.3](docs/superpowers/specs/2026-10-14-hoard-design.md#73-layer-3--refresh-on-hit-on-by-default).
+`write-behind` and `pack` default to `auto`: both on for `storage=github`, off for `fs`; `pack`
+is ignored for `r2` (see [spec §6.5](docs/superpowers/specs/2026-10-14-hoard-design.md#65-packing-turborepo-artifacts-pack-on)).
+`refresh-on-hit` (R2 only, on by default): [How the bucket stays bounded](#how-the-bucket-stays-bounded).
 
 ## CircleCI and other CI
 

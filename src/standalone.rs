@@ -12,11 +12,13 @@ use crate::serve::read_server;
 
 #[derive(Args, Debug, Clone)]
 pub struct DetachArgs {
-    /// Run in the background; exit 0 once ready (files: --pid-file, --log-file).
+    /// Run in the background; exit 0 once ready.
     #[arg(long, env = "HOARD_DETACH", value_parser = clap::builder::BoolishValueParser::new())]
     pub detach: bool,
+    /// File that holds the server pid.
     #[arg(long, env = "HOARD_PID_FILE")]
     pub pid_file: Option<PathBuf>,
+    /// File that receives the server log.
     #[arg(long, env = "HOARD_LOG_FILE")]
     pub log_file: Option<PathBuf>,
 }
@@ -30,10 +32,13 @@ pub enum SummaryFormat {
 pub struct StopArgs {
     #[command(flatten)]
     pub paths: TokenPaths,
+    /// File that holds the server pid.
     #[arg(long, env = "HOARD_PID_FILE")]
     pub pid_file: Option<PathBuf>,
+    /// Markdown summary the server wrote on shutdown.
     #[arg(long, env = "HOARD_SUMMARY_FILE")]
     pub summary_file: Option<PathBuf>,
+    /// Print the summary in this format (markdown).
     #[arg(long, value_enum)]
     pub summary: Option<SummaryFormat>,
 }

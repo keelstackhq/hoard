@@ -138,21 +138,23 @@ pub fn default_log_file() -> PathBuf {
 /// Port and token file locations; enough for `hoard env` to find a running server.
 #[derive(Args, Debug, Clone)]
 pub struct TokenPaths {
-    /// File holding the actual listening port.
+    /// File that holds the listening port.
     #[arg(long, env = "HOARD_PORT_FILE")]
     pub port_file: Option<PathBuf>,
-    /// File holding the bearer token.
+    /// File that holds the bearer token.
     #[arg(long, env = "HOARD_TOKEN_FILE")]
     pub token_file: Option<PathBuf>,
 }
 
 #[derive(clap::Parser, Clone)]
 pub struct ServeArgs {
+    /// Where artifacts live: github, r2 or fs.
     #[arg(long, env = "HOARD_STORAGE", value_enum, default_value = "github")]
     pub storage: Storage,
+    /// read-write, read (no uploads) or off (every request misses).
     #[arg(long, env = "HOARD_MODE", value_enum, default_value = "read-write")]
     pub mode: Mode,
-    /// Every GET/HEAD is a miss (the store is never read); uploads still happen.
+    /// Every GET/HEAD misses; uploads still happen.
     #[arg(long, env = "HOARD_NO_READS", value_parser = clap::builder::BoolishValueParser::new())]
     pub no_reads: bool,
     /// Part of every key; bump to purge.
@@ -169,38 +171,43 @@ pub struct ServeArgs {
     /// Markdown summary written on shutdown.
     #[arg(long, env = "HOARD_SUMMARY_FILE")]
     pub summary_file: Option<PathBuf>,
+    /// Directory for storage=fs.
     #[arg(long, env = "HOARD_FS_ROOT", default_value = "./.hoard/store")]
     pub fs_root: PathBuf,
+    /// Cloudflare account ID (r2).
     #[arg(long, env = "HOARD_R2_ACCOUNT_ID")]
     pub r2_account_id: Option<String>,
-    /// S3 endpoint URL override (e.g. MinIO); when set, r2-account-id is not needed.
+    /// S3 endpoint override, e.g. MinIO (r2); replaces r2-account-id.
     #[arg(long, env = "HOARD_R2_ENDPOINT")]
     pub r2_endpoint: Option<String>,
+    /// R2 access key ID (r2).
     #[arg(long, env = "HOARD_R2_ACCESS_KEY_ID")]
     pub r2_access_key_id: Option<String>,
     /// Environment only (the binary rejects `--r2-secret-access-key`).
     #[arg(long, env = "HOARD_R2_SECRET_ACCESS_KEY", hide = true)]
     pub r2_secret_access_key: Option<String>,
+    /// R2 bucket name (r2).
     #[arg(long, env = "HOARD_R2_BUCKET")]
     pub r2_bucket: Option<String>,
+    /// Key prefix in the bucket, ending in / (r2).
     #[arg(long, env = "HOARD_R2_PREFIX", default_value = "cache/")]
     pub r2_prefix: String,
+    /// auto sets the expiry rule, verify fails if it is missing, manual skips it (r2).
     #[arg(long, env = "HOARD_R2_LIFECYCLE", value_enum, default_value = "auto")]
     pub r2_lifecycle: LifecycleMode,
+    /// Days after the last write that R2 objects expire, 1-36500 (r2).
     #[arg(long, env = "HOARD_MAX_AGE_DAYS", default_value_t = 7)]
     pub max_age_days: u32,
-    /// R2 size cap: KB, MB, GB or TB (powers of 1000).
+    /// R2 prefix size cap, e.g. 5GB; the oldest objects go first (r2).
     #[arg(long, env = "HOARD_MAX_SIZE", default_value = "5GB")]
     pub max_size: String,
-    /// Upload PUTs in the background after spooling them to disk (auto: on for github).
+    /// Upload in the background after spooling to disk (auto: on for github).
     #[arg(long, env = "HOARD_WRITE_BEHIND", value_enum, default_value = "auto")]
     pub write_behind: WriteBehindMode,
-    /// Pack Turborepo artifacts into packs plus an index (auto: on for github; ignored for r2).
+    /// Pack artifacts into few large entries (auto: on for github; never for r2).
     #[arg(long, env = "HOARD_PACK", value_enum, default_value = "auto")]
     pub pack: PackMode,
-    /// R2 only: on a GET hit, copy objects older than max-age-days / 2 onto themselves so the
-    /// lifecycle rule does not expire what is still in use (at most once per object per run).
-    /// Default: on for storage=r2 with mode=read-write; `--refresh-on-hit=false` turns it off.
+    /// R2: re-write hit objects older than half of max-age-days; default on, =false turns off.
     #[arg(
         long,
         env = "HOARD_REFRESH_ON_HIT",
@@ -460,6 +467,24 @@ impl TryFrom<ServeArgs> for Config {
 
 #[cfg(test)]
 mod tests {
+    /// `--help` stays scannable: every visible option has a one-line description (<= 90 chars).
+    #[test]
+    fn every_flag_has_a_one_line_help() {
+        use clap::CommandFactory;
+        for a in ServeArgs::command().get_arguments() {
+            if a.is_hide_set() {
+                continue;
+            }
+            let id = a.get_id().as_str();
+            let help = a.get_help().map(|h| h.to_string()).unwrap_or_default();
+            assert!(!help.is_empty(), "--{id} has no help text");
+            assert!(
+                !help.contains('\n') && help.len() <= 90,
+                "--{id} help is not one short line: {help:?}"
+            );
+        }
+    }
+
     use super::*;
     use clap::Parser;
 

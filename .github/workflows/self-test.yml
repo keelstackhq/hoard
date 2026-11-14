@@ -53,9 +53,12 @@ jobs:
         # HOARD_ACTION_BINARY_PATH. `release`: skip the build and the env var, so the action
         # downloads the published binary of its baked VERSION and verifies its SHA-256 (the
         # `if: matrix.binary == 'source'` steps below only run for `source`).
-        binary: [source, release]
+        # Pull requests: the release binary on ubuntu only (its download and SHA-256 check is the
+        # same code on every OS; the per-OS release assets are checked on main and weekly).
+        binary: ${{ fromJSON(github.event_name == 'pull_request' && '["source"]' || '["source","release"]') }}
         include:
           - { os: ubuntu-latest, storage: r2, binary: source }
+          - { os: ubuntu-latest, storage: github, binary: release }
     defaults:
       run:
         shell: bash
@@ -138,9 +141,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         storage: [github]
-        binary: [source, release] # see the note in `warm`
+        binary: ${{ fromJSON(github.event_name == 'pull_request' && '["source"]' || '["source","release"]') }} # see `warm`
         include:
           - { os: ubuntu-latest, storage: r2, binary: source }
+          - { os: ubuntu-latest, storage: github, binary: release }
     defaults:
       run:
         shell: bash
