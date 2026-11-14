@@ -54,8 +54,16 @@ struct PruneArgs {
 
 fn main() {
     drop_empty_hoard_env();
-    if let Err(e) = reject_secret_flags(std::env::args().skip(1)) {
+    if let Err(e) = reject_secret_flags(std::env::args_os().skip(1)) {
         eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+    // clap echoes bad arguments, which may hold a secret: refuse non-UTF-8 argv by position only.
+    if let Some(i) = std::env::args_os()
+        .skip(1)
+        .position(|a| a.to_str().is_none())
+    {
+        eprintln!("error: argument {} is not valid UTF-8", i + 1);
         std::process::exit(1);
     }
     let cli = Cli::parse();

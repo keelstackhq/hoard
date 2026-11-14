@@ -8,7 +8,8 @@ action tests against them (the release push does not trigger CI), commits
 
 ## Run a release
 
-1. On the branch to release from (normally `main`), set `version = "X.Y.Z"` in `Cargo.toml`, run
+1. On the branch to release from (normally `main`), rename `Unreleased` in `CHANGELOG.md` to the
+   version, set `version = "X.Y.Z"` in `Cargo.toml`, run
    `cargo update -p keel-hoard` so `Cargo.lock` agrees, commit and push.
 2. Start the workflow:
 
