@@ -524,3 +524,112 @@ fn hoard_env_vars_are_bound_to_their_flags() {
         assert!(stderr.contains(flag), "{var}: {stderr}");
     }
 }
+
+/// Non-UTF-8 argv must not panic or be echoed (it may hold a secret).
+#[test]
+fn non_utf8_argv_does_not_panic_or_echo() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bad = std::ffi::OsStr::from_bytes(b"ab\xffSEKRIT");
+    let out = hoard_without_actions_env()
+        .args(["serve", "--storage", "fs", "--summary-file"])
+        .arg(bad)
+        .arg("--fs-root")
+        .arg(dir.path())
+        .arg("--bogus")
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(!all.contains("panicked"), "{all}");
+    assert!(!all.contains("SEKRIT"), "{all}");
+    // A secret flag with a non-UTF-8 value is still rejected, never echoed.
+    let tok = b"--token=ab\xffSEKRIT".to_vec();
+    let out = hoard_without_actions_env()
+        .arg("serve")
+        .arg(std::ffi::OsStr::from_bytes(&tok))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("HOARD_TOKEN") && !err.contains("SEKRIT"),
+        "{err}"
+    );
+}
+
+/// The remaining `HOARD_*` variables reach their settings (checked through `doctor`/`serve` output).
+#[test]
+fn remaining_hoard_env_vars_are_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let (summary, log, pid) = (
+        dir.path().join("summary.md"),
+        dir.path().join("hoard.log"),
+        dir.path().join("hoard.pid"),
+    );
+    let mut c = hoard_without_actions_env();
+    c.args(["serve", "--detach"])
+        .env("HOARD_STORAGE", "fs")
+        .env("HOARD_FS_ROOT", &store)
+        .env("HOARD_PORT_FILE", dir.path().join("port"))
+        .env("HOARD_TOKEN_FILE", dir.path().join("token"))
+        .env("HOARD_PID_FILE", &pid)
+        .env("HOARD_LOG_FILE", &log)
+        .env("HOARD_SUMMARY_FILE", &summary);
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(pid.exists() && log.exists());
+    let mut stop = hoard_without_actions_env();
+    stop.arg("stop")
+        .env("HOARD_PORT_FILE", dir.path().join("port"))
+        .env("HOARD_TOKEN_FILE", dir.path().join("token"))
+        .env("HOARD_PID_FILE", &pid)
+        .env("HOARD_SUMMARY_FILE", &summary);
+    assert!(stop.output().unwrap().status.success());
+    assert!(summary.exists());
+}
+
+/// R2-only variables: each bad value names its flag; prefix and endpoint reach the config.
+#[test]
+fn r2_env_vars_are_bound() {
+    for (var, val, flag) in [
+        ("HOARD_R2_LIFECYCLE", "nope", "--r2-lifecycle"),
+        ("HOARD_MAX_AGE_DAYS", "x", "--max-age-days"),
+        ("HOARD_REFRESH_ON_HIT", "maybe", "--refresh-on-hit"),
+        ("HOARD_NO_READS", "maybe", "--no-reads"),
+        ("HOARD_DETACH", "maybe", "--detach"),
+    ] {
+        let out = hoard_without_actions_env()
+            .arg("serve")
+            .env(var, val)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success() && stderr.contains(flag),
+            "{var}: {stderr}"
+        );
+    }
+    // Missing bucket etc. are named with their env vars; prefix/endpoint/keys accepted.
+    let out = hoard_without_actions_env()
+        .args(["doctor", "--storage", "r2"])
+        .env("HOARD_R2_ENDPOINT", "http://127.0.0.1:9")
+        .env("HOARD_R2_ACCESS_KEY_ID", "k")
+        .env("HOARD_R2_SECRET_ACCESS_KEY", "s")
+        .env("HOARD_R2_PREFIX", "p/")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bucket") && !stderr.contains("access-key"),
+        "{stderr}"
+    );
+}

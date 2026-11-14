@@ -54,7 +54,7 @@ struct PruneArgs {
 
 fn main() {
     drop_empty_hoard_env();
-    if let Err(e) = reject_secret_flags(std::env::args().skip(1)) {
+    if let Err(e) = reject_secret_flags(std::env::args_os().skip(1)) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }

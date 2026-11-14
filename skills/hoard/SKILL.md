@@ -13,11 +13,17 @@ remote-cache API and stores artifacts in the GitHub Actions cache, Cloudflare R2
 Put the step **after** dependency install, **before** the turbo/vp command. No inputs needed:
 
 ```yaml
-- uses: keelstackhq/hoard@v0   # pin a release tag, never @main
+- uses: keelstackhq/hoard@v0   # floating major tag of the latest 0.x release; never @main
 - run: pnpm turbo run build test lint
 ```
 
-Also run the workflow on `push` to `main`: GitHub cache entries are branch-scoped, so pull
+Order: checkout, setup-node, install, hoard, turbo. The step exports `TURBO_API`, `TURBO_TOKEN`
+and `TURBO_TEAM` to every later step (no `eval "$(hoard env)"` in Actions). With turbo
+`envMode: strict`, add those three to `globalPassThroughEnv`. Needs no `permissions:` block and
+any turbo that reads those variables. Keep other turbo cache steps off; one `turbo` job per matrix
+leg is fine.
+
+Keep `pull_request` and also run the workflow on `push` to the default branch (`main` below): GitHub cache entries are branch-scoped, so pull
 requests only start warm from what the default branch wrote. No `turbo.json` change; do not set
 `"remoteCache": {"enabled": false}`.
 
@@ -26,14 +32,16 @@ requests only start warm from what the default branch wrote. No `turbo.json` cha
 - `github` (default): zero config. 10 GB/repo, about 200 uploads/min (packing keeps it under).
 - `r2`: big monorepos, shared by all branches/laptops. Needs `r2-account-id`, `r2-access-key-id`,
   `r2-secret-access-key`, `r2-bucket` from secrets (setup steps: README "Use Cloudflare R2").
-  Missing inputs (forks) fall back to `github` with a warning.
+  Missing inputs (fork PRs get no secrets) fall back to `github` with a warning. Example:
+  `with: {storage: r2, r2-account-id: "${{ secrets.R2_ACCOUNT_ID }}", ...}`.
 - `fs`: self-hosted runner with a persistent disk, or tests.
 
 ## Check it works
 
 Job summary has the hoard table (Hits/Misses/Uploaded). First run all misses is normal; the second
-run should say `>>> FULL TURBO`. Outputs `hits`, `misses`, `time-saved-ms` are readable only from a
-later job. All inputs and defaults: `action.yml` (README "Action inputs").
+run should say `>>> FULL TURBO`. A re-run of the same commit counts as a second run. Outputs `hits`,
+`misses`, `time-saved-ms` exist only after the post step, so read them from a later job
+(`needs.<job>.outputs`; give the hoard step an `id` and map it in `jobs.<job>.outputs`). All inputs and defaults: `action.yml` (README "Action inputs").
 
 ## Fix it
 
@@ -49,8 +57,8 @@ later job. All inputs and defaults: `action.yml` (README "Action inputs").
 ## Other CI, local
 
 `scripts/install.sh` installs a verified release; `hoard serve --detach`, `eval "$(hoard env)"`,
-run turbo, `hoard stop`. CircleCI: `circleci/hoard.yml`, `docs/circleci.md`; pass `restore: false`
-on the default branch.
+run turbo, `hoard stop` (files in this repo, not in your project). CircleCI: `circleci/hoard.yml`, `docs/circleci.md`; pass `restore: false`
+on the default branch (CircleCI parameter only; Actions has no such input).
 
 ## Rules
 

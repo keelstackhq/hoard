@@ -255,8 +255,10 @@ fn empty_hoard_keys<I: IntoIterator<Item = (OsString, OsString)>>(vars: I) -> Ve
 
 /// Secrets never go in argv: reject `--token` and `--r2-secret-access-key` (also `--flag=value`)
 /// and name the environment variable to use. Never echoes the value.
-pub fn reject_secret_flags<I: IntoIterator<Item = String>>(args: I) -> Result<(), String> {
+pub fn reject_secret_flags<I: IntoIterator<Item = OsString>>(args: I) -> Result<(), String> {
     for a in args {
+        // Lossy on purpose: non-UTF-8 argv must not panic, and the flag name is ASCII.
+        let a = a.to_string_lossy();
         let name = a.split('=').next().unwrap_or("");
         let env = match name {
             "--token" => "HOARD_TOKEN",
