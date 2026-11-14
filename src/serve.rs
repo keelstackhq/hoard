@@ -221,14 +221,25 @@ pub async fn run_serve(cfg: Config) -> anyhow::Result<()> {
     let startup_lines: Vec<String> = lifecycle_startup(&cfg).await?.into_iter().collect();
 
     let token = cfg.token.clone().unwrap_or_else(random_token);
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.port))
-        .await
-        .with_context(|| {
-            format!(
-                "cannot listen on 127.0.0.1:{}; pick another --port or use 0",
-                cfg.port
-            )
-        })?;
+    let listener = match tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.port)).await {
+        Ok(l) => l,
+        // A busy port must not fail the build: the port file tells clients the port in use.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && cfg.port != 0 => {
+            let l = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .context("cannot listen on 127.0.0.1 (no free port)")?;
+            warn!(
+                "127.0.0.1:{} is in use; using port {} instead",
+                cfg.port,
+                l.local_addr()?.port()
+            );
+            l
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("cannot listen on 127.0.0.1:{}; use --port 0", cfg.port));
+        }
+    };
     let port = listener.local_addr()?.port();
 
     let stats = Arc::new(Stats::default());

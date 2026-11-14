@@ -81,14 +81,55 @@ fn detach_put_get_stop() {
     assert!(!d.join("PORT").exists() && !d.join("PID").exists());
 }
 
+/// A busy explicit port must not fail the build (CLAUDE.md: never fail the build because of the
+/// cache): the server falls back to a free port, says so in its log, and writes the port it uses.
+#[test]
+fn busy_port_falls_back_to_a_free_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let _guard = PidGuard(d.join("PID"));
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = busy.local_addr().unwrap().port().to_string();
+    let (code, _, err) = hoard(d, &["serve", "--detach", "--port", &port]);
+    assert_eq!(code, 0, "{err}");
+    let used = std::fs::read_to_string(d.join("PORT")).unwrap();
+    assert_ne!(used.trim(), port, "must not reuse the busy port");
+    let log = std::fs::read_to_string(d.join("LOG")).unwrap();
+    assert!(
+        log.contains(&format!("127.0.0.1:{port} is in use")),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!("using port {}", used.trim())),
+        "{log}"
+    );
+    assert_eq!(hoard(d, &["stop"]).0, 0);
+}
+
+/// A setup error under `serve --detach` exits 1, quotes the error and the log tail, and leaves
+/// no PID or PORT file behind.
 #[test]
 fn startup_failure_prints_log_tail() {
     let dir = tempfile::tempdir().unwrap();
-    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = busy.local_addr().unwrap().port().to_string();
-    let (code, _, err) = hoard(dir.path(), &["serve", "--detach", "--port", &port]);
+    let d = dir.path();
+    let bad_root = d.join("file");
+    std::fs::write(&bad_root, "x").unwrap();
+    let root = bad_root.join("store");
+    let (code, _, err) = hoard(
+        d,
+        &[
+            "serve",
+            "--detach",
+            "--storage",
+            "fs",
+            "--fs-root",
+            root.to_str().unwrap(),
+        ],
+    );
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("cannot listen on 127.0.0.1"), "{err}");
+    assert!(err.contains("--fs-root"), "{err}");
+    assert!(err.contains("log:"), "{err}");
+    assert!(!d.join("PID").exists() && !d.join("PORT").exists(), "{err}");
 }
 
 #[test]

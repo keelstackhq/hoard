@@ -156,7 +156,13 @@ pub struct ObjectInfo {
 pub fn build_operator(cfg: &Config) -> anyhow::Result<Operator> {
     match cfg.storage {
         Storage::Fs => {
-            std::fs::create_dir_all(&cfg.fs_root)?;
+            let no_dir = |e: std::io::Error| {
+                anyhow::anyhow!(
+                    "cannot use {} as the fs store ({e}); set --fs-root or HOARD_FS_ROOT to a writable directory",
+                    cfg.fs_root.display()
+                )
+            };
+            std::fs::create_dir_all(&cfg.fs_root).map_err(no_dir)?;
             let root = cfg
                 .fs_root
                 .to_str()
@@ -165,7 +171,7 @@ pub fn build_operator(cfg: &Config) -> anyhow::Result<Operator> {
             // partial object and an aborted write leaves nothing behind. Same filesystem as
             // the root, so the rename cannot cross devices.
             let tmp = cfg.fs_root.join(FS_TMP_DIR);
-            std::fs::create_dir_all(&tmp)?;
+            std::fs::create_dir_all(&tmp).map_err(no_dir)?;
             let tmp = tmp
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("--fs-root is not valid UTF-8"))?;
@@ -442,6 +448,25 @@ mod tests {
                 .find(|(n, _)| *n == k)
                 .map(|(_, v)| v.to_string())
         }
+    }
+
+    #[test]
+    fn fs_root_that_cannot_be_created_says_how_to_fix() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let mut cfg = Config::try_from(crate::config::ServeArgs::parse_from([
+            "serve",
+            "--storage",
+            "fs",
+        ]))
+        .unwrap();
+        cfg.fs_root = file.join("store");
+        let err = build_operator(&cfg).unwrap_err().to_string();
+        assert!(err.contains("--fs-root"), "{err}");
+        assert!(err.contains(&file.display().to_string()), "{err}");
+        assert!(err.contains("HOARD_FS_ROOT"), "{err}");
     }
 
     #[test]

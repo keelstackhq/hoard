@@ -96,7 +96,7 @@ secrets as `""`).
 | `mode` | `read-write` | `read-write` \| `read` \| `off`; see §8 |
 | `no-reads` | off | Boolean flag (`HOARD_NO_READS=true` or `1`): GET/HEAD miss and the batch query finds nothing, without reading the store; PUTs are unaffected (§6.4, `write-only`) |
 | `cache-version` | `v1` | Part of every key; bump to purge. One segment of `[A-Za-z0-9._-]` (not `.` or `..`, no `/`) |
-| `port` | `0` | `0` = pick a free port; actual port written to `--port-file` |
+| `port` | `0` | `0` = pick a free port; a busy explicit port falls back to a free one with a log warning. The port in use is written to `--port-file` |
 | `port-file` | `$RUNNER_TEMP/hoard.port` or `./.hoard/port` | |
 | `token` | random 32 bytes, hex | Written to `--token-file` (mode 0600); never logged. Environment only (`HOARD_TOKEN`): the binary rejects a `--token` flag |
 | `token-file` | `$RUNNER_TEMP/hoard.token` or `./.hoard/token` | Where the token is written; read by `hoard env` |
