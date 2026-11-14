@@ -106,6 +106,32 @@ fn busy_port_falls_back_to_a_free_port() {
     assert_eq!(hoard(d, &["stop"]).0, 0);
 }
 
+/// A setup error under `serve --detach` exits 1, quotes the error and the log tail, and leaves
+/// no PID or PORT file behind.
+#[test]
+fn startup_failure_prints_log_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let bad_root = d.join("file");
+    std::fs::write(&bad_root, "x").unwrap();
+    let root = bad_root.join("store");
+    let (code, _, err) = hoard(
+        d,
+        &[
+            "serve",
+            "--detach",
+            "--storage",
+            "fs",
+            "--fs-root",
+            root.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("--fs-root"), "{err}");
+    assert!(err.contains("log:"), "{err}");
+    assert!(!d.join("PID").exists() && !d.join("PORT").exists(), "{err}");
+}
+
 #[test]
 fn stop_sigterms_a_hoard_that_does_not_answer() {
     let dir = tempfile::tempdir().unwrap();
