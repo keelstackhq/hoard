@@ -643,8 +643,8 @@ Release (`.github/workflows/release.yml`; see `docs/RELEASING.md`). It starts on
 that changes `Cargo.toml` (the merged version-bump PR), or by `workflow_dispatch` with optional
 `version` (must equal `Cargo.toml`) and `draft`. A secret-free `detect` job reads the version and
 sets `pending` unless tag `vX.Y.Z` and its release both exist; `publish` re-checks with a write
-token: tag and release exist → skip (green); tag without a release → fail with the cleanup
-steps (never silent green); so a version is released once. If pending: build the five targets, then, in the `publish` job that runs in the
+token: tag, five assets and (stable, newest) `vX` on the release → skip (green); any other
+leftover → fail with the cleanup steps (never silent green); so a version is released once. If pending: build the five targets, then, in the `publish` job that runs in the
 `release` environment and waits for the owner's approval, write the checksums file, rebuild `dist/`, run the
 action tests, commit `chore(release): vX.Y.Z` on the merged commit and push **only** tag `vX.Y.Z`
 (never `main`: the commit is reachable from the tag alone, `main` keeps the previous checksums and

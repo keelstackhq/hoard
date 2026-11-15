@@ -14,7 +14,7 @@ A release starts when a version-bump PR is merged to `main`:
    `Cargo.toml`, run `cargo update -p keel-hoard` so `Cargo.lock` agrees, and get it reviewed.
 2. Merge the PR to `main`. The push changes `Cargo.toml`, so `release.yml` starts. Its `detect` job
    reads the version from `Cargo.toml` and checks the tag: if `vX.Y.Z` does not exist, the build
-   jobs run; if it exists, the run ends without doing anything. The merge must be done with a user
+   jobs run; if it exists with a complete release, the run ends without doing anything (a tag without a release stays pending, and `publish` fails). The merge must be done with a user
    or app token: a merge made with the workflow `GITHUB_TOKEN` does not start workflows.
 3. The `publish` job (release commit, tags, GitHub release) runs in the `release` environment and waits
    until the owner approves it in the run's page. Nothing is published before that approval.
@@ -26,14 +26,16 @@ A release starts when a version-bump PR is merged to `main`:
 The release commit (baked checksums and rebuilt `action/dist/`) is reachable only from the tag.
 `main` keeps the previous checksums and `dist/`, which is fine: users consume `@vX.Y.Z` or `@vX`, and
 `main`'s own CI and self-test use the checkout's `dist/` and a published binary of the baked
-version. So merging to `main` while a release waits for approval is safe, and the workflow needs no
+version (the previous release's: CI no longer exercises the new release's assets, so do step 4). So merging to `main` while a release waits for approval is safe, and the workflow needs no
 branch-protection bypass. Any later change to `Cargo.toml` (even a dependency bump) also starts a
 run for a version that has no tag yet, for example after a failed release. The owner approval
-still applies.
+still applies. While a **draft** release exists, such a run builds all targets and asks for
+approval, then `publish` skips (the detect job's token cannot see drafts).
 
 Only a change to `Cargo.toml` on `main` starts a run, and a version is released once: the `detect`
-job and the `publish` job both skip a version whose tag **and** release exist, and runs queue
-one at a time (`concurrency: release`). A tag without a release is a partial failure: `publish`
+job and the `publish` job both skip a version whose tag **and** complete release (five assets,
+`vX` on it when it should be) exist, and runs queue one at a time (`concurrency: release`). Any
+other leftover (tag without a release, wrong assets, stale `vX`) is a partial failure: `publish`
 fails with an error (see "Cleanup after a partial failure"), it never ends green. The workflow
 pushes tags only, which start no run.
 
@@ -71,8 +73,8 @@ After a **draft** release, publish the draft by hand and then move the major tag
 
 ```bash
 gh release edit vX.Y.Z --draft=false
-git fetch --tags
-git tag -f vX vX.Y.Z^{commit} && git push -f origin vX
+git fetch --tags --force
+git tag -f -a vX -m "vX -> vX.Y.Z" vX.Y.Z^{commit} && git push -f origin vX
 ```
 
 Do this only when `vX.Y.Z` is the newest stable `vX.*` release.
@@ -81,14 +83,16 @@ Do this only when `vX.Y.Z` is the newest stable `vX.*` release.
 
 If the workflow fails **before** "Commit and tag (tag only)", nothing was published: fix and re-run.
 
-If it fails **after** pushing the tag (release missing, or "Verify release assets" failed), `vX` was
-not moved, so users are unaffected, and `main` was never touched. A re-run stops with an error
-until you remove the partial release and its tag:
+If it fails **after** pushing the tag (release missing or wrong, "Verify release assets" or
+"Move major tag" failed), `main` was never touched and a re-run stops with an error until you
+clean up. If only `vX` failed to move, move it by hand as in the section above instead. Otherwise
+remove the partial release and its tag:
 
 ```bash
 gh release delete vX.Y.Z --yes --cleanup-tag || git push origin :refs/tags/vX.Y.Z
 ```
 
 (`--cleanup-tag` also deletes the tag; if no release exists, the second command deletes the tag.)
-Then start the workflow by hand again (the fallback above); a push run does not repeat a version
-unless `Cargo.toml` changes again.
+Then use "Re-run all jobs" on the failed run: it keeps the originally merged commit. The fallback
+above builds the current `main` instead, which may include later merges. A push run does not
+repeat a version unless `Cargo.toml` changes again.
