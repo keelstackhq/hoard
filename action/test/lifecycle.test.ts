@@ -106,6 +106,15 @@ describe("main", () => {
     expect(JSON.stringify(f.calls)).not.toContain("cache.example.test");
   });
 
+  test("no notice when TURBO_* came from an earlier hoard step", async () => {
+    const f = fakeCore();
+    const d = deps(f);
+    d.env.TURBO_API = "http://127.0.0.1:1234";
+    d.env.TURBO_TEAM = "hoard";
+    await runMain(d);
+    expect(f.of("notice").some((n) => String(n[0]).includes("TURBO_"))).toBe(false);
+  });
+
   test("no notice when no TURBO_* was set", async () => {
     const f = fakeCore();
     await runMain(deps(f));

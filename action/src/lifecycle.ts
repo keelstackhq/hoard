@@ -185,7 +185,8 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
 
     core.setSecret(token);
     const preset = ["TURBO_API", "TURBO_TOKEN", "TURBO_TEAM"].filter((n) => env[n]);
-    if (preset.length > 0) {
+    // An earlier hoard step in this job set them (its team is "hoard"): nothing to report.
+    if (preset.length > 0 && env.TURBO_TEAM !== "hoard") {
       core.notice(
         `${preset.join(", ")} already set for this job (a Vercel or self-hosted cache?): replaced ` +
           "by hoard for the later steps. A step-level `env:` that sets them still wins; remove it " +

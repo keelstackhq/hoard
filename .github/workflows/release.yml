@@ -79,7 +79,7 @@ jobs:
             exit 1
           fi
           # Done only when the shared check passes (tag, five assets, major tag): see
-          # scripts/release-complete.sh. Anything else stays pending and publish decides: finish
+          # scripts/release-complete.sh. A partial release (exit 4) fails here; anything else stays pending and publish decides: finish
           # the work, or fail with the cleanup steps. This job's read-only token cannot see drafts.
           if out=$(bash scripts/release-complete.sh check "$version"); then
             pending=false

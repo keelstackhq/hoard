@@ -20,6 +20,7 @@ interface World {
   release?: string; // draft \t pre \t assets; absent: no visible release
   releaseApiError?: boolean; // `gh release view` fails with an HTTP error, not "release not found"
   refsApiError?: boolean;
+  commitsApiError?: boolean; // the major tag lookup fails with HTTP 502 (not a 404)
   stable?: string[]; // published stable release tags
   shas?: Record<string, string>; // ref name -> commit
 }
@@ -36,9 +37,11 @@ case "$1 $2" in
   "release view") ${world.releaseApiError ? "echo 'HTTP 502: Bad Gateway' >&2; exit 1" : world.release === undefined ? "echo 'release not found' >&2; exit 1" : `printf '%s\\n' ${shq([world.release])}`} ;;
   "api repos/o/r/releases") printf '%s\\n' ${shq(world.stable ?? [])} ;;
   "api repos/o/r/commits/"*) n=\${2#repos/o/r/commits/}
-    case "$n" in ${Object.entries(world.shas ?? {})
+    case "$n" in ${world.commitsApiError ? "v1) echo 'HTTP 502' >&2; exit 1 ;;" : ""} ${Object.entries(
+      world.shas ?? {},
+    )
       .map(([k, v]) => `${k}) echo ${v} ;;`)
-      .join(" ")} *) exit 1 ;; esac ;;
+      .join(" ")} *) echo "HTTP 404: Not Found" >&2; exit 1 ;; esac ;;
   *) echo "unexpected gh $*" >&2; exit 99 ;;
 esac
 `,
@@ -94,6 +97,9 @@ test("missing, extra or wrong assets fail", () => {
 test("newest stable with stale or missing vX is partial (4)", () => {
   expect(run(stable({ shas: { "v1.2.0": "aaa", v1: "bbb" } }), "check", "1.2.0").code).toBe(4);
   expect(run(stable({ shas: { "v1.2.0": "aaa" } }), "check", "1.2.0").code).toBe(4);
+});
+test("an API error resolving the major tag is exit 1, not a partial release", () => {
+  expect(run(stable({ commitsApiError: true }), "check", "1.2.0").code).toBe(1);
 });
 test("backport (not newest published stable) ignores vX", () => {
   const w = stable({ stable: ["v1.3.0", "v1.2.0"], shas: { "v1.2.0": "aaa", v1: "ccc" } });
