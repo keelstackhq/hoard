@@ -2,14 +2,21 @@ name: release
 
 # Builds hoard for the five targets of spec §10, bakes their SHA-256 checksums into the action,
 # rebuilds action/dist, then commits, tags and publishes the GitHub release.
+# Starts when a push to main changes Cargo.toml (the merged version-bump PR) or by hand
+# (workflow_dispatch, fallback). The `detect` job decides whether v<Cargo.toml version> still
+# needs a release; every other job runs only then.
 # Only the publish job writes (commit, tags, release); it runs in the `release` environment, so it
-# waits for the owner's approval (org decision D-015). check and build need no approval.
+# always waits for the owner's approval. detect and build need no approval.
 on:
+  push:
+    branches: [main]
+    # A version bump always changes Cargo.toml; other merges never start a run.
+    paths: [Cargo.toml]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release, X.Y.Z or X.Y.Z-pre (must equal Cargo.toml)"
-        required: true
+        description: "Version to release, X.Y.Z or X.Y.Z-pre (must equal Cargo.toml; empty: Cargo.toml's)"
+        required: false
         type: string
       draft:
         description: "Create the GitHub release as a draft"
@@ -20,45 +27,65 @@ on:
 permissions:
   contents: read
 
+# One release at a time. A run queued behind another starts only after it ends, and its detect
+# job then sees the tag the first run created, so a version is never released twice.
 concurrency:
   group: release
   cancel-in-progress: false
 
-env:
-  VERSION: ${{ inputs.version }}
-
 jobs:
-  check:
+  detect:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      pending: ${{ steps.detect.outputs.pending }}
+      version: ${{ steps.detect.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Validate version input
+      - name: Detect pending release
+        id: detect
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "$GITHUB_REF_TYPE" != "branch" ]; then
             echo "::error::run this workflow from a branch (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); the release commit is pushed back to it"
             exit 1
           fi
-          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::version '$VERSION' is not semver: use X.Y.Z or X.Y.Z-pre, without a leading v"
+          name=$(sed -n '/^\[package\]/,/^\[/{s/^name = "\(.*\)"$/\1/p}' Cargo.toml | head -n1)
+          version=$(sed -n '/^\[package\]/,/^\[/{s/^version = "\(.*\)"$/\1/p}' Cargo.toml | head -n1)
+          if [ "$name" != "keel-hoard" ]; then
+            echo "::error::Cargo.toml package is '$name', expected keel-hoard"
             exit 1
           fi
-          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
-          if [ "$cargo_version" != "$VERSION" ]; then
-            echo "::error::version input '$VERSION' does not match Cargo.toml version '$cargo_version': bump Cargo.toml (and Cargo.lock) on this branch first"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Cargo.toml version '$version' is not semver: use X.Y.Z or X.Y.Z-pre"
             exit 1
           fi
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" --silent 2>/dev/null; then
-            echo "::error::tag v$VERSION already exists: pick a new version"
+          if [ -n "$INPUT_VERSION" ] && [ "$INPUT_VERSION" != "$version" ]; then
+            echo "::error::version input '$INPUT_VERSION' does not match Cargo.toml version '$version': bump Cargo.toml (and Cargo.lock) on this branch first, or leave the input empty"
             exit 1
           fi
+          # Exact match: matching-refs is a prefix search (v1.0.0 also lists v1.0.0-rc.1).
+          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$version" -q '.[].ref')
+          if printf '%s\n' "$refs" | grep -Fxq "refs/tags/v$version"; then
+            pending=false
+            echo "tag v$version already exists: nothing to release"
+          else
+            pending=true
+            echo "tag v$version does not exist: release pending"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "pending=$pending" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: check
+    needs: detect
+    if: needs.detect.outputs.pending == 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -145,8 +172,11 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: build
+    needs: [detect, build]
+    if: needs.detect.outputs.pending == 'true'
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.detect.outputs.version }}
     # Required reviewers (the owner) and deployment branch `main` are set on this environment in
     # the repository settings; see docs/RELEASING.md.
     environment: release
@@ -159,29 +189,50 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      # Idempotent: if the tag appeared after detect ran (another run, or a hand-started release),
+      # every later step is skipped and the job ends green without touching anything.
+      - name: Skip if tag exists
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$VERSION" -q '.[].ref')
+          if printf '%s\n' "$refs" | grep -Fxq "refs/tags/v$VERSION"; then
+            echo "::notice::tag v$VERSION already exists: nothing to publish"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.guard.outputs.exists != 'true'
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.28.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - if: steps.guard.outputs.exists != 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - if: steps.guard.outputs.exists != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: hoard-*
           path: dist-assets
           merge-multiple: true
-      - name: Bake checksums
+      - if: steps.guard.outputs.exists != 'true'
+        name: Bake checksums
         run: |
           ls -l dist-assets
           node scripts/write-checksums.mjs dist-assets "$VERSION"
           cat action/src/checksums.generated.ts
-      - name: Build action
+      - if: steps.guard.outputs.exists != 'true'
+        name: Build action
         run: pnpm --dir action install --frozen-lockfile && pnpm --dir action build
       # The release commit's push does not trigger CI, so test the baked checksums here: a
       # failure stops the release before anything is committed, tagged or published.
-      - name: Test action (with the baked checksums)
+      - if: steps.guard.outputs.exists != 'true'
+        name: Test action (with the baked checksums)
         run: pnpm --dir action test
-      - name: Check action/dist size
+      - if: steps.guard.outputs.exists != 'true'
+        name: Check action/dist size
         run: |
           size=$(du -sb action/dist | cut -f1)
           echo "action/dist is $size bytes (limit 204800)"
@@ -189,7 +240,8 @@ jobs:
             echo "::error::action/dist is $size bytes, over the 200 KB limit: trim dependencies or bundle settings in action/"
             exit 1
           fi
-      - name: Commit and tag
+      - if: steps.guard.outputs.exists != 'true'
+        name: Commit and tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -204,7 +256,8 @@ jobs:
           git commit -m "chore(release): v$VERSION"
           git tag -a "v$VERSION" -m "v$VERSION"
           git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/v$VERSION"
-      - name: Create release
+      - if: steps.guard.outputs.exists != 'true'
+        name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           DRAFT: ${{ inputs.draft }}
@@ -214,7 +267,8 @@ jobs:
           case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
           gh release create "v$VERSION" dist-assets/hoard-*.tar.gz \
             --verify-tag --title "v$VERSION" --generate-notes "${flags[@]}"
-      - name: Verify release assets
+      - if: steps.guard.outputs.exists != 'true'
+        name: Verify release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -229,7 +283,8 @@ jobs:
       # `uses: …@v1` picks up this release: only for stable, non-draft releases, and only forward
       # (a backport release below the newest v<major>.* stable tag leaves it alone). This is the
       # only tag ever force-pushed.
-      - name: Move major tag
+      - if: steps.guard.outputs.exists != 'true'
+        name: Move major tag
         env:
           DRAFT: ${{ inputs.draft }}
           GH_TOKEN: ${{ github.token }}

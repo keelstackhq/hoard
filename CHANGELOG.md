@@ -2,6 +2,10 @@
 
 Newest first. The version in `Cargo.toml` is the last release; "Unreleased" ships as the next minor.
 
+## Unreleased
+
+- Releases start when the version-bump PR is merged to `main` (the owner still approves the `release` environment). `workflow_dispatch` stays as a fallback and its `version` input is optional.
+
 ## 0.6.0 — 2026-11-14
 
 - **Breaking:** `--token` and `--r2-secret-access-key` are rejected. A secret on the command line

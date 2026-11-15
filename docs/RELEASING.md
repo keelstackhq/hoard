@@ -1,6 +1,6 @@
 # Releasing hoard
 
-Releases are made by `.github/workflows/release.yml` (spec §10). It builds the five targets, bakes
+Releases are made by `.github/workflows/release.yml` (spec §10). It detects a pending version, builds the five targets, bakes
 their SHA-256 checksums into `action/src/checksums.generated.ts`, rebuilds `action/dist/`, runs the
 action tests against them (the release push does not trigger CI), commits
 `chore(release): vX.Y.Z`, tags `vX.Y.Z`, creates the GitHub release with the five
@@ -8,30 +8,43 @@ action tests against them (the release push does not trigger CI), commits
 
 ## Run a release
 
-1. On the branch to release from (normally `main`), rename `Unreleased` in `CHANGELOG.md` to the
-   version, set `version = "X.Y.Z"` in `Cargo.toml`, run
-   `cargo update -p keel-hoard` so `Cargo.lock` agrees, commit and push.
-2. Start the workflow:
+A release starts when a version-bump PR is merged to `main`:
 
-   ```bash
-   gh workflow run release.yml --ref main -f version=X.Y.Z
-   gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')"
-   ```
-
-   Add `-f draft=true` for a draft release. A version with a suffix (`X.Y.Z-rc.1`) is published as
-   a pre-release.
-
-   The `check` and `build` jobs run at once. The `publish` job (commit, tags, GitHub release) runs
-   in the `release` environment and waits until the owner approves it in the run's page
-   (org decision D-015: agents never push tags or start releases).
-3. Check: `gh release view vX.Y.Z` lists five assets, and `git show vX.Y.Z:action/src/checksums.generated.ts`
+1. In a PR, rename `Unreleased` in `CHANGELOG.md` to the version, set `version = "X.Y.Z"` in
+   `Cargo.toml`, run `cargo update -p keel-hoard` so `Cargo.lock` agrees, and get it reviewed.
+2. Merge the PR to `main`. The push changes `Cargo.toml`, so `release.yml` starts. Its `detect` job
+   reads the version from `Cargo.toml` and checks the tag: if `vX.Y.Z` does not exist, the build
+   jobs run; if it exists, the run ends without doing anything. The merge must be done with a user
+   or app token: a merge made with the workflow `GITHUB_TOKEN` does not start workflows.
+3. The `publish` job (commit, tags, GitHub release) runs in the `release` environment and waits
+   until the owner approves it in the run's page. Nothing is published before that approval.
+4. Check: `gh release view vX.Y.Z` lists five assets, and `git show vX.Y.Z:action/src/checksums.generated.ts`
    has `VERSION = "X.Y.Z"`.
-4. After the tag exists, move the previous version pins in `skills/hoard/SKILL.md`, `docs/circleci.md`,
+5. After the tag exists, move the previous version pins in `skills/hoard/SKILL.md`, `docs/circleci.md`,
    `README.md` and the `scripts/install.sh` examples to the new version, in a follow-up PR.
 
-The workflow refuses to start when the version is not semver, does not equal `Cargo.toml`, or the
-tag `vX.Y.Z` already exists. It pushes back to the branch it was started from, so that branch must
-accept pushes from `github-actions[bot]`.
+Only a change to `Cargo.toml` on `main` starts a run, and a version is released once: the `detect`
+job and the `publish` job both skip a version whose tag exists, and runs queue one at a time
+(`concurrency: release`). The release commit pushed by the workflow uses `GITHUB_TOKEN`, so it
+does not start another run.
+
+### Fallback: start by hand
+
+If a release did not start (a failed run to retry, a branch other than `main`):
+
+```bash
+gh workflow run release.yml --ref main            # version of Cargo.toml
+gh workflow run release.yml --ref main -f version=X.Y.Z   # must equal Cargo.toml
+gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+```
+
+Add `-f draft=true` for a draft release. A version with a suffix (`X.Y.Z-rc.1`) is published as a
+pre-release. The `version` input is optional; if given, it must equal `Cargo.toml`. A push run is
+never a draft.
+
+The workflow refuses to start when `Cargo.toml` has no semver version or the input differs from it.
+It pushes back to the branch it was started from, so that branch must accept pushes from
+`github-actions[bot]`.
 
 ## The `release` environment
 
@@ -72,4 +85,5 @@ git pull && git revert --no-edit <sha of "chore(release): vX.Y.Z"> && git push
 ```
 
 Reverting restores the previous `checksums.generated.ts` and `action/dist/`. Then
-start the workflow again with the same version.
+start the workflow by hand again (the fallback above); a push run does not repeat a version whose
+tag was deleted unless `Cargo.toml` changes again.

@@ -639,8 +639,11 @@ child is not affected.
 Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`,
 `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
 
-Release (`.github/workflows/release.yml`, `workflow_dispatch` with `version` and `draft`; see
-`docs/RELEASING.md`): build the five targets, then, in the `publish` job that runs in the
+Release (`.github/workflows/release.yml`; see `docs/RELEASING.md`). It starts on a push to `main`
+that changes `Cargo.toml` (the merged version-bump PR), or by `workflow_dispatch` with optional
+`version` (must equal `Cargo.toml`) and `draft`. A secret-free `detect` job reads the version and
+sets `pending` only if tag `vX.Y.Z` does not exist; `publish` re-checks the tag, so a version is
+released once. If pending: build the five targets, then, in the `publish` job that runs in the
 `release` environment and waits for the owner's approval, write the checksums file, rebuild `dist/`, run the
 action tests (the bot's push does not trigger CI), commit
 `chore(release): vX.Y.Z` and push it with tag `vX.Y.Z` → create the GitHub release → verify it has

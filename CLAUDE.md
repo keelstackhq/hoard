@@ -89,6 +89,8 @@ commit. Run the e2e script before pushing anything that touches `server/`, `stor
 - R2 lifecycle age counts from the last write, not the last read.
 - OpenDAL ignores `if_not_exists` unless the service reports `write_with_if_not_exists`; fall back
   to `stat` first.
+- A release starts when a version-bump PR (Cargo.toml) merges to `main`; the owner approves the
+  `release` environment. `workflow_dispatch` is the fallback. Never tag or publish by hand.
 - Vite+ remote caching is unreleased upstream; until it ships we only save/restore its
   task-cache directory.
 
