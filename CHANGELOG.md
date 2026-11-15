@@ -2,7 +2,7 @@
 
 Newest first. The version in `Cargo.toml` is the last release; "Unreleased" ships as the next minor.
 
-## Unreleased (0.6.0)
+## 0.6.0 — 2026-11-14
 
 - **Breaking:** `--token` and `--r2-secret-access-key` are rejected. A secret on the command line
   is visible to other processes. Set `HOARD_TOKEN` and `HOARD_R2_SECRET_ACCESS_KEY` instead. The
