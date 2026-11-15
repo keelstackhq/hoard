@@ -26,6 +26,8 @@ action tests against them (the release push does not trigger CI), commits
    (org decision D-015: agents never push tags or start releases).
 3. Check: `gh release view vX.Y.Z` lists five assets, and `git show vX.Y.Z:action/src/checksums.generated.ts`
    has `VERSION = "X.Y.Z"`.
+4. After the tag exists, move the previous version pins in `skills/hoard/SKILL.md`, `docs/circleci.md`,
+   `README.md` and the `scripts/install.sh` examples to the new version, in a follow-up PR.
 
 The workflow refuses to start when the version is not semver, does not equal `Cargo.toml`, or the
 tag `vX.Y.Z` already exists. It pushes back to the branch it was started from, so that branch must
