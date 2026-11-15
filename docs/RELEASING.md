@@ -2,8 +2,8 @@
 
 Releases are made by `.github/workflows/release.yml` (spec §10). It detects a pending version, builds the five targets, bakes
 their SHA-256 checksums into `action/src/checksums.generated.ts`, rebuilds `action/dist/`, runs the
-action tests against them (the release push does not trigger CI), commits
-`chore(release): vX.Y.Z`, tags `vX.Y.Z`, creates the GitHub release with the five
+action tests against them, commits `chore(release): vX.Y.Z` on the merged commit, tags that commit
+`vX.Y.Z` and pushes **only the tag** (never `main`), creates the GitHub release with the five
 `hoard-<target>.tar.gz` assets, verifies them, and only then moves the major tag `vX`.
 
 ## Run a release
@@ -16,27 +16,30 @@ A release starts when a version-bump PR is merged to `main`:
    reads the version from `Cargo.toml` and checks the tag: if `vX.Y.Z` does not exist, the build
    jobs run; if it exists, the run ends without doing anything. The merge must be done with a user
    or app token: a merge made with the workflow `GITHUB_TOKEN` does not start workflows.
-3. The `publish` job (commit, tags, GitHub release) runs in the `release` environment and waits
+3. The `publish` job (release commit, tags, GitHub release) runs in the `release` environment and waits
    until the owner approves it in the run's page. Nothing is published before that approval.
 4. Check: `gh release view vX.Y.Z` lists five assets, and `git show vX.Y.Z:action/src/checksums.generated.ts`
    has `VERSION = "X.Y.Z"`.
 5. After the tag exists, move the previous version pins in `skills/hoard/SKILL.md`, `docs/circleci.md`,
    `README.md` and the `scripts/install.sh` examples to the new version, in a follow-up PR.
 
-While a release waits for approval, do not merge anything else to `main`: the publish job pushes
-the release commit to `main` and fails (nothing is committed or tagged) if `main` moved. If that
-happens, start the fallback below. Any later change to `Cargo.toml` (even a dependency bump) also
-starts a run for a version that has no tag yet, for example after a failed release. The owner
-approval still applies.
+The release commit (baked checksums and rebuilt `action/dist/`) is reachable only from the tag.
+`main` keeps the previous checksums and `dist/`, which is fine: users consume `@vX.Y.Z` or `@vX`, and
+`main`'s own CI and self-test use the checkout's `dist/` and a published binary of the baked
+version. So merging to `main` while a release waits for approval is safe, and the workflow needs no
+branch-protection bypass. Any later change to `Cargo.toml` (even a dependency bump) also starts a
+run for a version that has no tag yet, for example after a failed release. The owner approval
+still applies.
 
 Only a change to `Cargo.toml` on `main` starts a run, and a version is released once: the `detect`
-job and the `publish` job both skip a version whose tag exists, and runs queue one at a time
-(`concurrency: release`). The release commit pushed by the workflow uses `GITHUB_TOKEN`, so it
-does not start another run.
+job and the `publish` job both skip a version whose tag **and** release exist, and runs queue
+one at a time (`concurrency: release`). A tag without a release is a partial failure: `publish`
+fails with an error (see "Cleanup after a partial failure"), it never ends green. The workflow
+pushes tags only, which start no run.
 
 ### Fallback: start by hand
 
-If a release did not start (a failed run to retry, a branch other than `main`):
+If a release did not start (for example after the cleanup below):
 
 ```bash
 gh workflow run release.yml --ref main            # version of Cargo.toml
@@ -49,15 +52,13 @@ pre-release. The `version` input is optional; if given, it must equal `Cargo.tom
 never a draft.
 
 The workflow refuses to start when `Cargo.toml` has no semver version or the input differs from it.
-It pushes back to the branch it was started from, so that branch must accept pushes from
-`github-actions[bot]`.
+The `publish` job needs only to push tags (`contents: write`).
 
 ## The `release` environment
 
 Settings → Environments → `release` must have **Required reviewers** = the owner and
 **Deployment branches** = `main`. GitHub creates a missing environment on first use with no
-protection, so confirm it exists before a release. With the branch rule, a release from any branch
-other than `main` (for example a backport branch) needs that branch added to the rule first.
+protection, so confirm it exists before a release.
 
 ## The major tag `vX`
 
@@ -78,18 +79,16 @@ Do this only when `vX.Y.Z` is the newest stable `vX.*` release.
 
 ## Cleanup after a partial failure
 
-If the workflow fails **before** "Commit and tag", nothing was published: fix and re-run.
+If the workflow fails **before** "Commit and tag (tag only)", nothing was published: fix and re-run.
 
-If it fails **after** pushing the commit and tag (release missing, or "Verify release assets"
-failed), `vX` was not moved, so users are unaffected. Remove the partial release, then re-run:
+If it fails **after** pushing the tag (release missing, or "Verify release assets" failed), `vX` was
+not moved, so users are unaffected, and `main` was never touched. A re-run stops with an error
+until you remove the partial release and its tag:
 
 ```bash
-gh release delete vX.Y.Z --yes || true          # if the release was created
-git push origin :refs/tags/vX.Y.Z               # delete the remote tag
-git tag -d vX.Y.Z 2>/dev/null || true
-git pull && git revert --no-edit <sha of "chore(release): vX.Y.Z"> && git push
+gh release delete vX.Y.Z --yes --cleanup-tag || git push origin :refs/tags/vX.Y.Z
 ```
 
-Reverting restores the previous `checksums.generated.ts` and `action/dist/`. Then
-start the workflow by hand again (the fallback above); a push run does not repeat a version whose
-tag was deleted unless `Cargo.toml` changes again.
+(`--cleanup-tag` also deletes the tag; if no release exists, the second command deletes the tag.)
+Then start the workflow by hand again (the fallback above); a push run does not repeat a version
+unless `Cargo.toml` changes again.

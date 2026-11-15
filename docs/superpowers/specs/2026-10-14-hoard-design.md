@@ -642,11 +642,13 @@ Targets: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-appl
 Release (`.github/workflows/release.yml`; see `docs/RELEASING.md`). It starts on a push to `main`
 that changes `Cargo.toml` (the merged version-bump PR), or by `workflow_dispatch` with optional
 `version` (must equal `Cargo.toml`) and `draft`. A secret-free `detect` job reads the version and
-sets `pending` only if tag `vX.Y.Z` does not exist; `publish` re-checks the tag, so a version is
-released once. If pending: build the five targets, then, in the `publish` job that runs in the
+sets `pending` unless tag `vX.Y.Z` and its release both exist; `publish` re-checks with a write
+token: tag and release exist → skip (green); tag without a release → fail with the cleanup
+steps (never silent green); so a version is released once. If pending: build the five targets, then, in the `publish` job that runs in the
 `release` environment and waits for the owner's approval, write the checksums file, rebuild `dist/`, run the
-action tests (the bot's push does not trigger CI), commit
-`chore(release): vX.Y.Z` and push it with tag `vX.Y.Z` → create the GitHub release → verify it has
+action tests, commit `chore(release): vX.Y.Z` on the merged commit and push **only** tag `vX.Y.Z`
+(never `main`: the commit is reachable from the tag alone, `main` keeps the previous checksums and
+`dist/`, merges to `main` meanwhile are harmless, no branch-protection bypass) → create the GitHub release → verify it has
 exactly the five assets → only then move `vX` to it. `vX` moves only for stable, non-draft releases
 and only forward (never below the newest stable `vX.*` tag, so a backport leaves it alone).
 hoard stays 0.x (users pin `@v0`) until artifact packing lands; 1.0 and the `v1` tag follow it.

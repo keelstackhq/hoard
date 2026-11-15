@@ -4,7 +4,7 @@ Newest first. The version in `Cargo.toml` is the last release; "Unreleased" ship
 
 ## Unreleased
 
-- Releases start when the version-bump PR is merged to `main` (the owner still approves the `release` environment). `workflow_dispatch` stays as a fallback and its `version` input is optional.
+- Releases start when the version-bump PR is merged to `main` (the owner still approves the `release` environment). `workflow_dispatch` stays as a fallback and its `version` input is optional. The release commit (checksums, `action/dist`) is now reachable only from the `vX.Y.Z` tag: the workflow pushes tags, never `main`, so merging meanwhile is safe and no branch-protection bypass is needed. A tag without a release (partial failure) fails the run instead of ending green.
 
 ## 0.6.0 — 2026-11-14
 

@@ -1,12 +1,15 @@
 name: release
 
 # Builds hoard for the five targets of spec §10, bakes their SHA-256 checksums into the action,
-# rebuilds action/dist, then commits, tags and publishes the GitHub release.
+# rebuilds action/dist, then commits (on the tag only), tags and publishes the GitHub release.
 # Starts when a push to main changes Cargo.toml (the merged version-bump PR) or by hand
 # (workflow_dispatch, fallback). The `detect` job decides whether v<Cargo.toml version> still
 # needs a release; every other job runs only then.
-# Only the publish job writes (commit, tags, release); it runs in the `release` environment, so it
-# always waits for the owner's approval. detect and build need no approval.
+# Only the publish job writes (tags, release); it runs in the `release` environment, so it always
+# waits for the owner's approval. detect and build need no approval.
+# The release commit (baked checksums + rebuilt action/dist) sits on github.sha and is reachable
+# only from the tag: main is never pushed to, so merges to main while a release waits are harmless
+# and no branch-protection bypass is needed. main keeps the previous checksums and dist.
 on:
   push:
     branches: [main]
@@ -56,7 +59,7 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "$GITHUB_REF_TYPE" != "branch" ]; then
-            echo "::error::run this workflow from a branch (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); the release commit is pushed back to it"
+            echo "::error::run this workflow from a branch (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); the release environment only allows main"
             exit 1
           fi
           name=$(sed -n '/^\[package\]/,/^\[/{s/^name = "\(.*\)"$/\1/p}' Cargo.toml | head -n1)
@@ -76,8 +79,16 @@ jobs:
           # Exact match: matching-refs is a prefix search (v1.0.0 also lists v1.0.0-rc.1).
           refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$version" --paginate -q '.[].ref')
           if printf '%s\n' "$refs" | grep -Fxq "refs/tags/v$version"; then
-            pending=false
-            echo "tag v$version already exists: nothing to release"
+            # A tag alone is not a release: a failed run can leave the tag without its release.
+            # This job has a read-only token and cannot see drafts, so "no release visible" stays
+            # pending; the publish job (write token) decides: skip, or fail with cleanup steps.
+            if gh release view "v$version" >/dev/null 2>&1; then
+              pending=false
+              echo "tag and release v$version already exist: nothing to release"
+            else
+              pending=true
+              echo "::warning::tag v$version exists but no release is visible: publish will check it"
+            fi
           else
             pending=true
             echo "tag v$version does not exist: release pending"
@@ -191,19 +202,23 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      # Idempotent: if the tag appeared after detect ran (another run, or a hand-started release),
-      # every later step is skipped and the job ends green without touching anything.
-      - name: Skip if tag exists
+      # Idempotent, never silently green: if the tag exists AND its release exists (a finished or
+      # draft release, or another run won), every later step is skipped and the job ends green. A
+      # tag without a release is a partial failure: fail, so nobody mistakes it for a release.
+      - name: Skip if released
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$VERSION" --paginate -q '.[].ref')
-          if printf '%s\n' "$refs" | grep -Fxq "refs/tags/v$VERSION"; then
-            echo "::notice::tag v$VERSION already exists: nothing to publish"
+          if ! printf '%s\n' "$refs" | grep -Fxq "refs/tags/v$VERSION"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          elif gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::notice::tag and release v$VERSION already exist: nothing to publish"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::error::tag v$VERSION exists but it has no GitHub release (a partial failure of an earlier run). Nothing was published. Follow 'Cleanup after a partial failure' in docs/RELEASING.md (delete the tag), then run the release again"
+            exit 1
           fi
       - if: steps.guard.outputs.exists != 'true'
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
@@ -228,7 +243,7 @@ jobs:
       - if: steps.guard.outputs.exists != 'true'
         name: Build action
         run: pnpm --dir action install --frozen-lockfile && pnpm --dir action build
-      # The release commit's push does not trigger CI, so test the baked checksums here: a
+      # The release commit is only reachable from the tag and runs no CI, so test the baked checksums here: a
       # failure stops the release before anything is committed, tagged or published.
       - if: steps.guard.outputs.exists != 'true'
         name: Test action (with the baked checksums)
@@ -243,7 +258,7 @@ jobs:
             exit 1
           fi
       - if: steps.guard.outputs.exists != 'true'
-        name: Commit and tag
+        name: Commit and tag (tag only)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -257,7 +272,8 @@ jobs:
           git add action/src/checksums.generated.ts action/dist
           git commit -m "chore(release): v$VERSION"
           git tag -a "v$VERSION" -m "v$VERSION"
-          git push --atomic origin "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/v$VERSION"
+          # Only the tag: never main. A plain (non-forced) push fails if the tag already exists.
+          git push origin "refs/tags/v$VERSION"
       - if: steps.guard.outputs.exists != 'true'
         name: Create release
         env:
