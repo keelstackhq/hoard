@@ -23,6 +23,12 @@ A release starts when a version-bump PR is merged to `main`:
 5. After the tag exists, move the previous version pins in `skills/hoard/SKILL.md`, `docs/circleci.md`,
    `README.md` and the `scripts/install.sh` examples to the new version, in a follow-up PR.
 
+While a release waits for approval, do not merge anything else to `main`: the publish job pushes
+the release commit to `main` and fails (nothing is committed or tagged) if `main` moved. If that
+happens, start the fallback below. Any later change to `Cargo.toml` (even a dependency bump) also
+starts a run for a version that has no tag yet, for example after a failed release. The owner
+approval still applies.
+
 Only a change to `Cargo.toml` on `main` starts a run, and a version is released once: the `detect`
 job and the `publish` job both skip a version whose tag exists, and runs queue one at a time
 (`concurrency: release`). The release commit pushed by the workflow uses `GITHUB_TOKEN`, so it
