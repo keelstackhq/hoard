@@ -79,14 +79,22 @@ jobs:
             exit 1
           fi
           # Done only when the shared check passes (tag, five assets, major tag): see
-          # scripts/release-complete.sh. Anything else stays pending and publish decides: finish
+          # scripts/release-complete.sh. A partial release (exit 4) fails here; anything else stays pending and publish decides: finish
           # the work, or fail with the cleanup steps. This job's read-only token cannot see drafts.
           if out=$(bash scripts/release-complete.sh check "$version"); then
             pending=false
             echo "nothing to release: $out"
           else
+            rc=$?
+            # 4 = a visible release that is wrong (assets, major tag): fail now, before any build
+            # or approval. 1 (API error), 3 (no tag) and 5 (tag, no visible release: maybe a
+            # draft, which this read-only token cannot see) stay pending; publish decides.
+            if [ "$rc" = 4 ]; then
+              echo "::error::$out. Follow 'Cleanup after a partial failure' in docs/RELEASING.md; nothing was built or published"
+              exit 1
+            fi
             pending=true
-            echo "release v$version pending: $out"
+            echo "release v$version pending (exit $rc): $out"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "pending=$pending" >> "$GITHUB_OUTPUT"
@@ -119,6 +127,15 @@ jobs:
             exe: .exe
             smoke: true
     runs-on: ${{ matrix.os }}
+    # sha256 of each tarball, so publish can compare it with the re-downloaded artifact. One
+    # static name per target (a matrix leg's output would overwrite the others'); a leg leaves
+    # the other four empty.
+    outputs:
+      sha_aarch64_apple_darwin: ${{ steps.sum.outputs.sha_aarch64_apple_darwin }}
+      sha_aarch64_unknown_linux_musl: ${{ steps.sum.outputs.sha_aarch64_unknown_linux_musl }}
+      sha_x86_64_apple_darwin: ${{ steps.sum.outputs.sha_x86_64_apple_darwin }}
+      sha_x86_64_pc_windows_msvc: ${{ steps.sum.outputs.sha_x86_64_pc_windows_msvc }}
+      sha_x86_64_unknown_linux_musl: ${{ steps.sum.outputs.sha_x86_64_unknown_linux_musl }}
     defaults:
       run:
         shell: bash
@@ -172,6 +189,15 @@ jobs:
           tar -czf "dist-assets/hoard-${{ matrix.target }}.tar.gz" \
             -C "target/${{ matrix.target }}/release" "hoard${{ matrix.exe }}"
           tar -tzf "dist-assets/hoard-${{ matrix.target }}.tar.gz"
+      - name: Export tarball sha256
+        id: sum
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          f="dist-assets/hoard-$TARGET.tar.gz"
+          sum=$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") | cut -d' ' -f1)
+          echo "$sum  $f"
+          echo "sha_${TARGET//-/_}=$sum" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hoard-${{ matrix.target }}
@@ -272,7 +298,7 @@ jobs:
             if [ "$rc" = 3 ]; then
               echo "exists=false" >> "$GITHUB_OUTPUT"
             else
-              echo "::error::$out. Nothing more was published. Follow 'Cleanup after a partial failure' in docs/RELEASING.md"
+              echo "::error::$out (exit $rc: 1 = API error, retry the run; 4 or 5 = partial release). Nothing more was published. Follow 'Cleanup after a partial failure' in docs/RELEASING.md"
               exit 1
             fi
           fi
@@ -295,8 +321,12 @@ jobs:
       # here from the release assets, and the bundle must hold only regular files in two places.
       - if: steps.guard.outputs.exists != 'true'
         name: Verify action bundle
+        env:
+          BUILD_OUTPUTS: ${{ toJSON(needs.build.outputs) }}
         run: |
           ls -l dist-assets
+          # The re-downloaded tarballs must be the ones the build legs hashed.
+          bash scripts/verify-build-shas.sh dist-assets
           if [ "$(find release-bundle -mindepth 1 -maxdepth 1 | wc -l)" -ne 2 ] \
             || [ -n "$(find release-bundle ! -type f ! -type d)" ]; then
             echo "::error::action-bundle must hold only dist/ and checksums.generated.ts, as regular files"

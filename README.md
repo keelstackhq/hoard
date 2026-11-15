@@ -55,8 +55,27 @@ What the step does:
 The cache never fails your build. If storage is down or slow, a read is a miss and an upload is
 skipped (with a warning, so a broken cache does not look like a cold one).
 
-Pin a release tag (`@v0` or `@v0.5.0`), not `@main` or a commit: each action release can only
+Pin a release tag (`@v0` or `@v0.6.0`), not `@main` or a commit: each action release can only
 run the hoard binary of that same release.
+
+## Add it to an existing repository
+
+Replace, do not stack: hoard becomes the only remote cache for the job.
+
+- **Existing `TURBO_TOKEN` / `TURBO_API` / `TURBO_TEAM`** (a Vercel or self-hosted cache): the step
+  replaces them for later steps and prints a notice. A step-level `env:` that sets them still wins
+  over the step's export, and so do `--api`, `--token` and `--team` flags in scripts: remove those
+  from the steps that run turbo. Job- and workflow-level `env:` is replaced. Keep the old
+  variables in jobs that must keep using the old cache (put them in a job without the hoard step).
+- **`actions/cache` of `.turbo` or `node_modules/.cache/turbo`**: remove it. It only duplicates
+  hoard and makes hits harder to read. Same for `actions/cache` of the Vite+ task-cache directory
+  ([Vite+](#vite)).
+- **`turbo.json`**: no change, unless it has `"remoteCache": {"enabled": false}` (remove it).
+  `turbo --force` and `--cache=local:rw` style flags bypass or limit the remote cache: drop them.
+- **Order**: checkout, setup-node, install, hoard, turbo. Run the workflow on `push` to `main` too,
+  so pull requests start warm ([branch scoping](#choose-a-storage)).
+- **Check**: run the workflow twice; the second job summary should show hits and turbo
+  `>>> FULL TURBO`. Misses on a new branch's first run are normal with `storage: github`.
 
 ## Choose a storage
 
@@ -263,7 +282,8 @@ Outputs are set in the post step, so only a later job can read them
 |---|---|
 | Every task is a cache miss on every run | Look at the job summary. `Uploaded 0` with `Upload errors: N`: storage refused the writes (see the warning in the log). `Misses` only on the first run of a branch is normal with `storage: github` (branch scoping); run the workflow on `push` to `main`. Also check that `turbo.json` does not disable `remoteCache` and that the task's `outputs` are declared. |
 | `hoard: N uploads failed` | The storage refused N uploads. The build still passed; the next run misses those tasks. The log line before it has the cause (credentials, bucket name, network). |
-| `GitHub cache throttled N uploads` | GitHub's cache rate limit (about 200 uploads per minute per repository). Reads continue; the skipped tasks are uploaded on a later run. A busy monorepo is a good fit for `storage: r2`. |
+| `GitHub cache throttled N uploads` | GitHub's cache rate limit (about 200 uploads per minute per repository). On a 429, uploads pause (for the `Retry-After` time, at most 10 minutes) and the skipped tasks are uploaded on a later run; reads continue. When the pause ends, uploads resume; another 429 pauses them again. A busy monorepo is a good fit for `storage: r2`. |
+| `storage reads keep failing: answering reads as misses for 30s` | The read breaker. After 3 read errors in a row (timeouts, 5xx; a miss is not an error) hoard answers reads as misses for 30 s without calling storage, then reads go to storage again as a probe: a hit or miss closes the breaker, and one more error reopens it at once. A dead backend costs a few slow requests, not one timeout per task. Writes are not affected. It covers unpacked reads (any storage with `pack` off, and `r2`); with `pack` on, reads are answered from the pack index and ranged pack reads, which the breaker does not gate. |
 | `hoard binary could not be downloaded …; continuing without the cache` | The runner could not reach the release asset in 90 s. The job runs without the remote cache. Check the runner's network or proxy. |
 | The step fails with a setup error | Bad input or missing R2 lifecycle rule with `r2-lifecycle: verify`. The message says how to fix it. These are the only cache errors that fail a job. |
 | `storage: r2` but the summary says `Storage: github` | The R2 inputs were empty (a fork pull request, or a secret name typo). See the warning in the summary. |
@@ -309,7 +329,7 @@ is ignored for `r2` (see [spec §6.5](docs/superpowers/specs/2026-10-14-hoard-de
 
 CircleCI has no GitHub cache: use `fs` or `r2`. [docs/circleci.md](docs/circleci.md) has a full
 `config.yml` (copy `circleci/hoard.yml` in as the `hoard` command; it installs a verified release,
-runs `serve --detach` and `stop`). Elsewhere: `HOARD_VERSION=0.5.0 sh scripts/install.sh`,
+runs `serve --detach` and `stop`). Elsewhere: `HOARD_VERSION=0.6.0 sh scripts/install.sh`,
 `hoard serve --detach`, `eval "$(hoard env)"`, build, `hoard stop`.
 Security: CircleCI caches are not branch-scoped, so pass `restore: false` on the default branch
 (its builds are cold with `fs`; `r2` keeps them warm).

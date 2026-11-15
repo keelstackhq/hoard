@@ -254,7 +254,7 @@ All backends go through one OpenDAL `Operator` (`services-ghac`, `services-s3`, 
   stalls the build. **Read breaker** (unpacked GET/HEAD/batch query): after 3 storage errors in a row (not
   misses), reads are answered as misses without touching the store for 30 s, then one read probes the
   backend again (a hit or miss closes the breaker). A dead backend therefore costs a few slow requests,
-  not one Turborepo request timeout per task. One warning is logged when it opens.
+  not one Turborepo request timeout per task. One warning is logged when it opens. With `pack` on, reads are answered from the pack index and ranged pack reads, which the breaker does not gate (each is bounded by the same time limits).
 
 ### 6.4 GitHub cache backend specifics
 

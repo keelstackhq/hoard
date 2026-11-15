@@ -27,6 +27,14 @@ Keep `pull_request` and also run the workflow on `push` to the default branch (`
 requests only start warm from what the default branch wrote. No `turbo.json` change; do not set
 `"remoteCache": {"enabled": false}`.
 
+## Existing repo
+
+Replace, do not stack. A set `TURBO_TOKEN`/`TURBO_API`/`TURBO_TEAM` (Vercel cache) is replaced
+for later steps, with a notice; a step-level `env:` or `--api/--token/--team` flags still win:
+remove them. Remove `actions/cache` of `.turbo`, `node_modules/.cache/turbo` and the Vite+
+task-cache dir, `--force`, and `remoteCache.enabled: false`. Other jobs without the step keep
+their old cache. README "Add it to an existing repository".
+
 ## Pick storage (`storage:`)
 
 - `github` (default): zero config. 10 GB/repo, about 200 uploads/min (packing keeps it under).
@@ -52,15 +60,16 @@ run should say `>>> FULL TURBO`. A re-run of the same commit counts as a second 
 | `could not be downloaded … continuing without the cache` | Runner cannot reach github.com release assets. Not fatal. |
 | Setup error (step fails) | The message names the fix: bad input, or R2 lifecycle rule missing with `r2-lifecycle: verify`. Run `hoard doctor` with `HOARD_R2_*` set. |
 | `storage: r2` but summary says `github` | R2 inputs empty: fork PR or secret name typo. |
+| `storage reads keep failing … misses for 30s` | Read breaker: 3 read errors in a row, then reads miss for 30 s and probe again. Storage is slow or down; the build is fine. Not applied to packed reads. |
 | Cargo-only repo | hoard does not cache cargo; use `Swatinem/rust-cache@v2`. |
 
 ## Other CI, local
 
 CircleCI has no GitHub cache: use `fs` or `r2`. Copy the command from
-`https://raw.githubusercontent.com/keelstackhq/hoard/v0.5.0/circleci/hoard.yml` under `commands:
-hoard:` in `.circleci/config.yml`, then call `hoard: {step: start, version: 0.5.0}` before turbo and
-`hoard: {step: stop, version: 0.5.0}` after (the token is generated; no env to set). Run `main` in a
-separate job with `start` given `restore: false` (cache poisoning; CircleCI only). Full config: `docs/circleci.md` beside that file. Elsewhere: `HOARD_VERSION=0.5.0 sh scripts/install.sh`,
+`https://raw.githubusercontent.com/keelstackhq/hoard/v0.6.0/circleci/hoard.yml` under `commands:
+hoard:` in `.circleci/config.yml`, then call `hoard: {step: start, version: 0.6.0}` before turbo and
+`hoard: {step: stop, version: 0.6.0}` after (the token is generated; no env to set). On `cimg/node` run `sudo corepack enable` before `pnpm install`. Run `main` in a
+separate job with `start` given `restore: false` (cache poisoning; CircleCI only). Full config: `docs/circleci.md` beside that file. Elsewhere: `HOARD_VERSION=0.6.0 sh scripts/install.sh`,
 `hoard serve --detach`, `eval "$(hoard env)"`, turbo, `hoard stop --summary markdown`.
 
 ## Rules
