@@ -1,8 +1,9 @@
 # Releasing hoard
 
 Releases are made by `.github/workflows/release.yml` (spec §10). It detects a pending version, builds the five targets, bakes
-their SHA-256 checksums into `action/src/checksums.generated.ts`, rebuilds `action/dist/`, runs the
-action tests against them, commits `chore(release): vX.Y.Z` on the merged commit, tags that commit
+their SHA-256 checksums into `action/src/checksums.generated.ts`, rebuilds `action/dist/` and runs the
+action tests against them (the `action` job, read-only token, no approval), then the `publish` job
+verifies that bundle, commits `chore(release): vX.Y.Z` on the merged commit, tags that commit
 `vX.Y.Z` and pushes **only the tag** (never `main`), creates the GitHub release with the five
 `hoard-<target>.tar.gz` assets, verifies them, and only then moves the major tag `vX`.
 
@@ -13,8 +14,9 @@ A release starts when a version-bump PR is merged to `main`:
 1. In a PR, rename `Unreleased` in `CHANGELOG.md` to the version, set `version = "X.Y.Z"` in
    `Cargo.toml`, run `cargo update -p keel-hoard` so `Cargo.lock` agrees, and get it reviewed.
 2. Merge the PR to `main`. The push changes `Cargo.toml`, so `release.yml` starts. Its `detect` job
-   reads the version from `Cargo.toml` and checks the tag: if `vX.Y.Z` does not exist, the build
-   jobs run; if it exists with a complete release, the run ends without doing anything (a tag without a release stays pending, and `publish` fails). The merge must be done with a user
+   reads the version from `Cargo.toml` and runs `scripts/release-complete.sh check`: only a complete
+   release (tag, the five assets, `vX` on it when it should be) ends the run without doing anything;
+   otherwise the build jobs run and `publish` finishes the work or fails (see below). The merge must be done with a user
    or app token: a merge made with the workflow `GITHUB_TOKEN` does not start workflows.
 3. The `publish` job (release commit, tags, GitHub release) runs in the `release` environment and waits
    until the owner approves it in the run's page. Nothing is published before that approval.
@@ -33,11 +35,17 @@ still applies. While a **draft** release exists, such a run builds all targets a
 approval, then `publish` skips (the detect job's token cannot see drafts).
 
 Only a change to `Cargo.toml` on `main` starts a run, and a version is released once: the `detect`
-job and the `publish` job both skip a version whose tag **and** complete release (five assets,
-`vX` on it when it should be) exist, and runs queue one at a time (`concurrency: release`). Any
+job and the `publish` job both call `scripts/release-complete.sh check` and skip a version only when
+it passes (tag, exactly the five assets, and `vX` on it when this is the newest published stable
+release; drafts are ignored when picking the newest). Runs queue one at a time (`concurrency: release`). Any
 other leftover (tag without a release, wrong assets, stale `vX`) is a partial failure: `publish`
 fails with an error (see "Cleanup after a partial failure"), it never ends green. The workflow
 pushes tags only, which start no run.
+
+A run waiting for approval holds the `release` concurrency group, so the next bump's run queues
+behind it and releases its own version afterwards. GitHub keeps only one queued run: if two more
+bumps merge while a run waits, the older queued run is replaced, its (middle) version is skipped and
+never released. Dispatch it (fallback below) if you need it.
 
 ### Fallback: start by hand
 

@@ -6,7 +6,9 @@ name: release
 # (workflow_dispatch, fallback). The `detect` job decides whether v<Cargo.toml version> still
 # needs a release; every other job runs only then.
 # Only the publish job writes (tags, release); it runs in the `release` environment, so it always
-# waits for the owner's approval. detect and build need no approval.
+# waits for the owner's approval. detect, build and action need no approval. The action job runs
+# the dependency code (pnpm install, build, test) with a read-only token and hands action/dist and
+# the checksums to publish as an artifact; publish runs no dependency code next to the write token.
 # The release commit (baked checksums + rebuilt action/dist) sits on github.sha and is reachable
 # only from the tag: main is never pushed to, so merges to main while a release waits are harmless
 # and no branch-protection bypass is needed. main keeps the previous checksums and dist.
@@ -76,22 +78,15 @@ jobs:
             echo "::error::version input '$INPUT_VERSION' does not match Cargo.toml version '$version': bump Cargo.toml (and Cargo.lock) on this branch first, or leave the input empty"
             exit 1
           fi
-          # Exact match: matching-refs is a prefix search (v1.0.0 also lists v1.0.0-rc.1).
-          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$version" --paginate -q '.[].ref')
-          if printf '%s\n' "$refs" | grep -Fxq "refs/tags/v$version"; then
-            # A tag alone is not a release: a failed run can leave the tag without its release.
-            # This job has a read-only token and cannot see drafts, so "no release visible" stays
-            # pending; the publish job (write token) decides: skip, or fail with cleanup steps.
-            if gh release view "v$version" >/dev/null 2>&1; then
-              pending=false
-              echo "tag and release v$version already exist: nothing to release"
-            else
-              pending=true
-              echo "::warning::tag v$version exists but no release is visible: publish will check it"
-            fi
+          # Done only when the shared check passes (tag, five assets, major tag): see
+          # scripts/release-complete.sh. Anything else stays pending and publish decides: finish
+          # the work, or fail with the cleanup steps. This job's read-only token cannot see drafts.
+          if out=$(bash scripts/release-complete.sh check "$version"); then
+            pending=false
+            echo "nothing to release: $out"
           else
             pending=true
-            echo "tag v$version does not exist: release pending"
+            echo "release v$version pending: $out"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "pending=$pending" >> "$GITHUB_OUTPUT"
@@ -184,8 +179,65 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
+  # Runs dependency code (pnpm install, build, test) with a read-only token and no stored
+  # credentials. Publish gets only its result, as an artifact.
+  action:
     needs: [detect, build]
+    if: needs.detect.outputs.pending == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: hoard-*
+          path: dist-assets
+          merge-multiple: true
+      - name: Bake checksums
+        run: |
+          ls -l dist-assets
+          node scripts/write-checksums.mjs dist-assets "$VERSION"
+          cat action/src/checksums.generated.ts
+      - name: Build action
+        run: pnpm --dir action install --frozen-lockfile && pnpm --dir action build
+      # The release commit is only reachable from the tag and runs no CI, so test the baked
+      # checksums here: a failure stops the release before anything is committed or published.
+      - name: Test action (with the baked checksums)
+        run: pnpm --dir action test
+      - name: Check action/dist size
+        run: |
+          size=$(du -sb action/dist | cut -f1)
+          echo "action/dist is $size bytes (limit 204800)"
+          if [ "$size" -gt 204800 ]; then
+            echo "::error::action/dist is $size bytes, over the 200 KB limit: trim dependencies or bundle settings in action/"
+            exit 1
+          fi
+      - name: Stage release bundle
+        run: |
+          mkdir release-bundle
+          cp -r action/dist release-bundle/dist
+          cp action/src/checksums.generated.ts release-bundle/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: action-bundle
+          path: release-bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [detect, build, action]
     if: needs.detect.outputs.pending == 'true'
     runs-on: ubuntu-latest
     env:
@@ -196,51 +248,34 @@ jobs:
     permissions:
       contents: write
     steps:
-      # No stored credentials: pnpm install/build/test below run dependency code, so the write
-      # token is passed only to the two git steps that push (as an http.extraheader via GIT_CONFIG_*).
+      # No stored credentials, and no dependency code runs in this job: the write token is passed
+      # only to the git steps that push (as an http.extraheader via GIT_CONFIG_*).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      # Idempotent, never silently green. Skip (green) only when the tag AND a complete release
-      # exist: five hoard-<target>.tar.gz assets and, for a stable non-draft newest version, a
-      # major tag on this release. Anything else that an earlier run left behind (tag without
-      # release, wrong assets, stale major tag) fails with the steps in docs/RELEASING.md.
+      # Idempotent, never silently green. Skip (green) only when scripts/release-complete.sh says
+      # the release is complete: tag, exactly five hoard-<target>.tar.gz assets and, for the
+      # newest stable release, a major tag on it. No tag: publish. Anything else an earlier run
+      # left behind (tag without release, wrong assets, stale major tag) fails with the steps in
+      # docs/RELEASING.md.
       - name: Skip if released
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          fail() { echo "::error::$1 Nothing more was published. Follow 'Cleanup after a partial failure' in docs/RELEASING.md"; exit 1; }
-          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$VERSION" --paginate -q '.[].ref')
-          if ! printf '%s\n' "$refs" | grep -Fxq "refs/tags/v$VERSION"; then
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          rel=$(gh release view "v$VERSION" --json isDraft,isPrerelease,assets \
-            -q '[.isDraft, .isPrerelease, ([.assets[].name | select(test("^hoard-.*[.]tar[.]gz$"))] | length)] | @tsv') \
-            || fail "tag v$VERSION exists but it has no GitHub release."
-          read -r draft pre assets <<< "$rel"
-          [ "$assets" = 5 ] || fail "release v$VERSION has $assets hoard-<target>.tar.gz assets, expected 5."
-          if [ "$draft" = true ] || [ "$pre" = true ]; then
-            echo "::notice::release v$VERSION exists (draft=$draft prerelease=$pre): nothing to publish"
+          if out=$(bash scripts/release-complete.sh check "$VERSION"); then
+            echo "::notice::$out: nothing to publish"
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          else
+            rc=$?
+            if [ "$rc" = 3 ]; then
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::$out. Nothing more was published. Follow 'Cleanup after a partial failure' in docs/RELEASING.md"
+              exit 1
+            fi
           fi
-          major="v${VERSION%%.*}"
-          newest=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$major." --paginate -q '.[].ref' \
-            | sed 's#refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
-          if [ "$newest" = "v$VERSION" ]; then
-            have=$(gh api "repos/$GITHUB_REPOSITORY/commits/$major" -q .sha 2>/dev/null || true)
-            want=$(gh api "repos/$GITHUB_REPOSITORY/commits/v$VERSION" -q .sha)
-            [ "$have" = "$want" ] || fail "release v$VERSION is complete but $major does not point to it."
-          fi
-          echo "::notice::tag and release v$VERSION already exist: nothing to publish"
-          echo "exists=true" >> "$GITHUB_OUTPUT"
-      - if: steps.guard.outputs.exists != 'true'
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 10.28.0
       - if: steps.guard.outputs.exists != 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -252,35 +287,36 @@ jobs:
           path: dist-assets
           merge-multiple: true
       - if: steps.guard.outputs.exists != 'true'
-        name: Bake checksums
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: action-bundle
+          path: release-bundle
+      # Trust nothing from the action job unchecked: the checksums must equal the ones computed
+      # here from the release assets, and the bundle must hold only regular files in two places.
+      - if: steps.guard.outputs.exists != 'true'
+        name: Verify action bundle
         run: |
           ls -l dist-assets
-          node scripts/write-checksums.mjs dist-assets "$VERSION"
-          cat action/src/checksums.generated.ts
-      - if: steps.guard.outputs.exists != 'true'
-        name: Build action
-        run: pnpm --dir action install --frozen-lockfile && pnpm --dir action build
-      # The release commit is only reachable from the tag and runs no CI, so test the baked checksums here: a
-      # failure stops the release before anything is committed, tagged or published.
-      - if: steps.guard.outputs.exists != 'true'
-        name: Test action (with the baked checksums)
-        run: pnpm --dir action test
-      - if: steps.guard.outputs.exists != 'true'
-        name: Check action/dist size
-        run: |
-          size=$(du -sb action/dist | cut -f1)
-          echo "action/dist is $size bytes (limit 204800)"
-          if [ "$size" -gt 204800 ]; then
-            echo "::error::action/dist is $size bytes, over the 200 KB limit: trim dependencies or bundle settings in action/"
+          if [ "$(find release-bundle -mindepth 1 -maxdepth 1 | wc -l)" -ne 2 ] \
+            || [ -n "$(find release-bundle ! -type f ! -type d)" ]; then
+            echo "::error::action-bundle must hold only dist/ and checksums.generated.ts, as regular files"
             exit 1
           fi
+          node scripts/write-checksums.mjs dist-assets "$VERSION"
+          diff action/src/checksums.generated.ts release-bundle/checksums.generated.ts \
+            || { echo "::error::action-bundle checksums differ from the release assets"; exit 1; }
+          size=$(du -sb release-bundle/dist | cut -f1)
+          echo "action/dist is $size bytes (limit 204800)"
+          [ "$size" -le 204800 ] || { echo "::error::action/dist is $size bytes, over the 200 KB limit"; exit 1; }
+          rm -rf action/dist
+          cp -r release-bundle/dist action/dist
       - if: steps.guard.outputs.exists != 'true'
         name: Commit and tag (tag only)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Push auth for this step's git commands only, via env (not argv); git >= 2.31.
-          # core.hooksPath: dependency scripts run earlier in this job and could plant a git hook.
+          # core.hooksPath: belt and braces, so a stray hook in the checkout never runs here.
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
           export GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
           basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
@@ -310,7 +346,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           expected=$(find dist-assets -maxdepth 1 -name 'hoard-*.tar.gz' -printf '%f\n' | sort)
-          actual=$(gh release view "v$VERSION" --json assets -q '.assets[].name' | grep -E '^hoard-.*\.tar\.gz$' | sort)
+          actual=$(gh release view "v$VERSION" --json assets -q '.assets[] | select(.state == "uploaded") | .name' | grep -E '^hoard-.*\.tar\.gz$' | sort)
           echo "$actual"
           if [ "$(echo "$expected" | wc -l)" -ne 5 ] || [ "$expected" != "$actual" ]; then
             echo "::error::release v$VERSION does not have exactly the five hoard-<target>.tar.gz assets; v-major tag not moved. See docs/RELEASING.md (cleanup after a partial failure)"
@@ -327,7 +363,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Push auth for this step's git commands only, via env (not argv); git >= 2.31.
-          # core.hooksPath: dependency scripts run earlier in this job and could plant a git hook.
+          # core.hooksPath: belt and braces, so a stray hook in the checkout never runs here.
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
           export GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
           basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
@@ -339,10 +375,13 @@ jobs:
             exit 0
           fi
           major="v${VERSION%%.*}"
-          newest=$(git ls-remote --tags --refs origin "refs/tags/$major.*" | sed 's#.*refs/tags/##' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
-          if [ "$newest" != "v$VERSION" ]; then
-            echo "newest stable $major.* tag is $newest, not v$VERSION: $major not moved (backport)"
+          # Same rule as the guard's check: newest published (non-draft) stable release.
+          newest=$(bash scripts/release-complete.sh newest-stable "$major")
+          # Skip only for a real backport: a published stable release strictly above this one. An
+          # empty or lagging release list must not leave the major tag stale (nothing re-checks).
+          top=$(printf '%s\n%s\n' "$newest" "v$VERSION" | sed '/^$/d' | sort -V | tail -n1)
+          if [ "$top" != "v$VERSION" ]; then
+            echo "newest stable release is $newest, above v$VERSION: $major not moved (backport)"
             exit 0
           fi
           git tag -f -a "$major" -m "$major -> v$VERSION" "v$VERSION^{commit}"
