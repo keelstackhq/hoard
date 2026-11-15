@@ -7,9 +7,10 @@
 # check exits 0 only when ALL hold: the tag exists; a release for it exists with exactly the five
 # hoard-<target>.tar.gz assets; and, if it is a stable non-draft release and the newest one of its
 # major, the major tag v<N> points at the release commit. Exit 3: the tag does not exist (nothing
-# was released yet). Exit 1: anything else (a partial release, or an API error); the reason is
-# printed on stdout. Needs gh, GH_TOKEN and GITHUB_REPOSITORY. A read-only token cannot see
-# drafts, so a draft counts as "no release" there (the caller treats that as still pending).
+# was released yet). Exit 4: a partial release (the release is visible but wrong: assets, or a
+# major tag that is missing or stale). Exit 5: the tag exists but no release is visible (a
+# read-only token cannot see drafts, so a draft looks like this too). Exit 1: an API error (the
+# state is unknown). The reason is printed on stdout. Needs gh, GH_TOKEN and GITHUB_REPOSITORY.
 set -euo pipefail
 
 repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}
@@ -29,11 +30,18 @@ check() {
   refs=$(gh api "repos/$repo/git/matching-refs/tags/v$version" --paginate -q '.[].ref') \
     || { echo "cannot list the tags of $repo"; return 1; }
   printf '%s\n' "$refs" | grep -Fxq "refs/tags/v$version" || { echo "tag v$version does not exist"; return 3; }
-  rel=$(gh release view "v$version" --json isDraft,isPrerelease,assets \
-    -q '[.isDraft, .isPrerelease, ([.assets[] | select(.state == "uploaded") | .name | select(test("^hoard-.*[.]tar[.]gz$"))] | sort | join(","))] | @tsv') \
-    || { echo "tag v$version exists but it has no visible GitHub release"; return 1; }
+  local err
+  err=$(mktemp)
+  if ! rel=$(gh release view "v$version" --json isDraft,isPrerelease,assets \
+    -q '[.isDraft, .isPrerelease, ([.assets[] | select(.state == "uploaded") | .name | select(test("^hoard-.*[.]tar[.]gz$"))] | sort | join(","))] | @tsv' 2>"$err"); then
+    if grep -qi "release not found" "$err"; then
+      rm -f "$err"; echo "tag v$version exists but it has no visible GitHub release (a draft is invisible to a read-only token)"; return 5
+    fi
+    echo "cannot read the release v$version: $(head -c 200 "$err" | tr '\n' ' ')"; rm -f "$err"; return 1
+  fi
+  rm -f "$err"
   IFS=$'\t' read -r draft pre assets <<< "$rel"
-  [ "$assets" = "$expected" ] || { echo "release v$version has assets [$assets], expected exactly the five hoard-<target>.tar.gz"; return 1; }
+  [ "$assets" = "$expected" ] || { echo "release v$version has assets [$assets], expected exactly the five hoard-<target>.tar.gz"; return 4; }
   if [ "$draft" = true ] || [ "$pre" = true ]; then
     echo "release v$version is complete (draft=$draft prerelease=$pre); the major tag is not moved for it"
     return 0
@@ -43,7 +51,7 @@ check() {
   if [ "$newest" = "v$version" ]; then
     have=$(gh api "repos/$repo/commits/$major" -q .sha 2>/dev/null || true)
     want=$(gh api "repos/$repo/commits/v$version" -q .sha) || { echo "cannot resolve tag v$version"; return 1; }
-    [ "$have" = "$want" ] || { echo "release v$version is the newest stable $major.* but $major does not point to it (${have:-missing})"; return 1; }
+    [ "$have" = "$want" ] || { echo "release v$version is the newest stable $major.* but $major does not point to it (${have:-missing})"; return 4; }
   fi
   echo "release v$version is complete"
 }

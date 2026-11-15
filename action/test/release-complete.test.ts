@@ -18,6 +18,8 @@ const FIVE = [
 interface World {
   refs?: string[]; // tags
   release?: string; // draft \t pre \t assets; absent: no visible release
+  releaseApiError?: boolean; // `gh release view` fails with an HTTP error, not "release not found"
+  refsApiError?: boolean;
   stable?: string[]; // published stable release tags
   shas?: Record<string, string>; // ref name -> commit
 }
@@ -29,9 +31,9 @@ function run(world: World, ...args: string[]) {
     gh,
     `#!/usr/bin/env bash
 case "$1 $2" in
-  "api repos/o/r/git/matching-refs/tags/"*) p=\${2#repos/o/r/git/matching-refs/tags/}
+  "api repos/o/r/git/matching-refs/tags/"*) ${world.refsApiError ? "echo 'HTTP 502' >&2; exit 1;;" : ""} p=\${2#repos/o/r/git/matching-refs/tags/}
     printf '%s\\n' ${shq((world.refs ?? []).map((t) => `refs/tags/${t}`))} | grep -F "refs/tags/$p" || true ;;
-  "release view") ${world.release === undefined ? "exit 1" : `printf '%s\\n' ${shq([world.release])}`} ;;
+  "release view") ${world.releaseApiError ? "echo 'HTTP 502: Bad Gateway' >&2; exit 1" : world.release === undefined ? "echo 'release not found' >&2; exit 1" : `printf '%s\\n' ${shq([world.release])}`} ;;
   "api repos/o/r/releases") printf '%s\\n' ${shq(world.stable ?? [])} ;;
   "api repos/o/r/commits/"*) n=\${2#repos/o/r/commits/}
     case "$n" in ${Object.entries(world.shas ?? {})
@@ -68,20 +70,30 @@ test("no tag: exit 3 (nothing released yet)", () => {
 test("prefix tag (v1.2.0-rc.1) is not the tag", () => {
   expect(run(stable({ refs: ["v1.2.0-rc.1"] }), "check", "1.2.0").code).toBe(3);
 });
-test("tag without release fails", () => {
-  expect(run(stable({ release: undefined }), "check", "1.2.0").code).toBe(1);
+// Exit codes: 3 no tag, 4 partial release (visible, wrong), 5 tag with no visible release
+// (a draft looks like this to a read-only token), 1 API error.
+test("tag without a visible release: exit 5, says so", () => {
+  const r = run(stable({ release: undefined }), "check", "1.2.0");
+  expect(r.code).toBe(5);
+  expect(r.out).toContain("no visible GitHub release");
+});
+test("API errors are exit 1, never mistaken for a partial release", () => {
+  const r = run(stable({ releaseApiError: true }), "check", "1.2.0");
+  expect(r.code).toBe(1);
+  expect(r.out).toContain("cannot read the release");
+  expect(run(stable({ refsApiError: true }), "check", "1.2.0").code).toBe(1);
 });
 test("missing, extra or wrong assets fail", () => {
   const four = FIVE.split(",").slice(1).join(",");
-  expect(run(stable({ release: `false\tfalse\t${four}` }), "check", "1.2.0").code).toBe(1);
-  expect(run(stable({ release: "false\tfalse\t" }), "check", "1.2.0").code).toBe(1);
+  expect(run(stable({ release: `false\tfalse\t${four}` }), "check", "1.2.0").code).toBe(4);
+  expect(run(stable({ release: "false\tfalse\t" }), "check", "1.2.0").code).toBe(4);
   expect(
     run(stable({ release: `false\tfalse\t${FIVE},hoard-x.tar.gz` }), "check", "1.2.0").code,
-  ).toBe(1);
+  ).toBe(4);
 });
-test("newest stable with stale or missing vX fails", () => {
-  expect(run(stable({ shas: { "v1.2.0": "aaa", v1: "bbb" } }), "check", "1.2.0").code).toBe(1);
-  expect(run(stable({ shas: { "v1.2.0": "aaa" } }), "check", "1.2.0").code).toBe(1);
+test("newest stable with stale or missing vX is partial (4)", () => {
+  expect(run(stable({ shas: { "v1.2.0": "aaa", v1: "bbb" } }), "check", "1.2.0").code).toBe(4);
+  expect(run(stable({ shas: { "v1.2.0": "aaa" } }), "check", "1.2.0").code).toBe(4);
 });
 test("backport (not newest published stable) ignores vX", () => {
   const w = stable({ stable: ["v1.3.0", "v1.2.0"], shas: { "v1.2.0": "aaa", v1: "ccc" } });
@@ -89,7 +101,7 @@ test("backport (not newest published stable) ignores vX", () => {
 });
 test("a draft newer release does not count as newest stable", () => {
   // the draft v1.3.0 is not in the published list, so v1.2.0 is the newest and vX must be on it
-  expect(run(stable({ shas: { "v1.2.0": "aaa", v1: "bbb" } }), "check", "1.2.0").code).toBe(1);
+  expect(run(stable({ shas: { "v1.2.0": "aaa", v1: "bbb" } }), "check", "1.2.0").code).toBe(4);
   expect(run(stable(), "newest-stable", "v1").out.trim()).toBe("v1.2.0");
 });
 test("draft or prerelease with five assets is complete; vX not needed", () => {

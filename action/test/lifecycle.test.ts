@@ -91,6 +91,27 @@ describe("main", () => {
     };
   }
 
+  test("tells the user when TURBO_API/TOKEN/TEAM were already set, without printing values", async () => {
+    const f = fakeCore();
+    const d = deps(f);
+    d.env.TURBO_API = "https://cache.example.test";
+    d.env.TURBO_TOKEN = "old-secret-value";
+    await runMain(d);
+    const notes = f.of("notice").map((n) => String(n[0]));
+    const n = notes.find((m) => m.includes("TURBO_API") && m.includes("TURBO_TOKEN"));
+    expect(n).toBeDefined();
+    expect(n).toContain("replaced");
+    expect(n).toContain("step-level `env:`"); // a step's own env: still wins over the export
+    expect(JSON.stringify(f.calls)).not.toContain("old-secret-value");
+    expect(JSON.stringify(f.calls)).not.toContain("cache.example.test");
+  });
+
+  test("no notice when no TURBO_* was set", async () => {
+    const f = fakeCore();
+    await runMain(deps(f));
+    expect(f.of("notice").some((n) => String(n[0]).includes("TURBO_"))).toBe(false);
+  });
+
   test("starts hoard, masks the token before exporting it, and saves state", async () => {
     const f = fakeCore({ storage: "r2", "r2-bucket": "b" }); // no secrets → github + warning
     const d = deps(f);

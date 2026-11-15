@@ -26,3 +26,31 @@ test("publish runs no dependency code; detect and publish share the completeness
   expect(detect).toContain("release-complete.sh check");
   expect(publish).toContain("release-complete.sh check");
 });
+
+const yml = () =>
+  readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
+
+test("detect fails early (before build) on a partial release, but not on an API error", () => {
+  const detect = yml().slice(yml().indexOf("\n  detect:"), yml().indexOf("\n  build:"));
+  expect(detect).toMatch(/rc=\$\?/);
+  expect(detect).toMatch(/\[ "\$rc" = 4 \]/); // partial: red, nothing built or approved
+  expect(detect).toContain("exit 1");
+  expect(detect).toContain("pending=true"); // rc 1 (API error), 3, 5: publish decides
+});
+
+test("build legs export their tarball sha256 as job outputs; publish compares them", () => {
+  const y = yml();
+  const build = y.slice(y.indexOf("\n  build:"), y.indexOf("\n  action:"));
+  const publish = y.slice(y.indexOf("\n  publish:"));
+  for (const t of [
+    "aarch64_apple_darwin",
+    "aarch64_unknown_linux_musl",
+    "x86_64_apple_darwin",
+    "x86_64_pc_windows_msvc",
+    "x86_64_unknown_linux_musl",
+  ]) {
+    expect(build).toContain(`sha_${t}: \${{ steps.sum.outputs.sha_${t} }}`);
+  }
+  expect(publish).toContain("toJSON(needs.build.outputs)");
+  expect(publish).toContain("scripts/verify-build-shas.sh");
+});

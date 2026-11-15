@@ -184,6 +184,14 @@ export async function runMain(d: MainDeps = mainDeps()): Promise<void> {
     if (!token) throw new Error(`hoard wrote an empty token file ${files.token}`);
 
     core.setSecret(token);
+    const preset = ["TURBO_API", "TURBO_TOKEN", "TURBO_TEAM"].filter((n) => env[n]);
+    if (preset.length > 0) {
+      core.notice(
+        `${preset.join(", ")} already set for this job (a Vercel or self-hosted cache?): replaced ` +
+          "by hoard for the later steps. A step-level `env:` that sets them still wins; remove it " +
+          "(and any --api/--token/--team flags) so turbo uses hoard.",
+      );
+    }
     core.exportVariable("TURBO_API", `http://127.0.0.1:${port}`);
     core.exportVariable("TURBO_TOKEN", token);
     core.exportVariable("TURBO_TEAM", "hoard");

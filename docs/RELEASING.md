@@ -89,6 +89,13 @@ Do this only when `vX.Y.Z` is the newest stable `vX.*` release.
 
 ## Cleanup after a partial failure
 
+A visible release that is wrong (not exactly five assets, or a missing or stale `vX`) makes the
+`detect` job fail red at once, before any build or approval. `release-complete.sh` exit codes: 0
+complete, 3 no tag, 4 partial (red), 5 tag but no visible release (a draft looks like this to the
+read-only `detect` token, so the run goes on and `publish` decides), 1 API error (re-run). The
+build legs also export each tarball's sha256 as job outputs; `publish` compares them with the
+re-downloaded artifacts (`scripts/verify-build-shas.sh`) and with the baked checksums.
+
 If the workflow fails **before** "Commit and tag (tag only)", nothing was published: fix and re-run.
 
 If it fails **after** pushing the tag (release missing or wrong, "Verify release assets" or
