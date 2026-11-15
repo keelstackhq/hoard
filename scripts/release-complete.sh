@@ -49,10 +49,11 @@ check() {
   major="v${version%%.*}"
   newest=$(newest_stable "$major") || { echo "cannot list the releases of $repo"; return 1; }
   if [ "$newest" = "v$version" ]; then
-    # A 404 means the major tag is missing (partial, 4); any other failure is an API error (1).
+    # A missing ref answers HTTP 404 or, for the commits endpoint, HTTP 422 "No commit found for
+    # SHA" (partial, 4); any other failure is an API error (1).
     err=$(mktemp)
     if have=$(gh api "repos/$repo/commits/$major" -q .sha 2>"$err"); then :
-    elif grep -q "404" "$err"; then have=
+    elif grep -Eq "HTTP 404|HTTP 422|No commit found" "$err"; then have=
     else echo "cannot resolve the major tag $major: $(head -c 200 "$err" | tr '\n' ' ')"; rm -f "$err"; return 1; fi
     rm -f "$err"
     want=$(gh api "repos/$repo/commits/v$version" -q .sha) || { echo "cannot resolve tag v$version"; return 1; }

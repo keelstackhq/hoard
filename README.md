@@ -70,8 +70,7 @@ Replace, do not stack: hoard becomes the only remote cache for the job.
 - **`actions/cache` of `.turbo` or `node_modules/.cache/turbo`**: remove it. It only duplicates
   hoard and makes hits harder to read. Same for `actions/cache` of the Vite+ task-cache directory
   ([Vite+](#vite)).
-- **`turbo.json`**: no change, unless it has `"remoteCache": {"enabled": false}` (remove it) or,
-  with `envMode: strict`, add `TURBO_API`, `TURBO_TOKEN` and `TURBO_TEAM` to `globalPassThroughEnv`.
+- **`turbo.json`**: no change, unless it has `"remoteCache": {"enabled": false}` (remove it).
   `turbo --force` and `--cache=local:rw` style flags bypass or limit the remote cache: drop them.
 - **Order**: checkout, setup-node, install, hoard, turbo. Run the workflow on `push` to `main` too,
   so pull requests start warm ([branch scoping](#choose-a-storage)).

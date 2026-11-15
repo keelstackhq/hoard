@@ -41,7 +41,7 @@ case "$1 $2" in
       world.shas ?? {},
     )
       .map(([k, v]) => `${k}) echo ${v} ;;`)
-      .join(" ")} *) echo "HTTP 404: Not Found" >&2; exit 1 ;; esac ;;
+      .join(" ")} *) echo "gh: No commit found for SHA: $n (HTTP 422)" >&2; exit 1 ;; esac ;;
   *) echo "unexpected gh $*" >&2; exit 99 ;;
 esac
 `,
@@ -97,6 +97,11 @@ test("missing, extra or wrong assets fail", () => {
 test("newest stable with stale or missing vX is partial (4)", () => {
   expect(run(stable({ shas: { "v1.2.0": "aaa", v1: "bbb" } }), "check", "1.2.0").code).toBe(4);
   expect(run(stable({ shas: { "v1.2.0": "aaa" } }), "check", "1.2.0").code).toBe(4);
+});
+test("a missing vX (real API: HTTP 422 No commit found) is partial, exit 4", () => {
+  const r = run(stable({ shas: { "v1.2.0": "aaa" } }), "check", "1.2.0");
+  expect(r.code).toBe(4);
+  expect(r.out).toContain("missing");
 });
 test("an API error resolving the major tag is exit 1, not a partial release", () => {
   expect(run(stable({ commitsApiError: true }), "check", "1.2.0").code).toBe(1);
