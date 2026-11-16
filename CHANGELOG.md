@@ -2,11 +2,10 @@
 
 Newest first. The version in `Cargo.toml` is the last release; "Unreleased" ships as the next minor.
 
-## Unreleased
+## 0.6.1 — 2026-11-16
 
 - The action prints a notice when `TURBO_API`, `TURBO_TOKEN` or `TURBO_TEAM` was already set (it replaces them) and says that a step-level `env:` or turbo flags still win. New README section "Add it to an existing repository"; pins moved to 0.6.0; the 429 pause and the read breaker (not applied to packed reads) are documented; CircleCI guide: corepack, existing turbo setup.
 - Release workflow: build legs export each tarball's sha256 and publish compares them with the re-downloaded files; detect fails before any build when `scripts/release-complete.sh` reports a partial release (exit 4), and the script tells an API error (1) from a tag with no visible release (5).
-
 - Releases start when the version-bump PR is merged to `main` (the owner still approves the `release` environment). `workflow_dispatch` stays as a fallback and its `version` input is optional. The release commit (checksums, `action/dist`) is now reachable only from the `vX.Y.Z` tag: the workflow pushes tags, never `main`, so merging meanwhile is safe and no branch-protection bypass is needed. A tag without a release (partial failure) fails the run instead of ending green.
 
 ## 0.6.0 — 2026-11-14
