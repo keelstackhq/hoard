@@ -55,7 +55,7 @@ What the step does:
 The cache never fails your build. If storage is down or slow, a read is a miss and an upload is
 skipped (with a warning, so a broken cache does not look like a cold one).
 
-Pin a release tag (`@v0` or `@v0.6.0`), not `@main` or a commit: each action release can only
+Pin a release tag (`@v0` or `@v0.6.1`), not `@main` or a commit: each action release can only
 run the hoard binary of that same release.
 
 ## Add it to an existing repository
@@ -329,7 +329,7 @@ is ignored for `r2` (see [spec §6.5](docs/superpowers/specs/2026-10-14-hoard-de
 
 CircleCI has no GitHub cache: use `fs` or `r2`. [docs/circleci.md](docs/circleci.md) has a full
 `config.yml` (copy `circleci/hoard.yml` in as the `hoard` command; it installs a verified release,
-runs `serve --detach` and `stop`). Elsewhere: `HOARD_VERSION=0.6.0 sh scripts/install.sh`,
+runs `serve --detach` and `stop`). Elsewhere: `HOARD_VERSION=0.6.1 sh scripts/install.sh`,
 `hoard serve --detach`, `eval "$(hoard env)"`, build, `hoard stop`.
 Security: CircleCI caches are not branch-scoped, so pass `restore: false` on the default branch
 (its builds are cold with `fs`; `r2` keeps them warm).
