@@ -2,6 +2,10 @@
 
 Newest first. The version in `Cargo.toml` is the last release; "Unreleased" ships as the next minor.
 
+## Unreleased
+
+- Docs: version pins (README, CircleCI guide, agent skill, `scripts/install.sh` examples) moved to 0.6.1.
+
 ## 0.6.1 — 2026-11-16
 
 - The action prints a notice when `TURBO_API`, `TURBO_TOKEN` or `TURBO_TEAM` was already set (it replaces them) and says that a step-level `env:` or turbo flags still win. New README section "Add it to an existing repository"; pins moved to 0.6.0; the 429 pause and the read breaker (not applied to packed reads) are documented; CircleCI guide: corepack, existing turbo setup.

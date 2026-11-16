@@ -5,7 +5,7 @@ append a log here. Keep this file at 40 lines or fewer.
 
 ## Status
 
-Updated 2026-11-15. Version **0.6.0** released (tag `v0.6.0`, `@v0`); `main` releases on version-bump merge (#35).
+Updated 2026-11-16. Version **0.6.1** released (tag `v0.6.1`, `@v0`); `main` releases on version-bump merge (#35).
 Plans 01-core-r2, 02-github-action, 03-vite-plus-throughput and 04-packing are complete and
 reviewed. Since then: standalone use outside GitHub Actions (`serve --detach`, `stop`,
 `scripts/install.sh`, `circleci/hoard.yml` with a `restore` parameter, 0.4.0-0.6.0) and a

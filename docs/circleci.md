@@ -6,7 +6,7 @@ own pinned download), `serve --detach` and `stop`. It is not an orb: copy its co
 `.circleci/config.yml` as the `hoard` command (the token is random per job; set nothing else):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/keelstackhq/hoard/v0.6.0/circleci/hoard.yml
+curl -fsSL https://raw.githubusercontent.com/keelstackhq/hoard/v0.6.1/circleci/hoard.yml
 ```
 
 ```yaml
@@ -21,18 +21,18 @@ jobs:
       - checkout
       - run: sudo corepack enable   # pnpm/yarn: see "Corepack" below
       - run: pnpm install --frozen-lockfile
-      - hoard: {step: start, version: 0.6.0}
+      - hoard: {step: start, version: 0.6.1}
       - run: pnpm turbo run build test
-      - hoard: {step: stop, version: 0.6.0}
+      - hoard: {step: stop, version: 0.6.1}
   build-main:        # main only: cold build, saves the cache (see Trust)
     docker: [{image: cimg/node:24.0}]
     steps:
       - checkout
       - run: sudo corepack enable
       - run: pnpm install --frozen-lockfile
-      - hoard: {step: start, version: 0.6.0, restore: false}
+      - hoard: {step: start, version: 0.6.1, restore: false}
       - run: pnpm turbo run build test
-      - hoard: {step: stop, version: 0.6.0}
+      - hoard: {step: stop, version: 0.6.1}
 workflows:
   ci:
     jobs:
@@ -108,5 +108,5 @@ builds and strict setups use `r2` with read-only tokens and the restricted read-
 
 ## Plain shell
 
-`HOARD_VERSION=0.6.0 sh scripts/install.sh`, `hoard serve --detach --storage fs --fs-root DIR`,
+`HOARD_VERSION=0.6.1 sh scripts/install.sh`, `hoard serve --detach --storage fs --fs-root DIR`,
 `eval "$(hoard env)"`, the build, and `hoard stop --summary markdown`.
