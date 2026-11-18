@@ -37,6 +37,7 @@ permissions:
 # one pending run per group: a newer pending run replaces an older one (it reads Cargo.toml from
 # its own commit, so the newest version still releases).
 concurrency:
+  # ci-minutes: allow concurrency publishing must never be cancelled mid-run; releases queue
   group: release
   cancel-in-progress: false
 

@@ -17,6 +17,7 @@ permissions:
   contents: read
 
 concurrency:
+  # ci-minutes: allow concurrency runs share one R2 bucket and must never be cancelled mid-run
   group: r2-checks
   cancel-in-progress: false
 
