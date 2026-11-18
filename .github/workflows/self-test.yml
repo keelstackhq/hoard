@@ -24,6 +24,7 @@ on:
       - tests/fixtures/**
       - .github/workflows/self-test.yml
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - action.yml
       - action/**
@@ -42,6 +43,7 @@ concurrency:
 
 jobs:
   warm:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: warm (${{ matrix.os }}, ${{ matrix.storage }}, ${{ matrix.binary }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -133,6 +135,7 @@ jobs:
         run: pnpm turbo run build
 
   hit:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: hit (${{ matrix.os }}, ${{ matrix.storage }}, ${{ matrix.binary }})
     needs: warm
     runs-on: ${{ matrix.os }}
@@ -231,6 +234,7 @@ jobs:
           }
 
   vp-warm:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: vp warm (ubuntu-latest, github, source)
     runs-on: ubuntu-latest
     defaults:
@@ -277,6 +281,7 @@ jobs:
         run: pnpm exec vp run hello
 
   vp-hit:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: vp hit (ubuntu-latest, github, source)
     needs: vp-warm
     runs-on: ubuntu-latest

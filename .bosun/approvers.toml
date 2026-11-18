@@ -1,0 +1,3 @@
+# Enrolled approval keys (spec §8). Add one `[[key]]` per approver:
+# id = "alice", ed25519 = "<base64 raw public key>", role = "owner" (or "delegate").
+# risk-check reads this file from the default branch.

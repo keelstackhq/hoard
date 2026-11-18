@@ -1,0 +1,5 @@
+# Owners decide high-risk PRs, questions and budget raises (spec §8). risk-check reads this file
+# from the PR's base branch. `github` is the login whose approval on the head SHA counts.
+
+[[owner]]
+github = "urbanisierung"

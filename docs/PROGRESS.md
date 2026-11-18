@@ -20,8 +20,6 @@ Release 1.0 and the `v1` tag wait for packing to run in real use.
 
 ## Blocked
 
-- **Required check (owner).** Add `ci-ok` as the required status check in `main`'s branch
-  protection. Not verifiable from this repository.
 - **Intermittent self-test miss (2026-10-22).** On PR #9 one of ten GitHub-cache `hit` legs missed
   one of two packed artifacts; the re-run and later runs passed. Cause unknown. hoard logs index
   loads and writes, and self-test prints the hoard log on a failed check. If it recurs, give that
@@ -30,6 +28,9 @@ Release 1.0 and the `v1` tag wait for packing to run in real use.
   only offline tests cover them.
 - **Org decision D-007 (workflow triggers).** Not in `docs/agents/org-decisions.md`. The trigger
   changes in this repo follow the task brief; check them against D-007 when the channel syncs.
+
+- **Required checks and bosun (owner).** Branch protection: `ci-ok`, `bosun-ok`, `risk-check`, `review-verdict`,
+  `main-open`. Also `bosun keygen --enroll`, setup snippet, `.bosun/registry`. Not verifiable here.
 
 ## Known limits
 

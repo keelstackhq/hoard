@@ -1,0 +1,23 @@
+# bosun's project config (spec §3). Unknown keys are an error. The bosun channel merges its
+# changes to this file key by key; your own values stay.
+project = "hoard"
+
+[[stack]]
+path = "."
+profile = "rust"
+
+[[stack]]
+path = "action"
+profile = "ts-pnpm"
+
+[review]
+# "subagent" (mode a): a fresh subagent reviews each PR (spec §7).
+mode = "subagent"
+
+[approvals]
+# Who may approve (spec §8); the pinned release must know this value.
+policy = "autonomous"
+
+
+[mode]
+name = "autonomous"
