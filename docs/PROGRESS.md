@@ -31,6 +31,10 @@ Release 1.0 and the `v1` tag wait for packing to run in real use.
 - **Org decision D-007 (workflow triggers).** Not in `docs/agents/org-decisions.md`. The trigger
   changes in this repo follow the task brief; check them against D-007 when the channel syncs.
 
+- **bosun setup (owner).** Merge the setup PR, then branch protection (add `bosun-ok`, `risk-check`,
+  `review-verdict`, `main-open` next to `ci-ok`), `bosun keygen --enroll`, cloud setup snippet, `.bosun/registry`.
+  `ci-minutes` still flags `release.yml`/`r2-checks.yml` (non-cancelling concurrency on purpose).
+
 ## Known limits
 
 - No free-space check before spooling write-behind uploads (std has none; no crate added).

@@ -1,0 +1,61 @@
+# Written by `bosun adopt`; `bosun uninstall` reads it. Edit by hand only to drop a file from adopt's care.
+bosun_version = "0.20.0"
+labels = ["bosun:halt", "bosun:registry", "bosun:state/planned", "bosun:state/ready", "bosun:state/claimed", "bosun:state/building", "bosun:state/review", "bosun:state/fixing", "bosun:state/queued", "bosun:state/merged", "bosun:state/blocked", "bosun:state/needs-human"]
+dirs = [".bosun", "governance"]
+registry_issue = 39
+
+[[file]]
+path = ".bosun/approvers.toml"
+hash = "1aa81a80dedb699c"
+
+[[file]]
+path = ".bosun/bosun.toml"
+hash = "026a61845e249a14"
+
+[[file]]
+path = ".bosun/fold-fragments.sh"
+hash = "37b5d6806c868533"
+
+[[file]]
+path = ".bosun/limits.toml"
+hash = "9fa8443885533d44"
+
+[[file]]
+path = ".bosun/risk.toml"
+hash = "7ed760b51d9ff509"
+
+[[file]]
+path = ".bosun/session-rules.toml"
+hash = "2490672ebd27e224"
+
+[[file]]
+path = ".bosun/version"
+hash = "096e006cc6e7ab8f"
+
+[[file]]
+path = ".github/workflows/bosun.yml"
+hash = "8934cf0abfa0168f"
+
+[[file]]
+path = ".github/workflows/main-health.yml"
+hash = "1c4a0f9b051cd1ad"
+
+[[file]]
+path = ".github/workflows/main-open.yml"
+hash = "bda5deede7a3cd89"
+
+[[file]]
+path = ".github/workflows/risk.yml"
+hash = "f3154bc07b350d73"
+
+[[file]]
+path = ".github/workflows/verdict.yml"
+hash = "050dceb41ed22449"
+
+[[file]]
+path = "docs/setup-script.sh"
+hash = "7fb441f4f2fc3660"
+
+[[file]]
+path = "governance/owners.toml"
+hash = "38f9216643218e61"
