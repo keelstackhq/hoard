@@ -16,3 +16,11 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
+
+[advisories]
+# Each ignore was approved by the owner. Remove it when the note's condition is met.
+ignore = [
+  { id = "RUSTSEC-2023-0071", reason = "rsa (Marvin timing attack) is pulled in by opendal-service-ghac's hard dependency on opendal-service-azblob (reqsign-azure-storage) and reqsign-core; hoard never uses Azure or RSA signing, and no opendal feature turns it off. Remove when opendal drops rsa or rsa ships a fix." },
+  { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained (no vulnerability); pulled in by aws-smithy-http, aws-smithy-runtime and aws-smithy-types (aws-sdk-s3). Remove when the AWS SDK stops using it." },
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (no vulnerability); a direct dependency of hoard (clock only). Remove when hoard moves to another time crate or chrono is maintained again." },
+]
