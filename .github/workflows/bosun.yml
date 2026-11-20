@@ -75,6 +75,10 @@ jobs:
       sha256: ${{ steps.bin.outputs.sha256 }}
       # The gates the required check's job runs; empty: none (an edit, docs only, own_ci).
       pr_gates: ${{ steps.gates.outputs.pr_gates }}
+      # The ts-pnpm stack directories (step `ts-pnpm stack paths`).
+      ts_path: ${{ steps.stack.outputs.path }}
+      ts_paths: ${{ steps.stack.outputs.paths }}
+      ts_lock: ${{ steps.stack.outputs.lock }}
       rust: ${{ steps.toolchain.outputs.channel }}
       rust_file: ${{ steps.toolchain.outputs.file }}
     steps:
@@ -209,6 +213,49 @@ jobs:
             mkdir -p -- "$(dirname -- "$p")"
             git show "$BASE:$p" > "$p"
           done
+      # ts-pnpm stacks: their directories come from the base's .bosun/bosun.toml, where the gates
+      # run (an owner may have moved a stack since the render), never from the render alone, and
+      # nothing is created in the checkout. `path`: the first with a pnpm-lock.yaml (its
+      # packageManager names pnpm); `lock`: true when one has a lockfile (none: a new repo).
+      - if: steps.plan.outputs.work == 'true'
+        name: ts-pnpm stack paths
+        id: stack
+        run: |
+          # The ts-pnpm stacks of .bosun/bosun.toml (the base's here: the gates run in them).
+          paths=""; first=""; sect=""; p=""; prof=""
+          cfg=.bosun/bosun.toml; [ -f "$cfg" ] || cfg=/dev/null
+          top="$(pwd -P)"
+          add() {
+            if [ "$sect" = stack ] && [ "$prof" = ts-pnpm ]; then
+              p="${p:-.}"
+              if ! [[ "$p" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$p" == /* ]] || [[ "/$p/" == */../* ]]; then
+                echo "::error::.bosun/bosun.toml: stack path '$p' must be a plain relative path"; exit 1
+              fi
+              case "$(realpath -m -- "$p")" in
+                "$top"|"$top"/*) ;;
+                *) echo "::error::.bosun/bosun.toml: stack path '$p' links outside the checkout"; exit 1 ;;
+              esac
+              paths="$paths $p"
+              if [ -z "$first" ] && [ -f "$p/pnpm-lock.yaml" ]; then first="$p"; fi
+            fi
+            p=""; prof=""
+          }
+          q="[\"']"; v="[^\"']*"; w='[[:space:]]*'
+          while IFS= read -r l || [ -n "$l" ]; do
+            if [[ "$l" =~ ^$w\[ ]]; then
+              add
+              if [[ "$l" =~ ^$w\[\[${w}stack$w\]\]$w(#.*)?$ ]]; then sect=stack; else sect=""; fi
+            elif [[ "$l" =~ ^$w(path|profile)$w=$w$q($v)$q$w(#.*)?$ ]]; then
+              if [ "${BASH_REMATCH[1]}" = path ]; then p="${BASH_REMATCH[2]}"; else prof="${BASH_REMATCH[2]}"; fi
+            fi
+          done < "$cfg"
+          add
+          paths="${paths# }"
+          if [ -z "$paths" ] && grep -q ts-pnpm "$cfg"; then
+            echo "::warning::.bosun/bosun.toml names ts-pnpm, but no [[stack]] table with plain path = \"...\" and profile = \"ts-pnpm\" lines was read (inline tables and quoted keys are not supported): the pnpm steps are skipped"
+          fi
+          if [ -n "$first" ]; then lock=true; else lock=false; fi
+          { echo "paths=$paths"; echo "path=$first"; echo "lock=$lock"; } >> "$GITHUB_OUTPUT"
       # rust stack: one toolchain install. With a rust-toolchain(.toml) in rust_path or a parent
       # up to the repo root, `rustup toolchain install` installs what it names. Without one, the
       # old pin (docs/setup-script.sh has none: it skips Rust without the file): a bare
@@ -286,25 +333,31 @@ jobs:
       # ts-pnpm stack, for the deps gate's `pnpm audit` only: Node 24 and the pnpm release that the
       # base's package.json `packageManager` names (the PR's while the base names none), an exact
       # version 9 or later from the registry, never a path, URL or range. No install, no cache. Skipped
-      # while the stack has no lockfile yet (a new repo).
+      # while no stack has a lockfile yet (a new repo).
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        if: steps.plan.outputs.work == 'true' && steps.plan.outputs.setup == 'true' && hashFiles('./pnpm-lock.yaml') != ''
+        if: steps.plan.outputs.work == 'true' && steps.plan.outputs.setup == 'true' && steps.stack.outputs.lock == 'true'
         with:
           node-version: 24
-      - if: steps.plan.outputs.work == 'true' && steps.plan.outputs.setup == 'true' && hashFiles('./pnpm-lock.yaml') != ''
+      - if: steps.plan.outputs.work == 'true' && steps.plan.outputs.setup == 'true' && steps.stack.outputs.lock == 'true'
         name: pnpm for the audit
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          TS_PATH: ${{ steps.stack.outputs.path }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           case "$BASE" in ""|0000000000000000000000000000000000000000) BASE="$GITHUB_SHA";; esac
+          # A push to the default branch is merged: deps reads its own manifests, so its pnpm too.
+          if [ "$EVENT" = push ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then BASE="$GITHUB_SHA"; fi
           pm() { python3 -I -c 'import json, sys; d = json.load(sys.stdin); v = d.get("packageManager", "") if isinstance(d, dict) else ""; print(v if isinstance(v, str) else "!")'; }
-          v="$(git show "$BASE:./package.json" 2>/dev/null | pm || true)"
-          if [ -z "$v" ]; then v="$(pm < "./package.json" || true)"; fi
+          v="$(git show "$BASE:$TS_PATH/package.json" 2>/dev/null | pm || true)"
+          if [ -z "$v" ]; then v="$(pm < "$TS_PATH/package.json" || true)"; fi
           # pnpm@x.y.z (9 or later: older releases read other config files), with an optional
           # +sha hash (the registry checks the tarball).
           v="${v%%+*}"
           [[ "$v" =~ ^pnpm@(9|[1-9][0-9]+)\.[0-9]+\.[0-9]+$ ]] || {
-            echo "::error::./package.json: packageManager must name pnpm@x.y.z (9 or later), not '$v'"
+            echo "::error::$TS_PATH/package.json: packageManager must name pnpm@x.y.z (9 or later), not '$v'"
             exit 1
           }
           cd "$RUNNER_TEMP"
@@ -355,6 +408,9 @@ jobs:
           BOSUN_PR_BODY: ${{ github.event.pull_request.body }}
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          TS_PATHS: ${{ steps.stack.outputs.paths }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           bosun="$RUNNER_TEMP/bin/bosun"
           GATES="${ONLY:-$GATES}"
@@ -376,40 +432,52 @@ jobs:
             # test-integrity has read the PR's manifests. From here pnpm reads only the base's
             # config: `pnpm audit` reads the PR's pnpm-lock.yaml as data, and every package.json
             # and pnpm-workspace.yaml (where a PR could name a pnpmfile, config dependencies or
-            # any pnpm setting) is the base's; one the base lacks is deleted, and a stack root
-            # package.json the base lacks (a PR that adds the stack) is {}. No file is written
+            # any pnpm setting) is the base's; one the base lacks is deleted. A ts-pnpm stack
+            # (step `ts-pnpm stack paths`) with a lockfile but no package.json left (a PR that
+            # adds the stack) gets a `{}` stand-in for the audit only: it is removed right after
+            # deps, so no created file reaches a later gate. No file is written
             # through a directory link that leaves the checkout. Also when the PR has no
             # lockfile: what pnpm reads never depends on the PR. So a PR's change to these
-            # (auditConfig too) applies after it merges.
+            # (auditConfig too) applies after it merges: a push to the default branch is merged,
+            # so there deps reads the pushed commit's own copies.
             if [ "$g" = deps ]; then
-              pat='(^|/)package\.json$|(^|/)pnpm-workspace\.ya?ml$'
-              changed="$(git diff --name-only -z "$BASE" HEAD | { grep -zE "$pat" || true; } | tr '\0' ' ')"
-              if [ -n "$changed" ]; then
-                echo "::notice::this change edits ${changed}; deps (pnpm audit) uses the base's copies (they apply after merge)"
-              fi
-              git ls-tree -r -z --name-only HEAD | { grep -zE "$pat" || true; } | while IFS= read -r -d '' p; do
-                rm -rf -- "$p"
-              done
               top="$(pwd -P)"
-              git ls-tree -r -z --name-only "$BASE" | { grep -zE "$pat" || true; } | while IFS= read -r -d '' p; do
-                case "$(realpath -m -- "$(dirname -- "$p")")" in
-                  "$top"|"$top"/*) ;;
-                  *) echo "::error::$p: its directory links outside the checkout"; exit 1 ;;
-                esac
-                mkdir -p -- "$(dirname -- "$p")"
-                git show "$BASE:$p" > "$p"
-              done
-              # Only for a stack directory in the checkout (a new repo may have none yet).
-              if [ -d "." ] && [ ! -e "./package.json" ]; then
-                case "$(realpath -m -- ".")" in
-                  "$top"|"$top"/*) echo '{}' > "./package.json" ;;
-                esac
+              if [ "$EVENT" = push ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                echo "deps (pnpm audit) reads this merged commit's package.json and pnpm-workspace.yaml"
+              else
+                pat='(^|/)package\.json$|(^|/)pnpm-workspace\.ya?ml$'
+                changed="$(git diff --name-only -z "$BASE" HEAD | { grep -zE "$pat" || true; } | tr '\0' ' ')"
+                if [ -n "$changed" ]; then
+                  echo "::notice::this change edits ${changed}; deps (pnpm audit) uses the base's copies (they apply after merge)"
+                fi
+                git ls-tree -r -z --name-only HEAD | { grep -zE "$pat" || true; } | while IFS= read -r -d '' p; do
+                  rm -rf -- "$p"
+                done
+                git ls-tree -r -z --name-only "$BASE" | { grep -zE "$pat" || true; } | while IFS= read -r -d '' p; do
+                  case "$(realpath -m -- "$(dirname -- "$p")")" in
+                    "$top"|"$top"/*) ;;
+                    *) echo "::error::$p: its directory links outside the checkout"; exit 1 ;;
+                  esac
+                  mkdir -p -- "$(dirname -- "$p")"
+                  git show "$BASE:$p" > "$p"
+                done
               fi
+              stand=""
+              for d in $TS_PATHS; do
+                if [ -f "$d/pnpm-lock.yaml" ] && [ ! -e "$d/package.json" ]; then
+                  case "$(realpath -m -- "$d")" in
+                    "$top"|"$top"/*) echo '{}' > "$d/package.json"; stand="$stand $d/package.json" ;;
+                    *) echo "::error::$d: links outside the checkout"; exit 1 ;;
+                  esac
+                fi
+              done
             fi
             echo "::group::bosun gate $g"
             # Defence in depth: the pinned bosun, unchanged since step bin.
             echo "$BOSUN_SHA256  $bosun" | sha256sum -c --quiet || { echo "::error::$bosun changed"; exit 1; }
             "$bosun" gate "$g" $all || { echo "::error::gate $g failed; later gates did not run"; exit 1; }
+            for f in ${stand:-}; do rm -f -- "$f"; done
+            stand=""
             echo "::endgroup::"
           done
           echo "pr_gates=${later# }" >> "$GITHUB_OUTPUT"
@@ -517,20 +585,26 @@ jobs:
       # Node 24, pnpm from package.json `packageManager`, the Turborepo cache through hoard. A
       # plain install: the PR's install scripts run here, after bosun-trusted passed.
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        if: needs.bosun-trusted.outputs.pr_gates != '' && hashFiles('./pnpm-lock.yaml') != ''
+        if: needs.bosun-trusted.outputs.pr_gates != '' && needs.bosun-trusted.outputs.ts_lock == 'true'
         with:
-          package_json_file: ./package.json
+          package_json_file: ${{ needs.bosun-trusted.outputs.ts_path }}/package.json
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        if: needs.bosun-trusted.outputs.pr_gates != '' && hashFiles('./pnpm-lock.yaml') != ''
+        if: needs.bosun-trusted.outputs.pr_gates != '' && needs.bosun-trusted.outputs.ts_lock == 'true'
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: ./pnpm-lock.yaml
-      - if: needs.bosun-trusted.outputs.pr_gates != '' && hashFiles('./pnpm-lock.yaml') != ''
-        working-directory: .
-        run: pnpm install --frozen-lockfile
+          cache-dependency-path: ${{ needs.bosun-trusted.outputs.ts_path }}/pnpm-lock.yaml
+      # Each ts-pnpm stack of the base's .bosun/bosun.toml that has a lockfile.
+      - if: needs.bosun-trusted.outputs.pr_gates != '' && needs.bosun-trusted.outputs.ts_lock == 'true'
+        name: pnpm install
+        env:
+          TS_PATHS: ${{ needs.bosun-trusted.outputs.ts_paths }}
+        run: |
+          for d in $TS_PATHS; do
+            if [ -f "$d/pnpm-lock.yaml" ]; then (cd "$d" && pnpm install --frozen-lockfile); fi
+          done
       - uses: keelstackhq/hoard@4a6d185fb73af3d973eaa256a88bc0d02c68b63a # v0.6.1
-        if: needs.bosun-trusted.outputs.pr_gates != '' && hashFiles('./pnpm-lock.yaml') != ''
+        if: needs.bosun-trusted.outputs.pr_gates != '' && needs.bosun-trusted.outputs.ts_lock == 'true'
       # The gates bosun-trusted left (fmt, lint, test), in order; the first failure stops the job.
       - if: needs.bosun-trusted.outputs.pr_gates != ''
         name: bosun gates
