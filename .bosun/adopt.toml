@@ -1,5 +1,5 @@
 # Written by `bosun adopt`; `bosun uninstall` reads it. Edit by hand only to drop a file from adopt's care.
-bosun_version = "0.20.0"
+bosun_version = "0.21.0"
 labels = ["bosun:halt", "bosun:registry", "bosun:state/planned", "bosun:state/ready", "bosun:state/claimed", "bosun:state/building", "bosun:state/review", "bosun:state/fixing", "bosun:state/queued", "bosun:state/merged", "bosun:state/blocked", "bosun:state/needs-human"]
 dirs = [".bosun", "governance"]
 registry_issue = 39
@@ -30,11 +30,11 @@ hash = "2490672ebd27e224"
 
 [[file]]
 path = ".bosun/version"
-hash = "096e006cc6e7ab8f"
+hash = "629404634b0b0ff6"
 
 [[file]]
 path = ".github/workflows/bosun.yml"
-hash = "8934cf0abfa0168f"
+hash = "d9459dcfd8d11e55"
 
 [[file]]
 path = ".github/workflows/main-health.yml"
@@ -50,11 +50,11 @@ hash = "f3154bc07b350d73"
 
 [[file]]
 path = ".github/workflows/verdict.yml"
-hash = "050dceb41ed22449"
+hash = "b4e0d85933ef6073"
 
 [[file]]
 path = "docs/setup-script.sh"
-hash = "7fb441f4f2fc3660"
+hash = "730ae3f95a90fc49"
 
 [[file]]
 path = "governance/owners.toml"

@@ -4,7 +4,8 @@ name: verdict
 # Posts the required `review-verdict` status from a verdict comment (spec §7). Cloud sessions
 # cannot write commit statuses, so the reviewer runs `bosun verdict comment` and this workflow
 # runs `bosun verdict apply`, which checks the comment (unedited, by a member, on its PR, for the
-# current head) before it posts the status.
+# current head) before it posts the status. A bot listed in `[approvals] verdict_bots` needs no
+# marker: a Bot comment with "head_sha" and a ```json fence runs it too, and `apply` refuses others neutrally.
 #
 # issue_comment runs this file from the default branch. The job never checks out or runs PR
 # code: it installs the bosun release pinned on the default branch and reads the PR through the
@@ -19,7 +20,8 @@ on:
 concurrency:
   group: >-
     verdict-${{ github.event.issue.number }}-${{
-    !contains(github.event.comment.body, '<!-- bosun:verdict -->') && github.run_id || 'apply' }}
+    !(contains(github.event.comment.body, '<!-- bosun:verdict -->') ||
+    (github.event.comment.user.type == 'Bot' && contains(github.event.comment.body, '"head_sha"') && contains(github.event.comment.body, '```json'))) && github.run_id || 'apply' }}
   cancel-in-progress: false
 
 # Least privilege: statuses for the verdict; pull-requests: write for the verdict record comment
@@ -34,7 +36,8 @@ permissions:
 jobs:
   verdict:
     if: >-
-      github.event.issue.pull_request && contains(github.event.comment.body, '<!-- bosun:verdict -->')
+      github.event.issue.pull_request && (contains(github.event.comment.body, '<!-- bosun:verdict -->') ||
+      (github.event.comment.user.type == 'Bot' && contains(github.event.comment.body, '"head_sha"') && contains(github.event.comment.body, '```json')))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
